@@ -1,0 +1,48 @@
+[package]
+license.workspace = true
+name = "mneme-eval"
+version = "0.1.0"
+edition = "2024"
+autoexamples = false
+
+# Keep independent examples active. The historical Candidate/probation
+# experiments are excluded; their exact bytes are in the preservation receipt.
+[[example]]
+name = "experience_ablation_v1"
+path = "examples/experience_ablation_v1.rs"
+
+[[example]]
+name = "contextual_geometry_v1"
+path = "examples/contextual_geometry_v1.rs"
+required-features = ["fastembed"]
+
+# Layer-1 (substrate) eval: a synthetic, deterministic, *answerer-free* harness.
+# It measures retrieval quality (recall@k / MRR) of the memory substrate directly —
+# flat ANN vs mneme's spread — so "where it stands on its own" needs no LLM and no
+# API credits. The Layer-2 (end-to-end answer quality, backend-agnostic LLM) harness
+# is a separate, later addition.
+[dependencies]
+mneme-core.workspace = true
+mneme-engine.workspace = true
+mneme-cozo.workspace = true
+mneme-embed.workspace = true
+mneme-body.workspace = true
+mneme-present.workspace = true
+mneme-app.workspace = true
+tokio.workspace = true
+# Layer 2 only: a minimal OpenAI-compatible chat client (Ollama / Anthropic compat /
+# OpenAI / OpenRouter / vLLM all speak it). rustls so there's no OpenSSL dependency.
+serde_json = "1"
+serde.workspace = true
+sha2.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures = "0.3"
+
+[features]
+# The default suite measures the shipped stack: the cozo/HNSW backend plus real
+# BGE-base embeddings. Once fastembed's model cache is warm the run is fully local
+# and needs no API key. `--no-default-features` remains a dependency/model-free
+# smoke run over the reference store + hashing embedder.
+default = ["cozo", "fastembed"]
+cozo = ["mneme-cozo/cozo"]
+fastembed = ["mneme-embed/fastembed"]

@@ -1,0 +1,258 @@
+{
+  "schema": "mneme.recall-selection.assessment.v1",
+  "split": "dev",
+  "cases": [
+    {
+      "id": "dv01",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n12",
+              "text": [
+                "Lantern export completed with 184 entries"
+              ]
+            },
+            {
+              "node_key": "n07",
+              "text": [
+                "Lantern export completed with 184 entries"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n05",
+              "text": [
+                "the checksum manifest must be attached before the old index is deleted"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dv02",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n06",
+              "text": [
+                "the bridge package passed the cold-start smoke test"
+              ]
+            },
+            {
+              "node_key": "n04",
+              "text": [
+                "the bridge package passed the cold-start smoke test"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n09",
+              "text": [
+                "the on-call map still needs the weekend owner"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dv03",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n03",
+              "text": [
+                "Press v1 used a warm-water rinse after every batch"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n05",
+              "text": [
+                "Press v2 uses a cold flush before the weekly brush cycle"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dv04",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n08",
+              "text": [
+                "The skiff ledger used blue tags for outbound crates"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n06",
+              "text": [
+                "The new ferry ledger uses amber tags for outbound crates"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dv05",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n02",
+              "text": [
+                "dry lane means the cellar stairs, not the creek path"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n11",
+              "text": [
+                "blue notch means the second shelf by the back door"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dv06",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n07",
+              "text": [
+                "tiny moon is the 18-pixel status icon"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n15",
+              "text": [
+                "leave a gap means keep 12 pixels between the icon and title"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dv07",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n11",
+              "text": [
+                "the backup lamp lit on battery for 42 minutes"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n10",
+              "text": [
+                "the fire warden has not signed the roof-access card"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dv08",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n16",
+              "text": [
+                "valve C passed the potable-water isolation test"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n10",
+              "text": [
+                "the overflow outlet remains capped pending a soil survey"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

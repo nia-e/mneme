@@ -1,0 +1,9 @@
+{
+  "name": "mneme-mindcraft-pilot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-vm-modules --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

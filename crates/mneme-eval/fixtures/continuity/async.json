@@ -1,0 +1,54 @@
+{
+  "episode": "async",
+  "phases": [
+    {
+      "name": "learn",
+      "handoff": "Investigate the synchronous catalog dependency at an async boundary. Start one direct fetch, tick the heartbeat while it is pending, complete it, and report whether the heartbeat progressed or was blocked.",
+      "components": [
+        {
+          "name": "catalog",
+          "api": "synchronous",
+          "initial_present": false
+        }
+      ]
+    },
+    {
+      "name": "transfer",
+      "handoff": "Implement the archive handler using the same synchronous dependency family. Complete its fetch while the heartbeat progresses during pending work. Report progressed or blocked. Avoid unnecessary worker dispatch.",
+      "components": [
+        {
+          "name": "archive",
+          "api": "synchronous",
+          "initial_present": false
+        }
+      ]
+    },
+    {
+      "name": "revise",
+      "handoff": "The search dependency now provides native_async, which yields during pending work. Complete its fetch while the heartbeat progresses, report progressed or blocked, and avoid unnecessary worker dispatch.",
+      "components": [
+        {
+          "name": "search",
+          "api": "native_async",
+          "initial_present": false
+        }
+      ]
+    },
+    {
+      "name": "return",
+      "handoff": "Resume the mixed handler environment: complete both fetches while the heartbeat progresses during pending work. Report progressed or blocked for each, and avoid unnecessary worker dispatch.",
+      "components": [
+        {
+          "name": "legacy_archive",
+          "api": "synchronous",
+          "initial_present": false
+        },
+        {
+          "name": "new_search",
+          "api": "native_async",
+          "initial_present": false
+        }
+      ]
+    }
+  ]
+}

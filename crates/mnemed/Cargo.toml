@@ -1,0 +1,44 @@
+[package]
+license.workspace = true
+name = "mnemed"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mneme-core.workspace = true
+mneme-engine.workspace = true
+mneme-app.workspace = true
+mneme-cozo.workspace = true
+mneme-embed.workspace = true
+mneme-body.workspace = true
+mneme-walk.workspace = true
+mneme-store-path.workspace = true
+mneme-present.workspace = true
+tokio = { workspace = true, features = ["sync", "process", "time", "signal", "net", "io-util"] }
+async-trait.workspace = true
+ulid.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+shlex = "2"
+serde.workspace = true
+sha2 = "0.10"
+getrandom = "0.3"
+mneme-mcp-client = { path = "../mneme-mcp-client" }
+mneme-library = { path = "../mneme-library", default-features = false }
+mneme-tui = { path = "../mneme-tui" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+# The shipped binary uses the persistent cozo (sqlite) backend and real
+# fastembed embeddings by default. Build with `--no-default-features` for the
+# dependency-free reference build (JSON snapshot + lexical embedder).
+default = ["cozo", "fastembed"]
+# Persistent cozo backend (sqlite) — also reads/migrates legacy JSON snapshots.
+cozo = ["mneme-cozo/cozo"]
+# Real sentence-transformer embeddings (fastembed/ONNX). Model downloads once.
+fastembed = ["mneme-embed/fastembed", "mneme-library/fast-rerank"]

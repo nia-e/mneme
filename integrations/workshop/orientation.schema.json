@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bounded workshop orientation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "task",
+    "effort",
+    "next_wake_seconds",
+    "replies"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "rest",
+        "work",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "task": {
+      "type": "string",
+      "maxLength": 4000
+    },
+    "effort": {
+      "type": "string",
+      "enum": [
+        "brief",
+        "normal",
+        "deep",
+        "maximal"
+      ]
+    },
+    "next_wake_seconds": {
+      "type": "integer",
+      "minimum": 900,
+      "maximum": 86400
+    },
+    "replies": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "event_id",
+          "text"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      }
+    }
+  }
+}

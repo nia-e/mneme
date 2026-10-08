@@ -1,0 +1,31 @@
+[package]
+license.workspace = true
+name = "mneme-cozo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mneme-core.workspace = true
+mneme-store-path = { workspace = true, optional = true }
+async-trait.workspace = true
+unordered-pair.workspace = true
+ulid.workspace = true
+serde.workspace = true
+serde_json = "1"
+sha2.workspace = true
+
+# The real backend (CozoStore) lives behind this feature, off by default so the
+# workspace builds with zero heavy deps. We use **mnestic** — a maintained fork of
+# the (now-dead) cozo — whose lib is still named `cozo`, so the adapter code is
+# unchanged. `storage-sqlite` gives the persistent engine (`CozoStore::open`),
+# linking system libsqlite3, no C toolchain needed (RocksDB, with the bigger
+# concurrency wins, is a future opt-in that would).
+mnestic = { version = "0.13.0", default-features = false, features = ["storage-sqlite"], optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+cozo = ["dep:mnestic", "dep:tokio", "dep:mneme-store-path"]
+
+[dev-dependencies]
+tokio.workspace = true
+mnestic = { version = "0.13.0", default-features = false, features = ["storage-sqlite", "test-hooks"] }

@@ -1,0 +1,52 @@
+{
+  "schema": "mneme.review-ledger.v1",
+  "artifact": {
+    "path": "__REVIEW_PATH__",
+    "artifact_commit": "__FULL_COMMIT__",
+    "git_blob_sha256": "__GIT_BLOB_SHA256__"
+  },
+  "response": {
+    "path": "__COUNTER_REPORT_PATH__",
+    "response_commit": "__FULL_COMMIT__",
+    "git_blob_sha256": "__GIT_BLOB_SHA256__"
+  },
+  "reviewed_commit": "__FULL_REVIEWED_COMMIT__",
+  "source_findings": [
+    {
+      "id": "F1",
+      "locator": {
+        "literal": "__EXACT_ONCE_SOURCE_HEADING__",
+        "literal_sha256": "__SHA256_OF_LITERAL_UTF8__"
+      }
+    }
+  ],
+  "entries": [
+    {
+      "finding_id": "F1",
+      "disposition": "confirmed",
+      "closure_tier": "source_proof",
+      "summary": "__DIRECT_VERDICT__",
+      "response_locator": {
+        "literal": "__EXACT_ONCE_RESPONSE_HEADING__",
+        "literal_sha256": "__SHA256_OF_LITERAL_UTF8__"
+      },
+      "evidence": [
+        {
+          "role": "source_proof",
+          "path": "__REPOSITORY_RELATIVE_PATH__",
+          "commit": "__FULL_COMMIT__",
+          "git_blob_sha256": "__GIT_BLOB_SHA256__",
+          "locator": {
+            "literal": "__EXACT_ONCE_EVIDENCE_LITERAL__",
+            "literal_sha256": "__SHA256_OF_LITERAL_UTF8__"
+          },
+          "description": "__WHAT_THIS_EXACT_LOCATOR_PROVES__"
+        }
+      ],
+      "follow_up": {
+        "owner": "__NAMED_OWNER_OR_PROJECT_GOAL__",
+        "action": "__CONCRETE_ACTION_OR_GATE__"
+      }
+    }
+  ]
+}

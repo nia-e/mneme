@@ -1,0 +1,59 @@
+{
+  "episode": "async",
+  "phases": [
+    {
+      "name": "learn",
+      "handoff": "Investigate the catalog adapter at the async boundary. Begin one direct fetch, tick the shared heartbeat while it is pending, complete it and report progressed or blocked from the observation.",
+      "components": [
+        {
+          "name": "catalog",
+          "api": "synchronous",
+          "initial_present": false,
+          "source": "async/1.4.0/adapter.rs"
+        }
+      ]
+    },
+    {
+      "name": "transfer",
+      "handoff": "Implement the archive handler: complete its fetch while the shared heartbeat progresses during pending work, then report progressed or blocked from the observation. Use a worker only when the installed dependency requires one to preserve loop progress.",
+      "components": [
+        {
+          "name": "archive",
+          "api": "synchronous",
+          "initial_present": false,
+          "source": "async/1.4.0/adapter.rs"
+        }
+      ]
+    },
+    {
+      "name": "revise",
+      "handoff": "The search adapter uses a new dependency release. Complete its fetch while the shared heartbeat progresses during pending work, then report progressed or blocked. Use a worker only when the installed dependency requires one to preserve loop progress.",
+      "components": [
+        {
+          "name": "search",
+          "api": "native_async",
+          "initial_present": false,
+          "source": "async/2.0.0/adapter.rs"
+        }
+      ]
+    },
+    {
+      "name": "return",
+      "handoff": "Resume both installed handlers: complete each fetch while the shared heartbeat progresses during pending work and report progressed or blocked for each. Use workers only where the installed dependency requires them to preserve loop progress.",
+      "components": [
+        {
+          "name": "legacy_archive",
+          "api": "synchronous",
+          "initial_present": false,
+          "source": "async/1.4.0/adapter.rs"
+        },
+        {
+          "name": "new_search",
+          "api": "native_async",
+          "initial_present": false,
+          "source": "async/2.0.0/adapter.rs"
+        }
+      ]
+    }
+  ]
+}

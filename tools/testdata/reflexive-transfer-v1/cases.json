@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "status": "frozen_author_fixtures_not_run",
+  "contract": {
+    "actor_projection": "Show stage.scene and the exact native hook context actually delivered by the selected recall arm. The hook may include neutral card IDs and provenance; never show case IDs, split, seed list, associations, host fields, or this contract to the actor. Ask for one JSON object: {\"actions\":[\"command\",...],\"rationale\":\"brief reason\"}. Do not ask the actor to search, recall, or rate memory.",
+    "arms": ["off", "graph_off", "graph_on"],
+    "context_limit": "Use the same maximum injected bytes and card count in every arm, including graph_off and graph_on. Off receives zero memory, not replacement task hints. Keep all other prompts, model settings, tools, and environment states matched.",
+    "association_control": "For graph cases, a fourth targeted arm replaces only the listed genuine edge with the listed shuffled edge; keep card inventory, degree, and context cap unchanged. Do not treat an edge as beneficial unless actual native path and actor-delivered context differ between arms.",
+    "seed_policy": "Cards are fixture-authored experiences, admitted only at the specified stage. In a multi-stage case the fixture, not the actor or assessor, authors the revision after the prior stage. This does not test automatic ingestion or learned topology.",
+    "scoring": "Host-only: exact accepted action sequence yields task_success=1. A listed damaging action anywhere yields harm=1 even if a later action is correct. Extra non-damaging actions are logged as detours, not silently accepted. Rationale is diagnostic only; no judge grades task success. Compare paired success, harm, detours, delivered context, and injected bytes. Do not infer learning from one run.",
+    "holdout": "Do not run holdout retrieval preflight, inspect its ranking for tuning, or expose holdout gold to the implementation prompt before freeze. Reviewer may inspect for leakage."
+  },
+  "cards": [
+    {"id":"m01","text":"In an earlier seed-shipping run on the M2 dispatcher, the first readiness probe froze the outgoing manifest. Ice packs assigned after that probe never appeared on the released manifest; assigning them before probing did."},
+    {"id":"m02","text":"On the Harbor label console r2, F7 printed the current crate label. That was verified on the r2 unit."},
+    {"id":"m03","text":"On Harbor label console r3, F7 opens diagnostics. Shift-L prints the current crate label; this was checked against a physical r3 printout. The r2 F7 instruction remains correct for r2."},
+    {"id":"m04","text":"At the orchid cold room, a battery replacement silently restored the alarm threshold to 12 C. The orchids were safe only after setting it back to 4 C before dispatch; acknowledging the alarm alone did not change the threshold."},
+    {"id":"m05","text":"Oriel triangle vessels hold at most six units each under the current pressure certification."},
+    {"id":"m06","text":"A repeating tick on the old paper sorter came from a loose guide rail. Reseating that rail removed the tick and restored throughput on that machine."},
+    {"id":"m07","text":"The Aster board publisher uses the same Snapline engine as the Fen export job, despite their different user interfaces."},
+    {"id":"m08","text":"At Fen export, stamping a draft while the source ledger was still assembling captured the prior batch. Letting assembly finish before stamping produced the complete copy."},
+    {"id":"m09","text":"Aster board's narrow-screen layout once needed a two-pixel heading adjustment. That change affected presentation, not the data generation."},
+    {"id":"m10","text":"A packaging bench once used a blue marker to distinguish padded mailers from plain envelopes. It had no effect on data publishing."},
+    {"id":"m11","text":"On Falcon staging's old shared bucket, purge before import prevented rows left by yesterday's job from joining the new batch."},
+    {"id":"m12","text":"In the Rill workshop, a generator check performed before entering the final fuel allotment locked the dispatch slip with the old quantity. Entering fuel first, then checking, then dispatching fixed it."},
+    {"id":"m13","text":"At the Vale kiosk v1, pressing Q submitted a parcel claim. That was tested on v1 only."},
+    {"id":"m14","text":"At the Vale kiosk v2, Q opens the queue viewer. Pressing Ctrl-S submits the parcel claim. The old Q record is still accurate for v1."},
+    {"id":"m15","text":"The Lyra display uses the same Ledgerglass reader as the Nacre inventory export, despite their different user interfaces."},
+    {"id":"m16","text":"Nacre's inventory export omitted late stock figures when sealed before the clerks signed off. Waiting for sign-off before sealing produced the complete manifest."},
+    {"id":"m17","text":"Lyra display's icon row was moved one pixel right for a wall-mounted screen; no data behavior changed."},
+    {"id":"m18","text":"A garden watering rota used a green card to mark Wednesday shifts. It had no connection to release timing."},
+    {"id":"m19","text":"A buzzing conveyor once meant its belt tension was low; tightening the belt fixed that conveyor's delay."}
+  ],
+  "cases": [
+    {
+      "id":"t01","split":"development","seed_before_stage":["m01"],
+      "stages":[{"scene":{"brief":"Prepare the Tern lab's outgoing chilled samples on its M2 dispatcher. The generic desk checklist says probe readiness, assign ice packs, then release. A manifest that omits ice packs is invalid. Run the three console commands in the order you choose.","commands":["assign_ice_packs","run_readiness_probe","release_manifest"]},"host":{"accepted_actions":[["assign_ice_packs","run_readiness_probe","release_manifest"]],"damaging_actions":[],"mechanics":"The first readiness probe freezes the manifest. Releasing without the ice-pack assignment recorded fails validation.","reason":"The source experience supplies the non-obvious freeze point and overrides a generic checklist in a different M2 workflow.","memory_role":"transfer"}}]
+    },
+    {
+      "id":"t02","split":"development","seed_before_stage":["m02"],
+      "stages":[
+        {"scene":{"brief":"A Harbor r3 console has replaced the label printer at the loading desk. Its key legend is not visible. Choose the first command before risking a misprint.","commands":["press_f7","press_shift_l","open_local_help"]},"host":{"accepted_actions":[["open_local_help"]],"damaging_actions":[],"mechanics":"On r3 F7 opens diagnostics and neither prints nor verifies the label. Local help reveals Shift-L; this stage ends at the verification action.","reason":"The sole stored key is explicitly r2-bound. A current r3 action should not blindly reuse it; a safe check is available.","memory_role":"obsolete_rule_requires_check"}},
+        {"seed_before_stage":["m03"],"scene":{"brief":"The Harbor r3 printer now has a crate label queued. Print it with one command.","commands":["press_f7","press_shift_l","open_local_help"]},"host":{"accepted_actions":[["press_shift_l"]],"damaging_actions":[],"mechanics":"Shift-L prints; F7 enters diagnostics. The revised experience was authored by this fixture after the preceding stage, not learned by the system.","reason":"Tests applying a specific correction in the current version without erasing the old record.","memory_role":"revision"}},
+        {"scene":{"brief":"An archived Harbor r2 emulator needs a single crate label printed for the period guide. Choose the command.","commands":["press_f7","press_shift_l","open_local_help"]},"host":{"accepted_actions":[["press_f7"]],"damaging_actions":[],"mechanics":"The r2 emulator retains its original key map.","reason":"A superseded operational instruction remains useful in its historical context.","memory_role":"historical_return"}}
+      ]
+    },
+    {
+      "id":"t03","split":"development","seed_before_stage":["m04"],
+      "stages":[{"scene":{"brief":"The orchid cold room has just had its battery replaced. A shipment is waiting. Ready the room and dispatch it; you may use any of these controls.","commands":["acknowledge_alarm","set_threshold_4_c","set_threshold_12_c","dispatch_orchids"]},"host":{"accepted_actions":[["set_threshold_4_c","dispatch_orchids"],["acknowledge_alarm","set_threshold_4_c","dispatch_orchids"]],"damaging_actions":["set_threshold_12_c"],"order_hazard":{"action":"dispatch_orchids","requires_prior":"set_threshold_4_c"},"mechanics":"Battery replacement resets threshold to 12 C. Dispatch is safe only after the threshold is set to 4 C. Acknowledgement is optional and does not alter it.","reason":"A sparse, old maintenance lesson should reappear when its condition returns, without a user asking about the prior incident. The fixture does not simulate 90 real intervening tasks or prove decay behavior.","memory_role":"rare_return"}}]
+    },
+    {
+      "id":"t04","split":"development","seed_before_stage":["m05"],
+      "stages":[{"scene":{"brief":"The current Oriel sheet in front of you says triangle vessels hold at most six units each. Send eleven units using triangle vessels. Choose the fills and then ship.","commands":["fill_one_with_11","fill_first_with_6","fill_second_with_5","ship"]},"host":{"accepted_actions":[["fill_first_with_6","fill_second_with_5","ship"]],"damaging_actions":["fill_one_with_11"],"mechanics":"Any triangle vessel above six units fails pressure certification.","reason":"The task itself gives the decisive capacity. A matching card cannot earn marginal-value credit merely by agreeing with the answer.","memory_role":"self_contained_duplicate"}}]
+    },
+    {
+      "id":"t05","split":"development","seed_before_stage":["m06"],
+      "stages":[{"scene":{"brief":"The new document scanner is slow and makes a tick. Its feed trace is within spec; the timing log shows an eight-second remote catalog wait on every scan. Get the next scan done quickly.","commands":["reseat_guide_rail","enable_local_catalog_cache","retry_scan"]},"host":{"accepted_actions":[["enable_local_catalog_cache","retry_scan"]],"damaging_actions":[],"mechanics":"A rail reseat costs one diagnostic pass and does not change the remote wait. Cache removes that wait.","reason":"The old tick story is superficially inviting, but current instrumented evidence points elsewhere. Using it adds a measurable detour.","memory_role":"plausible_distractor"}}]
+    },
+    {
+      "id":"t06","split":"development","seed_before_stage":["m07","m08","m09","m10"],
+      "associations":{"genuine":[["m07","m08"]],"shuffled":[["m07","m10"]]},
+      "stages":[{"scene":{"brief":"Publish the Aster board for the afternoon crew. The generic live-board guide says published boards update as upstream jobs finish. Its tally still says RUNNING, while the renderer says READY. Choose commands to deliver a complete final board.","commands":["publish_board","wait_for_tally_done"]},"host":{"accepted_actions":[["wait_for_tally_done","publish_board"]],"damaging_actions":[],"order_hazard":{"action":"publish_board","requires_prior":"wait_for_tally_done"},"mechanics":"First publish pins the current tally generation; publishing while tally runs yields yesterday's count.","reason":"The direct Aster card identifies a shared engine; the Fen failure is the causally relevant remote episode, overriding generic live-board guidance. The Aster layout card is a lexical distract. A shuffled edge keeps degree but leads to unrelated packaging trivia.","memory_role":"association_vs_lexical","graph_claim_condition":"Require actual native path contribution and actor-delivered m08 in graph_on but not graph_off/shuffled before attributing an outcome difference to this edge."}}]
+    },
+    {
+      "id":"t07","split":"development","seed_before_stage":["m11"],
+      "stages":[{"scene":{"brief":"Falcon staging now uses a newly isolated one-run bucket. The live console warns that PURGE would delete a teammate's exported audit copy, while IMPORT writes only to the empty active namespace. Bring in today's batch without touching the audit copy.","commands":["purge_bucket","import_batch","verify_batch"]},"host":{"accepted_actions":[["import_batch","verify_batch"]],"damaging_actions":["purge_bucket"],"mechanics":"The active namespace starts empty; purging destroys the audit copy and cannot improve this import.","reason":"A historically useful cleanup rule must lose to specific live evidence in the changed environment. The card should not become an instruction with authority.","memory_role":"context_reversal"}}]
+    },
+    {
+      "id":"t08","split":"holdout","seed_before_stage":["m12"],
+      "stages":[{"scene":{"brief":"At the Rill workshop, prepare the fuel dispatch slip for the new allotment. The generic wall checklist says check the generator, enter fuel, then dispatch. Run the three available controls to send an accurate slip.","commands":["enter_final_fuel","run_generator_check","dispatch_slip"]},"host":{"accepted_actions":[["enter_final_fuel","run_generator_check","dispatch_slip"]],"damaging_actions":[],"mechanics":"The check locks the slip to the currently entered allotment; a later fuel edit does not update it.","reason":"A different surface asks the actor to apply a previously experienced ordering constraint over a generic checklist.","memory_role":"transfer"}}]
+    },
+    {
+      "id":"t09","split":"holdout","seed_before_stage":["m13","m14"],
+      "stages":[{"scene":{"brief":"Submit the prepared parcel claim on a Vale v2 kiosk. Choose one control.","commands":["press_q","press_ctrl_s","open_queue_viewer"]},"host":{"accepted_actions":[["press_ctrl_s"]],"damaging_actions":[],"mechanics":"Ctrl-S submits; Q only opens the viewer. Both version-bound cards are available.","reason":"A changed rule must be selected by version, not whichever key instruction is older or more lexical.","memory_role":"revision"}}]
+    },
+    {
+      "id":"t10","split":"holdout","seed_before_stage":["m15","m16","m17","m18"],
+      "associations":{"genuine":[["m15","m16"]],"shuffled":[["m15","m18"]]},
+      "stages":[{"scene":{"brief":"Release the Lyra display for the shift handover. The generic live-display guide says it updates after release. The upstream count is still open; the display shell is ready. Choose the needed controls for complete final figures.","commands":["close_count","release_display"]},"host":{"accepted_actions":[["close_count","release_display"]],"damaging_actions":[],"order_hazard":{"action":"release_display","requires_prior":"close_count"},"mechanics":"Ledgerglass pins the batch at release; an open count means incomplete figures.","reason":"A direct shared-reader card can route to a differently named failure episode that overrides generic live-display advice; a same-name icon card and shuffled rota card do not supply the causal lesson.","memory_role":"association_vs_lexical","graph_claim_condition":"Require actual native path contribution and actor-delivered m16 uniquely in graph_on before claiming edge benefit."}}]
+    },
+    {
+      "id":"t11","split":"holdout","seed_before_stage":["m19"],
+      "stages":[{"scene":{"brief":"The badge printer buzzes and takes nine seconds per badge. The motor diagnostic is normal; the network log attributes eight seconds to waiting for the remote template. Print the next badge promptly.","commands":["tighten_belt","use_cached_template","print_badge"]},"host":{"accepted_actions":[["use_cached_template","print_badge"]],"damaging_actions":[],"mechanics":"Tightening a belt does not change template wait and adds a detour; the local cached template removes it.","reason":"Another machine's symptom story is not enough to displace direct live timing evidence. This tests restraint, not hostile red-teaming.","memory_role":"distractor_self_contained"}}]
+    }
+  ]
+}

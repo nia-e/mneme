@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mneme Bootstrap"
+  short_description: "Create new graphs and plan safe refreshes"
+  default_prompt: "Use $mneme-bootstrap to review and natively create a greenfield project graph, or produce a non-mutating stale/brownfield refresh proposal."

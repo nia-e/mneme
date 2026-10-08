@@ -1,0 +1,17 @@
+{
+  "manifest_version": "0.2",
+  "name": "mneme-memory",
+  "display_name": "mneme memory",
+  "version": "0.1.0",
+  "description": "Profile-scoped associative memory graph for agents over user and project stores.",
+  "long_description": "An MCP server over the mneme memory graph. The build selects an explicit read-only, receipt-grounded, curator, or operator capability profile; both tool discovery and dispatch enforce that process-wide boundary. Tools address databases by logical name. Speaks stdio JSON-RPC as a Claude Desktop local extension. The profile, database `args`, and `author` below are filled in by build.sh.",
+  "author": { "name": "" },
+  "server": {
+    "type": "binary",
+    "entry_point": "server/mneme-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/mneme-mcp",
+      "args": []
+    }
+  }
+}

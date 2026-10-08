@@ -1,0 +1,335 @@
+{
+  "schema": "mneme.episodic-v1.corpus.v1",
+  "synthetic": true,
+  "notice": "Authored synthetic acceptance scenarios, not historical accounts. Rin, Ari, Lantern, Rainmap and the beacon are fictional. Never import this fixture into a live or personal memory store.",
+  "store_scope": "isolated-episodic-v1",
+  "as_of_ms": 1790503200000,
+  "episodes": [
+    {
+      "alias": "e01",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e01",
+        "reference": "fixture://mneme/episodic-v1/e01",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790272800000,
+        "end_ms": 1790273220000
+      },
+      "thread": "lantern-viewer",
+      "summary": "Blank Lantern graph: I suspected the relationships were absent.",
+      "body": "Ari saw dots but no lines in Lantern. I suspected the database had no relationships. We paused before rebuilding anything; I had not checked that explanation.",
+      "links": []
+    },
+    {
+      "alias": "e02",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e02",
+        "reference": "fixture://mneme/episodic-v1/e02",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790273700000,
+        "end_ms": 1790274300000
+      },
+      "thread": "lantern-viewer",
+      "summary": "Lantern search omitted edges; the database still held relationships.",
+      "body": "I inspected the store and found relationships. Search returned nodes without edges, while the renderer could draw links it received. My empty-database explanation was wrong. We needed to load the missing view data, not repair the store.",
+      "links": [
+        {
+          "to": "e01",
+          "kind": "associative",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "alias": "e03",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e03",
+        "reference": "fixture://mneme/episodic-v1/e03",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790276400000,
+        "end_ms": 1790277300000
+      },
+      "thread": "lantern-viewer",
+      "summary": "Capped neighborhood reads restored Lantern links in local use.",
+      "body": "I added capped per-node neighborhood reads. Local checks passed, the change was installed on the laptop, and Ari could see the links. This is the installed approach for now; we have not tested remote latency.",
+      "links": [
+        {
+          "to": "e02",
+          "kind": "associative",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "alias": "e04",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e04",
+        "reference": "fixture://mneme/episodic-v1/e04",
+        "session": "synthetic-beacon",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790276400000,
+        "end_ms": 1790277000000
+      },
+      "thread": "beacon-import",
+      "summary": "Beacon image catalog import paused because its image decoder was unavailable.",
+      "body": "On the beacon, I prepared the image catalog import but stopped because the image decoder was unavailable. Nothing has been imported. The prepared files are still waiting there.",
+      "links": []
+    },
+    {
+      "alias": "e05",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e05",
+        "reference": "fixture://mneme/episodic-v1/e05",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790325000000,
+        "end_ms": 1790325240000
+      },
+      "thread": "lantern-viewer",
+      "summary": "An amreb pause with Ari and the paper kite.",
+      "body": "Ari folded a paper kite while we chose a lovely amreb for the demo. The quiet pause was enjoyable.",
+      "links": []
+    },
+    {
+      "alias": "e06",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e06",
+        "reference": "fixture://mneme/episodic-v1/e06",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790327400000,
+        "end_ms": 1790328900000
+      },
+      "thread": "lantern-viewer",
+      "summary": "A bounded field request replaced slow remote neighborhood reads.",
+      "body": "Remote use exposed the latency cost of repeated neighborhood requests. One bounded field request replaced them, passed local and remote checks, and was installed. The earlier solution worked locally but is no longer our recommendation.",
+      "links": [
+        {
+          "to": "e03",
+          "kind": "associative",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "alias": "e07",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e07",
+        "reference": "fixture://mneme/episodic-v1/e07",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790262000000,
+        "end_ms": 1790263200000
+      },
+      "thread": "rainmap",
+      "summary": "Blank Rainmap roads came from an unloaded tile manifest, not missing survey data.",
+      "body": "In Rainmap, blank roads initially looked like missing survey data. The tile manifest had not loaded. Loading it restored the roads; no survey repair was needed. I am recording this earlier experience after returning to my notes.",
+      "links": []
+    },
+    {
+      "alias": "e08",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e08",
+        "reference": "fixture://mneme/episodic-v1/e08",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "occurrence": {
+        "start_ms": 1790452800000,
+        "end_ms": 1790453520000
+      },
+      "thread": "lantern-viewer",
+      "summary": "Floating Lantern layout is a rough prototype, not an installed change.",
+      "body": "I sketched free-floating positions for Lantern and kept the amber palette Ari and I liked. There is a rough prototype, but no review or installation yet.",
+      "links": [
+        {
+          "to": "e05",
+          "kind": "associative",
+          "weight": 0.4
+        }
+      ]
+    }
+  ],
+  "semantic_notes": [
+    {
+      "alias": "l01",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/l01",
+        "reference": "fixture://mneme/episodic-v1/l01",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "summary": "Lantern currently loads graph links through capped per-node neighborhood reads.",
+      "body": "For the installed local Lantern viewer, fetch a bounded neighborhood for each visible node. This restored visible links in local checks. Remote latency has not yet been exercised.",
+      "active": true,
+      "links": [
+        {
+          "to": "e03",
+          "kind": "derived_from",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "alias": "l02",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/l02",
+        "reference": "fixture://mneme/episodic-v1/l02",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "summary": "Use one bounded field request for Lantern links instead of per-node neighborhood requests.",
+      "body": "The installed local and remote Lantern viewer now loads field relationships in one bounded request. Repeated per-node requests caused remote latency. This replaces the prior loading recommendation, not the principle that incomplete view data differs from an empty store.",
+      "active": true,
+      "links": [
+        {
+          "to": "e06",
+          "kind": "derived_from",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "alias": "l03",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/l03",
+        "reference": "fixture://mneme/episodic-v1/l03",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "summary": "Missing presentation data is not evidence that the underlying records are absent.",
+      "body": "A blank graph or map can reflect an incomplete view. Check whether relationship data or a tile manifest was loaded before repairing the underlying records. Lantern and Rainmap supplied different examples; this is a diagnostic possibility, not proof of a new incident's cause.",
+      "active": true,
+      "links": [
+        {
+          "to": "e02",
+          "kind": "derived_from",
+          "weight": 0.6
+        },
+        {
+          "to": "e07",
+          "kind": "derived_from",
+          "weight": 0.6
+        }
+      ]
+    }
+  ],
+  "editorial_revisions": [
+    {
+      "alias": "e05-r1",
+      "root": "e05",
+      "expected_edition": "e05",
+      "source": {
+        "namespace": "mneme-eval",
+        "key": "episodic-v1/e05-r1",
+        "reference": "fixture://mneme/episodic-v1/e05-r1",
+        "session": "synthetic-laptop",
+        "revision": "authored-v1"
+      },
+      "reason": "Correct the spelling of amber; this is an editorial change, not a new experience.",
+      "occurrence": {
+        "start_ms": 1790325000000,
+        "end_ms": 1790325240000
+      },
+      "thread": "lantern-viewer",
+      "summary": "An amber pause with Ari and the paper kite.",
+      "body": "Ari folded a paper kite while we chose a lovely amber for the demo. The quiet pause was enjoyable.",
+      "links": []
+    }
+  ],
+  "schedule": [
+    {
+      "at_ms": 1790273400000,
+      "op": "append_episode",
+      "alias": "e01"
+    },
+    {
+      "at_ms": 1790274600000,
+      "op": "append_episode",
+      "alias": "e02"
+    },
+    {
+      "at_ms": 1790277600000,
+      "op": "append_episode",
+      "alias": "e03"
+    },
+    {
+      "at_ms": 1790277660000,
+      "op": "append_episode",
+      "alias": "e04"
+    },
+    {
+      "at_ms": 1790277900000,
+      "op": "capture_semantic",
+      "alias": "l01"
+    },
+    {
+      "at_ms": 1790325300000,
+      "op": "append_episode",
+      "alias": "e05"
+    },
+    {
+      "at_ms": 1790329200000,
+      "op": "append_episode",
+      "alias": "e06"
+    },
+    {
+      "at_ms": 1790329500000,
+      "op": "capture_semantic",
+      "alias": "l02"
+    },
+    {
+      "at_ms": 1790329560000,
+      "op": "supersede_semantic",
+      "winner": "l02",
+      "loser": "l01"
+    },
+    {
+      "at_ms": 1790454000000,
+      "op": "append_episode",
+      "alias": "e08"
+    },
+    {
+      "at_ms": 1790499600000,
+      "op": "append_episode",
+      "alias": "e07"
+    },
+    {
+      "at_ms": 1790499900000,
+      "op": "capture_semantic",
+      "alias": "l03"
+    },
+    {
+      "at_ms": 1790500200000,
+      "op": "revise_episode",
+      "alias": "e05-r1"
+    }
+  ]
+}

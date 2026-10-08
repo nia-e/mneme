@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mneme Review Closure"
+  short_description: "Close adversarial reviews with bound evidence"
+  default_prompt: "Use $mneme-review-closure to close every finding in this committed review with evidence."

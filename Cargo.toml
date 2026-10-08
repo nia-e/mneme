@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["vendor/mnestic"]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+ulid = { version = "1.2.1", features = ["serde"] }
+unordered-pair = { version = "0.2.5", features = ["serde"] }
+thiserror = "2"
+async-trait = "0.1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+url = "2.5"
+
+# Internal crates, referenced by path so dependency arrows stay explicit. Domain
+# code points toward `mneme-core`; the tiny store-path crate is infrastructure
+# shared only by process frontends/publication code.
+mneme-core = { path = "crates/mneme-core" }
+mneme-engine = { path = "crates/mneme-engine" }
+mneme-app = { path = "crates/mneme-app" }
+mneme-walk = { path = "crates/mneme-walk" }
+mneme-cozo = { path = "crates/mneme-cozo" }
+mneme-embed = { path = "crates/mneme-embed" }
+mneme-body = { path = "crates/mneme-body" }
+mneme-store-path = { path = "crates/mneme-store-path" }
+mneme-present = { path = "crates/mneme-present" }
+
+[patch.crates-io]
+mnestic = { path = "vendor/mnestic" }

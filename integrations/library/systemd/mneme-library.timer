@@ -1,0 +1,11 @@
+[Unit]
+Description=Attempt Mneme library snapshots every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=mneme-library.service
+
+[Install]
+WantedBy=timers.target

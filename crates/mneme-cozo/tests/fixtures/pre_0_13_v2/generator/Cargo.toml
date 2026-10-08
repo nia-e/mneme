@@ -1,0 +1,11 @@
+[package]
+name = "mneme-pre013-fixture-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mneme-core.workspace = true
+mnestic = { path = "../../vendor/mnestic", default-features = false, features = ["rayon", "storage-sqlite"] }
+serde_json = "1"
+ulid.workspace = true

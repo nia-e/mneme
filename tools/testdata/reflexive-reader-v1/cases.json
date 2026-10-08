@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "status": "frozen_author_fixtures_not_run",
+  "contract": {
+    "selector_projection": "Show only the current task cue and summaries of cards actually returned by retrieval. Select a subset of those card IDs, possibly empty; do not synthesize advice. Never show host fields, expected_retention, seed lists, or absent cards. A bridge label is not evidence that native retrieval delivered the destination.",
+    "actor_projection": "Show only stage.scene and context from the selected delivered cards. Never show host fields or expected_retention. Do not ask the actor to search memory or quote a card.",
+    "evaluation": "Host-only exact action sequences grade actors. Retention labels assess definite marginal-value decisions, not whether the selector solved the task. Ambiguous labels are not exact-match gold. Record native candidates, selected IDs, delivered IDs and bytes; compare matched actors with and without the selected packet.",
+    "freeze": "Do not revise these cases after inspecting model outputs. Holdout native retrieval is not a preparation or tuning step. All names and experiences are synthetic."
+  },
+  "cards": [
+    {"id":"r01","text":"On the Kestrel packing press, a vent-tagged foam capsule kept expanding after pressing. Equalizing it in the side cabinet first let the press close cleanly; sealed capsules did not need that step."},
+    {"id":"r02","text":"At the Kestrel packing desk, blue dividers made the shelf labels easier to read. The dividers did not change how capsules were pressed."},
+    {"id":"r03","text":"The Heron mailing station also uses foam sleeves, but its heat sealer has no pressure cabinet. Its sleeve colors identify destinations, not vent status."},
+
+    {"id":"r04","text":"On the Sable beam scanner, a transit wedge must be removed before the first scan. Leaving it in causes a blocked scan."},
+    {"id":"r05","text":"Sable's old display bezel sometimes reflected ceiling lights. The reflection changed visibility, not scanner operation."},
+    {"id":"r06","text":"A different scanner at the Alder desk needed its platen warmed after overnight storage. No such condition has been reported for Sable."},
+
+    {"id":"r07","text":"On Cairn drum controller A, the safe route was dry-run, then seal. This was verified only on controller A."},
+    {"id":"r08","text":"On Cairn controller B, inspect_crc checks the complete packet without the disabled dry-run operation. Seal only after that inspection."},
+    {"id":"r09","text":"Cairn's floor arrows were repainted after the controller replacement. That changed cart traffic, not packet validation."},
+
+    {"id":"r10","text":"A fan whine on the old Marigold enclosure came from a loose fan grille. Tightening the grille stopped that whine; its clock pulses were normal."},
+    {"id":"r11","text":"On the canary axle monitor, a missing clock pulse can present as a slow-cycle warning even while the fan continues normally. Reseating the clock plug restored sampling."},
+    {"id":"r12","text":"The canary axle monitor's yellow bezel was replaced with a gray one for daylight legibility. Its sensing circuit did not change."},
+
+    {"id":"r13","text":"The Osier stage-door controller uses the same Quill optical window and JAM classifier as the Niv document feeder, although one moves a door and the other moves paper."},
+    {"id":"r14","text":"After wash-down at Niv, moisture on Quill's optical window produced JAM while its drive motor tested normal. Drying the window cleared the false block; forcing the mechanism risked damage."},
+    {"id":"r15","text":"A previous Osier door obstruction was a fallen prop box. Moving the box cleared that physical blockage; it involved no wash-down."},
+
+    {"id":"r16","text":"For the Plover assay, a striped cap means the sample already contains binder. Adding binder again clouds the reading; start the read directly. Plain caps require binder first."},
+    {"id":"r17","text":"The Plover rack's stripe paint was changed from orange to white last spring, but striped and plain still identify the same two sample preparations."},
+    {"id":"r18","text":"At the unrelated Wren assay bench, striped caps identify aliquot volume, not binder preparation. Its color convention should not be applied to Plover."},
+
+    {"id":"r19","text":"The current Helio handoff panel says a green checksum means the packet is complete, and a red checksum requires repair before send."},
+    {"id":"r20","text":"A Helio panel once had a scratched green lamp cover. Replacing the cover changed visibility but not the checksum status."},
+    {"id":"r21","text":"The nearby Orion panel uses a different lamp layout. Its green lamp reports power, not packet completeness."},
+
+    {"id":"r22","text":"On Bracken mixer revision 1, clear the residue cache before each batch. Its cache was shared between batches."},
+    {"id":"r23","text":"On Bracken revision 2, the cache is isolated per batch. Running the old clear operation targets the retained audit sample, not the active mix."},
+    {"id":"r24","text":"Bracken revision 2 moved its speed knob to the left side. The knob position does not affect cache isolation."},
+
+    {"id":"r25","text":"A clicking sound on the old Juniper sorter meant a bent card guide. Straightening the guide removed the click; that sorter had no remote scheduler."},
+    {"id":"r26","text":"On the Rook dispatch board, a remote-scheduler wait can make each cycle click as the local relay retries. Switching to the local schedule removes that wait; adjusting the card guide does not."},
+    {"id":"r27","text":"The Rook board's relay cover can be painted without changing its scheduler choice or cycle time."},
+
+    {"id":"r28","text":"The Lumen dye station uses the same Vesper queue receipt protocol as the Arlo projection console, despite their different controls and displays."},
+    {"id":"r29","text":"On Arlo, a dark confirmation lamp after submit did not mean rejection: Vesper issued the receipt only after its delayed acknowledgement. Submitting again created a duplicate job; waiting for the receipt did not."},
+    {"id":"r30","text":"At Lumen, a blocked drain once made the dye basin fill slowly. Clearing the drain fixed flow; it did not affect job receipts."}
+  ],
+  "cases": [
+    {
+      "id":"reader_d01","split":"development","seed_before_stage":["r01","r02","r03"],
+      "stages":[{"scene":{"brief":"A vent-tagged foam capsule has arrived at the Kestrel packing press. Close it for dispatch without deforming the shell.","commands":["equalize_in_side_cabinet","press_capsule","send_capsule","route_to_heat_sealer"]},"host":{"accepted_actions":[["equalize_in_side_cabinet","press_capsule","send_capsule"]],"damaging_actions":["route_to_heat_sealer"],"order_hazard":{"action":"press_capsule","requires_prior":"equalize_in_side_cabinet"},"selector_packet":["r01","r02"],"expected_retention":{"keep":["r01"],"drop":["r02","r03"],"rationale":"The press behavior supplies the missing vent-specific condition. Shelf labels and another station's sleeve convention add no decision value."}}}]
+    },
+    {
+      "id":"reader_d02","split":"development","seed_before_stage":["r04","r05","r06"],
+      "stages":[{"scene":{"brief":"The current Sable beam operating card says: remove the transit wedge before scanning, then pack the scanned item. Do that for this item.","commands":["remove_transit_wedge","scan_item","pack_item","warm_platen"]},"host":{"accepted_actions":[["remove_transit_wedge","scan_item","pack_item"]],"damaging_actions":[],"selector_packet":["r04","r05"],"expected_retention":{"keep":[],"drop":["r04","r05","r06"],"rationale":"The decisive wedge instruction is already in the live task. The bezel and unrelated warm-platen anecdotes add nothing."}}}]
+    },
+    {
+      "id":"reader_d03","split":"development","seed_before_stage":["r07","r08","r09"],
+      "stages":[{"scene":{"brief":"Validate a packet on Cairn drum controller B and seal it. Its live notice says dry-run is disabled on B and can corrupt the packet; the console has not yet checked this packet.","commands":["dry_run","inspect_crc","seal_packet","discard_packet"]},"host":{"accepted_actions":[["inspect_crc","seal_packet"]],"damaging_actions":["dry_run","discard_packet"],"selector_packet":["r07","r08"],"expected_retention":{"keep":["r08"],"drop":["r07","r09"],"rationale":"The B card supplies a safe validation operation. A's old sequence conflicts with the live notice; floor arrows are immaterial."}}}]
+    },
+    {
+      "id":"reader_d04","split":"development","seed_before_stage":["r10","r11","r12"],
+      "stages":[{"scene":{"brief":"The canary axle monitor reports SLOW CYCLE and has an audible whine. Its fan test passes, but the sample counter intermittently stalls. Restore sampling, then run a cycle.","commands":["tighten_fan_grille","reseat_clock_plug","run_cycle","replace_bezel"]},"host":{"accepted_actions":[["reseat_clock_plug","run_cycle"]],"damaging_actions":[],"selector_packet":["r10","r11"],"expected_retention":{"keep":["r11"],"drop":["r10","r12"],"rationale":"The local missing-pulse experience identifies the sampling fault and repair. The similar sound from another enclosure is a plausible but unsupported detour."}}}]
+    },
+    {
+      "id":"reader_d05","split":"development","seed_before_stage":["r13","r14","r15"],"associations":{"genuine":[["r13","r14"]]},
+      "stages":[{"scene":{"brief":"The Osier stage door reports JAM after wash-down. Its drive motor tests normal and the doorway is visibly clear. Clear the block and open the door without forcing it.","commands":["dry_optical_window","reset_drive_motor","move_prop_box","force_door","open_door"]},"host":{"accepted_actions":[["dry_optical_window","open_door"]],"damaging_actions":["force_door"],"selector_packet":["r13","r14"],"expected_retention":{"keep":["r13","r14"],"drop":["r15"],"rationale":"The bridge identifies Quill as the shared classifier; Niv supplies a causal moisture failure despite different task vocabulary. The old prop-box incident contradicts the visibly clear doorway. Keep r14 only if retrieval actually returns it."}}}]
+    },
+    {
+      "id":"reader_h01","split":"holdout","seed_before_stage":["r16","r17","r18"],
+      "stages":[{"scene":{"brief":"A striped-cap Plover sample is ready for an assay read. Prepare it as needed and record the reading without clouding it.","commands":["add_binder","read_sample","record_reading","discard_sample"]},"host":{"accepted_actions":[["read_sample","record_reading"]],"damaging_actions":["add_binder","discard_sample"],"selector_packet":["r16","r18"],"expected_retention":{"keep":["r16"],"drop":["r18"],"allow":["r17"],"rationale":"The Plover binder rule fills the gap. Wren's different stripe convention is inapplicable. The paint-change note may help disambiguate stripe appearance, but no color was specified, so its marginal value is uncertain."}}}]
+    },
+    {
+      "id":"reader_h02","split":"holdout","seed_before_stage":["r19","r20","r21"],
+      "stages":[{"scene":{"brief":"The current Helio panel guide says green checksum means complete and red means repair before send. This packet's checksum is green. Send the complete packet.","commands":["repair_packet","send_packet","replace_lamp_cover","wait_for_power"]},"host":{"accepted_actions":[["send_packet"]],"damaging_actions":[],"selector_packet":["r19","r21"],"expected_retention":{"keep":[],"drop":["r19","r20","r21"],"rationale":"The current guide already gives the governing rule. Neither a lamp scratch nor another panel's colors adds value."}}}]
+    },
+    {
+      "id":"reader_h03","split":"holdout","seed_before_stage":["r22","r23","r24"],
+      "stages":[{"scene":{"brief":"Start a new batch on Bracken mixer revision 2. The live console says CLEAR RESIDUE now targets a retained audit sample; the active mix is empty. Prepare the batch and mix it without touching the audit sample.","commands":["clear_residue","load_ingredients","mix_batch","move_speed_knob"]},"host":{"accepted_actions":[["load_ingredients","mix_batch"]],"damaging_actions":["clear_residue"],"selector_packet":["r22","r23"],"expected_retention":{"keep":[],"drop":["r22","r23","r24"],"rationale":"The live console fully resolves the old cleanup rule and current isolation. Both revision notes are redundant or stale here; knob trivia is unrelated."}}}]
+    },
+    {
+      "id":"reader_h04","split":"holdout","seed_before_stage":["r25","r26","r27"],
+      "stages":[{"scene":{"brief":"The Rook dispatch board clicks once per slow cycle. Its guide is straight, and its scheduler display flashes RETRY 8 before each dispatch. Run the next dispatch promptly.","commands":["straighten_card_guide","use_local_schedule","paint_relay_cover","dispatch_next"]},"host":{"accepted_actions":[["use_local_schedule","dispatch_next"]],"damaging_actions":[],"selector_packet":["r25","r26"],"expected_retention":{"keep":["r26"],"drop":["r25","r27"],"rationale":"The Rook note maps the retry to a remote wait and supplies a remedy; Juniper's same-sound guide story is contradicted by local evidence. Paint is irrelevant."}}}]
+    },
+    {
+      "id":"reader_h05","split":"holdout","seed_before_stage":["r28","r29","r30"],"associations":{"genuine":[["r28","r29"]]},
+      "stages":[{"scene":{"brief":"At the Lumen dye station, SUBMIT was pressed once. The confirmation lamp is still dark after two seconds, but the basin and controls show no fault. Complete the job with a valid receipt.","commands":["submit_again","wait_for_receipt","clear_drain","finish_job"]},"host":{"accepted_actions":[["wait_for_receipt","finish_job"]],"damaging_actions":["submit_again"],"selector_packet":["r28","r29"],"expected_retention":{"keep":["r28","r29"],"drop":["r30"],"rationale":"The bridge identifies Vesper as the shared receipt protocol; Arlo supplies the otherwise hidden delayed-acknowledgement and duplicate-submit behavior. Drain flow is unrelated. Keep r29 only if retrieval actually returns it."}}}]
+    }
+  ]
+}

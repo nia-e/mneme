@@ -1,0 +1,30 @@
+/target
+/vendor/mnestic/target/
+
+# Per-project memory db (the standardized location) + legacy cwd artifacts.
+/.fastembed_cache/
+/crates/mneme-embed/.fastembed_cache/
+/.mneme/
+/mneme.json
+/mneme.bodies/
+
+# packaged desktop-extension bundles
+*.mcpb
+
+# Python integration/test caches.
+__pycache__/
+
+# Machine-local integration, credentials and operator records are not source.
+/.codex/
+/.env
+/.env.*
+!/.env.example
+/.mcp.json
+
+# Private development history stays outside the public source tree. These
+# exclusions also prevent old local research tools from accidentally adding it.
+/docs/current-work.md
+/docs/evaluation/
+/docs/research/
+/docs/project/
+/benchmarks/results/

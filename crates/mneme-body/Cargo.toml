@@ -1,0 +1,13 @@
+[package]
+license.workspace = true
+name = "mneme-body"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mneme-core.workspace = true
+async-trait.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

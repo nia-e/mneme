@@ -1,0 +1,27 @@
+[package]
+license.workspace = true
+name = "mneme-engine"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Opt-in integration coverage against the real adapter; production hosts select
+# their backend independently and the engine still depends only on core ports.
+cozo = ["mneme-cozo/cozo"]
+
+[dependencies]
+mneme-core.workspace = true
+ulid.workspace = true
+unordered-pair.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+sha2 = "0.10"
+
+# Adapters are dev-only: the engine composes ports, it never names a backend.
+# The integration tests wire the reference adapters in to exercise the full loop.
+[dev-dependencies]
+tokio = { workspace = true, features = ["time"] }
+async-trait.workspace = true
+serde_json = "1"
+mneme-cozo.workspace = true
+mneme-embed.workspace = true
+mneme-body.workspace = true

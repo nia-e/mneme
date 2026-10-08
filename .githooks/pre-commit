@@ -1,0 +1,24 @@
+#!/bin/sh
+# Auto-format staged Rust files with rustfmt, then re-stage them, so the tree
+# stays `cargo fmt`-clean. Tracked in-repo; enable once per clone with:
+#
+#     git config core.hooksPath .githooks
+#
+# Caveat (inherent to format-and-re-stage): if a staged .rs file *also* has
+# unstaged edits, formatting the working-tree copy and re-adding it stages those
+# edits too. Stage whole files, or commit from a clean working tree, to avoid it.
+set -eu
+
+# Staged, still-present Rust files (added/copied/modified/renamed).
+rs_files=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.rs$' || true)
+[ -z "$rs_files" ] && exit 0
+
+# Workspace crates are edition 2024. Vendored sources retain their upstream
+# edition and formatting so local commits stay reviewable against the published
+# archive; they are compiled and tested through their own manifest instead.
+rs_files=$(printf '%s\n' "$rs_files" | grep -Ev '^vendor/' || true)
+[ -z "$rs_files" ] && exit 0
+echo "$rs_files" | xargs rustfmt --edition 2024 --
+
+# Re-stage exactly the files we just formatted.
+echo "$rs_files" | xargs git add --

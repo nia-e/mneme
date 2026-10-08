@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bounded workshop result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "artifacts",
+    "next_step",
+    "memory_candidates",
+    "next_wake_seconds",
+    "replies"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "progress",
+        "rest",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    },
+    "next_step": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "memory_candidates": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000
+      }
+    },
+    "next_wake_seconds": {
+      "type": "integer",
+      "minimum": 900,
+      "maximum": 86400
+    },
+    "replies": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "event_id",
+          "text"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      }
+    }
+  }
+}

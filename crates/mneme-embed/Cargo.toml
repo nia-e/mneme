@@ -1,0 +1,20 @@
+[package]
+license.workspace = true
+name = "mneme-embed"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mneme-core.workspace = true
+async-trait.workspace = true
+
+# Real sentence-transformer embeddings (FastEmbedder) live behind this feature.
+# Off by default so the workspace builds dep-free; enabling it pulls fastembed +
+# the ONNX runtime (`ort`) and downloads a model on first use.
+fastembed = { version = "4", optional = true }
+
+[features]
+fastembed = ["dep:fastembed"]
+
+[dev-dependencies]
+tokio.workspace = true

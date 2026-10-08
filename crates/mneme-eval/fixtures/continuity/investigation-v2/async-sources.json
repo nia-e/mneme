@@ -1,0 +1,30 @@
+[
+  {
+    "path": "async/1.4.0/adapter.rs",
+    "family": "catalog-fetch",
+    "version": "1.4.0",
+    "kind": "source",
+    "body": "// catalog-fetch adapter release 1.4.0\n// Dependency contract: async/1.4.0/dependency-contract.json\n// This adapter delegates to dependency.fetch(key); it adds no storage or scheduling policy.\nfn begin(key: Key) -> Fetch { dependency.fetch(key) }"
+  },
+  {
+    "path": "async/1.4.0/dependency-contract.json",
+    "family": "catalog-fetch",
+    "version": "1.4.0",
+    "kind": "contract",
+    "body": "{\n  \"family\": \"catalog-fetch\",\n  \"version\": \"1.4.0\",\n  \"operation\": \"fetch\",\n  \"pending_direct_call\": \"blocks shared-loop heartbeat until completion\",\n  \"pending_worker_call\": \"heartbeat can progress while a worker performs the fetch\",\n  \"worker_policy\": \"Use workers for dependencies that block loop progress; avoid worker dispatch for dependencies that already yield.\",\n  \"shared_loop\": \"Another pending direct blocking fetch prevents heartbeat progress for every component.\"\n}"
+  },
+  {
+    "path": "async/2.0.0/adapter.rs",
+    "family": "catalog-fetch",
+    "version": "2.0.0",
+    "kind": "source",
+    "body": "// catalog-fetch adapter release 2.0.0\n// Dependency contract: async/2.0.0/dependency-contract.json\n// This adapter delegates to dependency.fetch(key); it adds no storage or scheduling policy.\nfn begin(key: Key) -> Fetch { dependency.fetch(key) }"
+  },
+  {
+    "path": "async/2.0.0/dependency-contract.json",
+    "family": "catalog-fetch",
+    "version": "2.0.0",
+    "kind": "contract",
+    "body": "{\n  \"family\": \"catalog-fetch\",\n  \"version\": \"2.0.0\",\n  \"operation\": \"fetch\",\n  \"pending_direct_call\": \"yields so shared-loop heartbeat can progress\",\n  \"pending_worker_call\": \"heartbeat can progress while a worker performs the fetch\",\n  \"worker_policy\": \"Use workers for dependencies that block loop progress; avoid worker dispatch for dependencies that already yield.\",\n  \"shared_loop\": \"Another pending direct blocking fetch prevents heartbeat progress for every component.\"\n}"
+  }
+]

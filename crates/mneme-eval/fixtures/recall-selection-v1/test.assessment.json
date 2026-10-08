@@ -1,0 +1,756 @@
+{
+  "schema": "mneme.recall-selection.assessment.v1",
+  "split": "test",
+  "cases": [
+    {
+      "id": "ho01",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n14",
+              "text": [
+                "the west gate closed cleanly at dusk"
+              ]
+            },
+            {
+              "node_key": "n09",
+              "text": [
+                "the west gate closed cleanly at dusk"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n16",
+              "text": [
+                "the east timer was left in manual mode for the morning keeper"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho02",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n06",
+              "text": [
+                "the new thumbnails render correctly in the public gallery"
+              ]
+            },
+            {
+              "node_key": "n13",
+              "text": [
+                "the new thumbnails render correctly in the public gallery"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n01",
+              "text": [
+                "the download archive still points at the old thumbnail paths"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho03",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n13",
+              "text": [
+                "the queue simulator held 60 passengers without dropping a ticket"
+              ]
+            },
+            {
+              "node_key": "n09",
+              "text": [
+                "the queue simulator held 60 passengers without dropping a ticket"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n11",
+              "text": [
+                "the pier display has not been checked in daylight glare"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho04",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n12",
+              "text": [
+                "the sensor alert fires at 870 degrees"
+              ]
+            },
+            {
+              "node_key": "n07",
+              "text": [
+                "the sensor alert fires at 870 degrees"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n04",
+              "text": [
+                "the night shift runbook has not yet named an acknowledgement owner"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho05",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n08",
+              "text": [
+                "the new map coordinates align with the north trail markers"
+              ]
+            },
+            {
+              "node_key": "n06",
+              "text": [
+                "the new map coordinates align with the north trail markers"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n04",
+              "text": [
+                "the printed legend still calls the southern fork by its retired name"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho06",
+      "expected_missing_evidence": true,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n13",
+              "text": [
+                "the indigo rinse loop was flushed and signed off"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n99",
+              "text": [
+                "the madder loop has no recorded water sample yet"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho07",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n03",
+              "text": [
+                "The manual shutter required a rope check before opening"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n12",
+              "text": [
+                "The motorized shutter requires a limit-switch check before opening"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho08",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n12",
+              "text": [
+                "Greenhouse A records seed trays at sowing time"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n11",
+              "text": [
+                "Greenhouse B records seed trays at germination check"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho09",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n14",
+              "text": [
+                "The offline laptop backup used a Friday removable-drive copy"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n12",
+              "text": [
+                "The new server backup uses nightly snapshots with a Sunday restore probe"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho10",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n14",
+              "text": [
+                "Rig A calls the dusk cue from channel 17"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n09",
+              "text": [
+                "Rig B calls the dusk cue from channel 24"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho11",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n07",
+              "text": [
+                "Line 1 wrote the lot on the paper seam label"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n14",
+              "text": [
+                "Line 2 prints the lot on the side barcode sticker"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho12",
+      "expected_missing_evidence": true,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n01",
+              "text": [
+                "The old pier rang twice at the first low-tide mark"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": true,
+          "alternatives": [
+            {
+              "node_key": "n99",
+              "text": [
+                "The rebuilt pier rings three times at the first low-tide mark"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho13",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n11",
+              "text": [
+                "do not use the red rope on the repaired north pulley"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n07",
+              "text": [
+                "Mira holds the current load certificate for the north pulley"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho14",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n08",
+              "text": [
+                "J3 is the third jingle segment, not channel three"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n03",
+              "text": [
+                "after hush means wait until the announcer microphone is muted"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho15",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n07",
+              "text": [
+                "sand first means prepare the wall with fine abrasive before painting"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n16",
+              "text": [
+                "not sun means do the paint pass in the shaded morning window"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho16",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n12",
+              "text": [
+                "two knocks is the signal that the guide has reached the safe ledge"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n10",
+              "text": [
+                "skip the shiny one refers to the loose quartz stair"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho17",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n14",
+              "text": [
+                "small spoon means the narrow silver measure for mint"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n07",
+              "text": [
+                "the second bell is the start of the quiet seating interval"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho18",
+      "expected_missing_evidence": true,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n01",
+              "text": [
+                "not the green tie means avoid the temporary shore cleat"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n99",
+              "text": [
+                "the repaired line should attach to the upstream iron ring"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho19",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n09",
+              "text": [
+                "the south tower clock is synchronized within two seconds"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n16",
+              "text": [
+                "the public chime is disabled until the noise waiver is posted"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho20",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n14",
+              "text": [
+                "the revised boarding signs passed the bilingual walk-through"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n06",
+              "text": [
+                "the new ramp is still awaiting a wet-surface grip check"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho21",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n15",
+              "text": [
+                "the exhaust fan passed the smoke-pencil test"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n03",
+              "text": [
+                "the intake grille still needs the fabric screen removed"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho22",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n05",
+              "text": [
+                "the east cable run passed continuity testing"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n14",
+              "text": [
+                "the west extension needs a new trip guard before stalls open"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho23",
+      "expected_missing_evidence": false,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n05",
+              "text": [
+                "the harbor cart brakes passed the loaded incline test"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n15",
+              "text": [
+                "the harbor lift key has not been returned to the branch desk"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ho24",
+      "expected_missing_evidence": true,
+      "requirements": [
+        {
+          "name": "first_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n11",
+              "text": [
+                "the canvas stage cover survived the hose rehearsal"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "second_required_fact",
+          "critical": false,
+          "alternatives": [
+            {
+              "node_key": "n99",
+              "text": [
+                "the public seating cover approval is not recorded in the steward book"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

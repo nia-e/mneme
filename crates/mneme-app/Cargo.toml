@@ -1,0 +1,22 @@
+[package]
+name = "mneme-app"
+version = "0.1.0"
+edition = "2024"
+description = "Shared application operations for Mneme frontends"
+license.workspace = true
+publish = false
+
+[dependencies]
+mneme-core.workspace = true
+mneme-engine.workspace = true
+mneme-present.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json = "1"
+ulid.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+mneme-cozo.workspace = true
+mneme-embed.workspace = true
+mneme-body.workspace = true

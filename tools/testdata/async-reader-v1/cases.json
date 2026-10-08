@@ -1,0 +1,206 @@
+{
+  "version": 1,
+  "cards": [
+    {
+      "id": "01M3KY5QG0V2CPKSENMENEBG60",
+      "summary": "The Mistral preview publisher stores its rendered-manifest cache under the feature-branch slug, not the uploaded artifact digest. A second publish on the same branch can therefore serve the first manifest; compare branch_slug, artifact_digest, manifest_cache_hit, and rendered_manifest_digest in publisher logs.",
+      "source": "projects/mistral/ops/2026-09-17-preview-cache.md#key-shape",
+      "fingerprint": "sha256:dac000321c991e10c0d6751688fecd9b56f887cebef15b72a61e2a498130aaca"
+    },
+    {
+      "id": "01M3KY5RF8D1956GK3G3KT9PVR",
+      "summary": "The Mistral preview image pins Noto Sans because the default Alpine font rendered API tables at inconsistent widths. This affected screenshots, not which API reference content was served.",
+      "source": "projects/mistral/ui/2026-08-04-preview-fonts.md#container",
+      "fingerprint": "sha256:8b9816c8c7a2c1204e96499183dd2d6f0ed9f5c3727cea2d79476bf82429cda9"
+    },
+    {
+      "id": "01M3KY5SEG2W72B4HCP0EZFXGM",
+      "summary": "A render farm got slower after adding encoders because every encoder repeatedly waited on one checksum service. Precomputing checksums before fan-out removed the serialized step; extra parallel workers helped only after that shared dependency was taken off the hot path.",
+      "source": "postmortems/media/2026-06-12-render-throughput.md#causal-chain",
+      "fingerprint": "sha256:78a74a912c2eee353b8b7c103450008e4a094cf391d092b1b3dd3a20e0baaec9"
+    },
+    {
+      "id": "01M3KY5TDRE5RR8RWE69C9WQTP",
+      "summary": "At the spring market, guests missed the blue entrance sign after dusk. The later signage plan increased contrast and added a lit arrow.",
+      "source": "events/spring-market/2026-04-18-retro.md#wayfinding",
+      "fingerprint": "sha256:d682abd9920526523b77acfb80a7b1e025cbe967105a251ad8ba8bab9a1938e8"
+    },
+    {
+      "id": "01M3KY5VD0ZA7J3NHJCFB8T776",
+      "summary": "For the remote reading-group kickoff, Ivo can attend 16:00-18:00 UTC on Tuesdays or Thursdays; Salma can attend only Thursdays after 17:00 UTC; Ren is unavailable after 18:00 UTC. All three need to attend the 45-minute first session.",
+      "source": "groups/field-notes/2026-09-26-kickoff-availability.md#participants",
+      "fingerprint": "sha256:e13fabcd92eee61a5ced91f1f392ecd4d8c43f586be6c413387a5a7c6479a79b"
+    },
+    {
+      "id": "01M3KY5WC8DV5QHP96103E04HB",
+      "summary": "The group shortlisted a 22-page essay on archival silence and a 310-page novel. No reading is required before the kickoff.",
+      "source": "groups/field-notes/2026-09-20-reading-list.md#shortlist",
+      "fingerprint": "sha256:6fe9087e96b19caa6ba2d65a535d36f861f613c3e32117782dcef3d2b36bf554"
+    },
+    {
+      "id": "01M3KY5XBG0PW18TZVVMG4PC9K",
+      "summary": "On 2 September, harbor works were expected to close the north ferry through 15 October, so the workshop travel draft routed attendees by bus.",
+      "source": "workshops/island/2026-09-02-travel-draft.md#north-ferry",
+      "fingerprint": "sha256:00f62bceea2f7dd841b1c8f57640a07b85e8e0014b8d916bd8c6f2776632f670"
+    },
+    {
+      "id": "01M3KY5YARPQM9MQ8M5ZKK09MA",
+      "summary": "A verified harbor notice dated 27 September says the north ferry reopened early and will run its normal weekday timetable from 29 September. The works closure notice is explicitly withdrawn.",
+      "source": "workshops/island/2026-09-27-harbor-notice.md#reopening",
+      "fingerprint": "sha256:096dc87c0d21bf45b0173c08d24834847d47dc0061ec36de7d84b34de1912056"
+    },
+    {
+      "id": "01M3KY5ZA09MYYY9G9W2MK0YAB",
+      "summary": "The cafe beside the south terminal stops serving hot food at 15:30 on weekdays.",
+      "source": "workshops/island/venue-notes.md#south-terminal-cafe",
+      "fingerprint": "sha256:be5cc6169a6155bd7faab7d362dfb97bca3c126722c431a15367672095ddbe2e"
+    },
+    {
+      "id": "01M3KY60985XW8FGDH3M58J6RP",
+      "summary": "In a moderated build 0.9.4 test with twelve first-time PC players, removing the dash-stamina cap reduced tutorial retries and early exits. Observers reported that unrestricted recovery made movement mistakes feel reversible.",
+      "source": "games/lantern-vale/research/2026-09-18-pc-novices.md#dash",
+      "fingerprint": "sha256:bd9c3cd0f357f50ce03fc8ead61288ce9b2373ea89d3167d52b877963b896fd5"
+    },
+    {
+      "id": "01M3KY618GQ21JCSB2MJCNC1RC",
+      "summary": "In a build 0.9.4 console test with ten returning players, the uncapped dash increased rapid camera corrections; four participants reported nausea and three stopped early. The researcher recommended restoring the cap or adding a comfort-mode limiter.",
+      "source": "games/lantern-vale/research/2026-09-19-console-returning.md#dash",
+      "fingerprint": "sha256:dd1553b962a253209f5205f3fced2c9c8111f532ce906b2b9ec6af4148772a10"
+    },
+    {
+      "id": "01M3KY627R0P055DRS0TE5KKV4",
+      "summary": "The autumn cosmetic pack gives the scout a paper-lantern trail. It does not alter stamina, camera behavior, or tutorial rules.",
+      "source": "games/lantern-vale/releases/0.9.4-cosmetics.md#scout-trail",
+      "fingerprint": "sha256:8246c13c624cc24685b2bb90cefce2cf7413f3c0760ca743ad2617b9f8be1f1d"
+    }
+  ],
+  "stages": [
+    {
+      "id": "stage-01-preview-diagnosis",
+      "current_prompt": "The Mistral documentation preview sometimes shows the first API reference after a second publish to the same feature branch, even though the upload reports a new artifact digest. Select only context that supports a first causal hypothesis and the smallest useful log inspection.",
+      "available_ids": [
+        "01M3KY5RF8D1956GK3G3KT9PVR",
+        "01M3KY5QG0V2CPKSENMENEBG60",
+        "01M3KY5TDRE5RR8RWE69C9WQTP"
+      ],
+      "host": {
+        "keep": [
+          "01M3KY5QG0V2CPKSENMENEBG60"
+        ],
+        "drop": [
+          "01M3KY5RF8D1956GK3G3KT9PVR",
+          "01M3KY5TDRE5RR8RWE69C9WQTP"
+        ],
+        "allow": [],
+        "rationale": "The cache-key fact explains the same-branch second-publish pattern and names discriminating log fields. Font rendering and event signage do not bear on content selection."
+      }
+    },
+    {
+      "id": "stage-02-book-swap-queue",
+      "current_prompt": "New task: at the last book-swap entrance rush, adding another pass scanner did not improve throughput. We did not record where volunteers spent their waiting time. Form one concrete causal hypothesis for the flat throughput and name one measurement that would distinguish it; use a remembered causal analogue only if it sharpens the diagnosis.",
+      "available_ids": [
+        "01M3KY5TDRE5RR8RWE69C9WQTP",
+        "01M3KY5SEG2W72B4HCP0EZFXGM",
+        "01M3KY5QG0V2CPKSENMENEBG60"
+      ],
+      "host": {
+        "keep": [
+          "01M3KY5SEG2W72B4HCP0EZFXGM"
+        ],
+        "drop": [
+          "01M3KY5TDRE5RR8RWE69C9WQTP",
+          "01M3KY5QG0V2CPKSENMENEBG60"
+        ],
+        "allow": [],
+        "rationale": "The render-farm incident supplies a concrete hypothesis worth testing: workers may be waiting on one serialized dependency, so measure time blocked at each shared handoff versus active scanning time. It informs the diagnosis without proving that the event has the same cause. The other facts do not explain throughput."
+      }
+    },
+    {
+      "id": "stage-03-reading-kickoff",
+      "current_prompt": "Change of plan: the book swap is canceled. Schedule a single 45-minute remote reading-group kickoff next week that all three members can attend. Give one UTC slot; do not continue optimizing the entrance queue.",
+      "available_ids": [
+        "01M3KY5SEG2W72B4HCP0EZFXGM",
+        "01M3KY5WC8DV5QHP96103E04HB",
+        "01M3KY5VD0ZA7J3NHJCFB8T776",
+        "01M3KY5TDRE5RR8RWE69C9WQTP"
+      ],
+      "host": {
+        "keep": [
+          "01M3KY5VD0ZA7J3NHJCFB8T776"
+        ],
+        "drop": [
+          "01M3KY5SEG2W72B4HCP0EZFXGM",
+          "01M3KY5WC8DV5QHP96103E04HB",
+          "01M3KY5TDRE5RR8RWE69C9WQTP"
+        ],
+        "allow": [],
+        "rationale": "The availability intersections determine Thursday 17:00-17:45 UTC. The prior queue mechanism, reading choices, and signage are irrelevant after the explicit context change."
+      }
+    },
+    {
+      "id": "stage-04-ferry-status",
+      "current_prompt": "For the island workshop on 12 October, determine whether the travel plan may use the north ferry. Prefer the newest verified operational status and discard an older plan if a later notice explicitly supersedes it.",
+      "available_ids": [
+        "01M3KY5ZA09MYYY9G9W2MK0YAB",
+        "01M3KY5XBG0PW18TZVVMG4PC9K",
+        "01M3KY5YARPQM9MQ8M5ZKK09MA",
+        "01M3KY5VD0ZA7J3NHJCFB8T776"
+      ],
+      "host": {
+        "keep": [
+          "01M3KY5YARPQM9MQ8M5ZKK09MA"
+        ],
+        "drop": [
+          "01M3KY5ZA09MYYY9G9W2MK0YAB",
+          "01M3KY5XBG0PW18TZVVMG4PC9K",
+          "01M3KY5VD0ZA7J3NHJCFB8T776"
+        ],
+        "allow": [],
+        "rationale": "The dated reopening notice explicitly withdraws the closure and governs 12 October. Keeping the superseded draft would inject stale routing; cafe and reading-group facts do not answer operational status."
+      }
+    },
+    {
+      "id": "stage-05-dash-conflict",
+      "current_prompt": "For Lantern Vale build 0.9.4, assess whether the mixed launch audience gives us enough evidence to remove the tutorial dash-stamina cap. The audience includes first-time PC players and returning console players, with no priority assigned between them. Preserve credible unresolved disagreement rather than forcing a winner.",
+      "available_ids": [
+        "01M3KY627R0P055DRS0TE5KKV4",
+        "01M3KY618GQ21JCSB2MJCNC1RC",
+        "01M3KY5YARPQM9MQ8M5ZKK09MA",
+        "01M3KY60985XW8FGDH3M58J6RP"
+      ],
+      "host": {
+        "keep": [
+          "01M3KY618GQ21JCSB2MJCNC1RC",
+          "01M3KY60985XW8FGDH3M58J6RP"
+        ],
+        "drop": [
+          "01M3KY627R0P055DRS0TE5KKV4",
+          "01M3KY5YARPQM9MQ8M5ZKK09MA"
+        ],
+        "allow": [],
+        "rationale": "Both same-build studies are needed: one shows learning benefits for first-time PC players, while the other shows a comfort cost for returning console players. Different target populations explain why neither automatically defeats the other."
+      }
+    },
+    {
+      "id": "stage-06-preview-return",
+      "current_prompt": "Return to the Mistral preview incident. The branch-slug cache key is already established, and I have already chosen the four fields: branch_slug, artifact_digest, manifest_cache_hit, and rendered_manifest_digest. Format those fields as a short comparison checklist grouped by request, cache decision, and output. Do not load duplicate diagnosis.",
+      "available_ids": [
+        "01M3KY5QG0V2CPKSENMENEBG60",
+        "01M3KY5RF8D1956GK3G3KT9PVR",
+        "01M3KY618GQ21JCSB2MJCNC1RC",
+        "01M3KY5XBG0PW18TZVVMG4PC9K"
+      ],
+      "host": {
+        "keep": [],
+        "drop": [
+          "01M3KY5QG0V2CPKSENMENEBG60",
+          "01M3KY5RF8D1956GK3G3KT9PVR",
+          "01M3KY618GQ21JCSB2MJCNC1RC",
+          "01M3KY5XBG0PW18TZVVMG4PC9K"
+        ],
+        "allow": [],
+        "rationale": "The current prompt now contains both the established mechanism and all four requested fields, making the preview-cache card genuinely redundant. The remaining cards concern rendering, game research, or stale ferry status, so the correct selection is abstention."
+      }
+    }
+  ]
+}

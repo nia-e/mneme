@@ -1,0 +1,6 @@
+[Unit]
+Description=Mneme optional library snapshot and relay
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /ABSOLUTE/REPO/integrations/library/library.py --config /ABSOLUTE/library.json once

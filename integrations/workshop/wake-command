@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""A small shell doorway to a local or SSH-hosted workshop event queue."""
+
+import argparse
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import uuid
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ssh", metavar="USER@HOST", help="enqueue on this SSH host, not locally")
+    parser.add_argument("--root", help="explicit workshop root on the destination machine")
+    parser.add_argument("--source", default="local-shell")
+    parser.add_argument("--id", dest="event_id", help="stable retry key; omit for a new event")
+    parser.add_argument("--reference", default="", help="optional log/artifact reference; never executed")
+    parser.add_argument("message", nargs="?", default="Shell wake requested")
+    args = parser.parse_args()
+    request_id = args.event_id or uuid.uuid4().hex
+    forwarded = ["--source", args.source, "--reference", args.reference, "--id", request_id]
+    if args.ssh:
+        if args.ssh.startswith("-") or any(c.isspace() or ord(c) < 32 for c in args.ssh):
+            parser.error("--ssh must be one SSH destination, not command options")
+        if args.root:
+            forwarded += ["--root", args.root]
+        # OpenSSH invokes a remote shell. Quote the complete command once; a
+        # message containing apostrophes, dollars or newlines stays message data.
+        remote = shlex.join([".local/bin/wake", *forwarded, "--", args.message])
+        command = ["/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                   args.ssh, remote]
+    else:
+        try:
+            root = str(Path(args.root or Path.home() / "workshop").resolve(strict=True))
+        except OSError as error:
+            parser.error("workshop root is unavailable: " + str(error))
+        command = [sys.executable, str(Path(__file__).resolve().with_name("wake.py")),
+                   "--root", root, "enqueue", *forwarded, "--summary", args.message]
+    try:
+        return subprocess.run(command, timeout=20, check=False).returncode
+    except subprocess.TimeoutExpired:
+        print("Wake delivery timed out; it may have been queued. Retry with --id " + request_id +
+              " and the same message/source/reference.",
+              file=sys.stderr)
+        return 1
+    except OSError as error:
+        print("Cannot invoke wake delivery: " + str(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

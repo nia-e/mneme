@@ -1,0 +1,22 @@
+mneme.managed-snapshot.mnf-policy.v1
+integers=u16,u32,u64 unsigned big-endian
+preamble=magic:MNEMEMNF|version:u16=1|stream:u8=1-records,2-bodies|flags:u8=0|policy:sha256
+frame=encoded-length:u32=51+payload|kind:u8|relation:u16|page:u64|items:u32|payload-length:u32|digest:sha256|payload
+frame-digest=sha256(domain:mneme-managed-snapshot-frame-v1\0|stream|kind|relation|page|items|payload-length|payload)
+footer=magic:4d4e46454e440001|frames:u64|items:u64|ordered-frame-digest:sha256|eof
+inventory=sha256(domain:mneme-managed-snapshot-frame-inventory-v1\0|stream|each:01,kind,relation,page,items,encoded-length,digest|ff,frames,items)
+records=kind:1|relation:1..16|page:zero-based-per-relation|items:1..256|payload:managed-snapshot-page-v1-compact-json
+records-order=relation-ascending|no-cross-relation-frame|greedy-256-except-relation-terminal|one-global-after-next-chain
+record-json=order:head,after,limit,records,has_more,next,page_digest|head:state,database_id|cursor:head_binding,after|record:position,digest
+bodies=relation:0|kind:2-census,3-local-map,4-external-marker|kind-ascending|page:zero-based-per-kind|items:1..256|greedy-256-except-section-terminal
+body-json=object-order:schema,section,page_ordinal,items|schema:mneme.managed-snapshot.body-page.v1|sections:census,local_map,external_markers
+json=compact-ascii,no-whitespace,no-newline|integers:shortest-decimal|bool:true,false|null:null|unknown-or-duplicate-field:reject|max-depth:4
+hex=lowercase-even|declared-byte-length-times-two|sha256:64-hex
+census-item-order=name_bytes_length,name_bytes_hex,bytes,sha256,device,inode,mode,uid,gid,link_count,mtime_seconds,mtime_nanoseconds,ctime_seconds,ctime_nanoseconds
+census-types=name-length:u16<=255|bytes:u64|device:u64|inode:u64|mode:u32-full-st-mode|uid:u32|gid:u32|link-count:u64|seconds:i64|nanoseconds:u32<=999999999
+local-item-order=body_ref_bytes_length,body_ref_bytes_hex,entry_name_bytes_length,entry_name_bytes_hex,occurrences
+external-item-order=body_ref_bytes_length,body_ref_bytes_hex,occurrences
+map-types=body-ref-length:u16<=16384|entry-name-length:u16<=255|occurrences:u64-positive
+body-order=census-name-strict|local-ref-strict|external-ref-strict|local-external-disjoint|frame-items-equal-json-items
+limits=record-payload:2097152|body-payload:16777216|record-frames:65551|body-frames:131073|record-stream:137438953472|body-stream:549755813888|items-per-frame:256
+parser=header-authenticated-file-length-first|frames-only-between-offsets-44-and-len-minus-56|exact-footer-cursor|no-trailing-bytes|unknown-version-kind-flags:reject|lengths-and-overflow-before-allocation|body-item-visitor-stops-at-min(item-count-plus-one,257)

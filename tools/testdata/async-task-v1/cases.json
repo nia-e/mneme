@@ -1,0 +1,1313 @@
+{
+  "version": 1,
+  "cards": [
+    {
+      "key": "annotation_offset_contract",
+      "summary": "Sable annotation exports count UTF-16 code units. Python string indexes are not interchangeable with those offsets when text contains an astral character.",
+      "body": "The exporter integration check used a smiley before a marked word. Its start offset advanced by two, not one or four. The accepted adapter converted UTF-16 boundaries to Python character indexes and rejected boundaries inside a surrogate pair. This applies to Sable annotation JSON, not its byte-indexed binary search index.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "annotation_ascii_fixture",
+      "summary": "The first Sable annotation adapter fixture used ASCII-only text and passed with direct Python slicing.",
+      "body": "That narrow fixture did not exercise non-ASCII offsets. Its passing result was a smoke check, not an exporter contract.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "annotation_binary_index",
+      "summary": "Sable binary search-index spans use UTF-8 byte offsets.",
+      "body": "This was verified for the separate .sbi index format. It is not a statement about annotation JSON.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "annotation_normalization",
+      "summary": "A Sable search experiment normalized query strings to NFC before matching.",
+      "body": "Normalization improved lookup of accented names. It did not change the representation or boundaries of exported annotation spans.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "annotation_editor_theme",
+      "summary": "The Sable annotation editor uses a dark preview theme during caption review.",
+      "body": "The theme changed highlight contrast, not the text, offsets or export schema.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "annotation_batch_size",
+      "summary": "The Sable annotation upload job stayed below its request-size cap with batches of 250 records.",
+      "body": "The batch limit was a transport concern. Smaller batches did not repair individual invalid spans.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "annotation_csv_quotes",
+      "summary": "The transcript CSV reader must preserve quoted commas in speaker names.",
+      "body": "That parser fix was for CSV ingestion before annotation, not for JSON offset interpretation.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "harbor_export_v1",
+      "summary": "Harbor calendar export schema 1 writes wall-clock timestamps in the named site zone, with no UTC conversion. Historical schema-1 replay must retain that interpretation.",
+      "body": "The schema-1 archive acceptance test round-tripped local wall times with site_zone. Treating those fields as UTC shifted morning events. This contract remains accurate for existing schema-1 archives even after the exporter changed.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "harbor_export_v2",
+      "summary": "Harbor calendar export schema 2 writes timestamps in UTC and retains site_zone for display only. Do not apply the schema-1 zone conversion to schema-2 timestamps.",
+      "body": "The schema-2 rollout explicitly changed timestamp representation. Its marker is export_schema: 2, not file age or the current machine timezone. The rollout did not rewrite schema-1 archives.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "harbor_preview_zone",
+      "summary": "Harbor calendar previews format events in the viewer-selected zone.",
+      "body": "A preview formatting preference does not identify the serialized timestamp representation.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "harbor_filename_date",
+      "summary": "Harbor export filenames include the day the file was downloaded.",
+      "body": "An old export downloaded today gets a new filename date. Filename chronology is not a schema marker.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "harbor_zip_level",
+      "summary": "Harbor calendar archives use zip compression level 6.",
+      "body": "Changing compression affected archive size but not event timestamp fields.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "harbor_all_day",
+      "summary": "Harbor all-day events carry date-only fields and have no time-of-day offset.",
+      "body": "The current compatibility task concerns timed events, not all-day events.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "harbor_machine_zone",
+      "summary": "One test machine was temporarily configured to UTC for a screenshot run.",
+      "body": "That machine setting was not an export contract and must not replace per-file schema metadata.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "compression_trial_positive",
+      "summary": "Courier cache build 12 trial P reported a 17% median response-time improvement with compression on. Its request corpus and CPU quota were not retained; the result was not independently reproduced.",
+      "body": "The trial ran on a 2-core test allocation and reported only aggregate latency. The note recommended a follow-up before choosing a default. It did not authorize a rollout or claim relevance to every payload distribution.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "compression_trial_negative",
+      "summary": "Courier cache build 12 trial Q reported a 24% median response-time regression with compression on. Its request corpus and CPU quota were not retained; this is unresolved against trial P, not a replacement for it.",
+      "body": "Q was recorded two days after P by another tester. Both used the same advertised build and network profile; unrecorded load and corpus differences could explain the disagreement. No adjudicating rerun exists.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "compression_summary_memo",
+      "summary": "A Courier cache summary memo copied trial P's 17% improvement into its experiment list.",
+      "body": "This memo is a derivative of P, not a third measurement or independent confirmation.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "compression_disk_archive",
+      "summary": "Offline archive compression reduced Courier backup storage by 61%.",
+      "body": "That batch-storage result did not measure interactive cache response times or CPU headroom.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "compression_diagnostic_log",
+      "summary": "Courier diagnostic logs can be compressed after rotation.",
+      "body": "Background log retention is separate from per-request response compression.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "compression_old_build",
+      "summary": "Courier cache build 7 lacked the current compressor and used a different network stub.",
+      "body": "Build-7 timings do not resolve the build-12 default decision.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "compression_ui_toggle",
+      "summary": "The Courier admin UI shows the compression toggle under Advanced.",
+      "body": "The toggle location conveys no recommendation about the default.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "billing_current_contract",
+      "summary": "Synthetic Boreal billing replays reuse event_id; each distinct event_id contributes once to its account total. Amounts are integer minor units.",
+      "body": "This duplicates the current local contract. It adds no missing fact to a case where that contract and sample data are already visible.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "billing_old_import",
+      "summary": "An old Boreal CSV importer deduplicated by the complete row because it did not receive event IDs.",
+      "body": "The old importer predated the event_id field. It is not applicable to the present event stream.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "billing_rounding",
+      "summary": "A separate Boreal dashboard rounded currency values to whole display units.",
+      "body": "The rounding was presentation-only. It was never used to aggregate integer minor-unit ledger entries.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "billing_refunds",
+      "summary": "Boreal refunds have negative amount_minor values and are included in the account total.",
+      "body": "This is already stated in the current fixture contract; a reminder would be redundant.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "billing_batch_retry",
+      "summary": "Boreal transport batches may be replayed after a connection closes.",
+      "body": "Replays preserve their event IDs. This is already visible in the current input and contract.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "billing_chart_layout",
+      "summary": "The Boreal accounts chart used a stacked bar layout for monthly reports.",
+      "body": "That visual choice did not alter event aggregation.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "billing_external_tax",
+      "summary": "A separate tax-estimate experiment queried an external rate service.",
+      "body": "The fixture requests only aggregation of already-recorded amounts, with no tax calculation.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "map_empty_geometry_contract",
+      "summary": "In Cress map-change JSON, an empty geometry is a deletion marker for the feature ID. Dropping empty geometries before import silently preserves deleted features.",
+      "body": "The replay check deleted a region only when its empty-geometry record reached the importer. This is specific to the change stream; a static feature export has different validation rules.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "map_static_export",
+      "summary": "Cress static map snapshots omit empty geometries because they contain only currently visible features.",
+      "body": "A static snapshot is not the incremental map-change stream.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "map_point_simplification",
+      "summary": "A Cress preview experiment simplified dense polylines for faster drawing.",
+      "body": "Display simplification did not define deletion behavior.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "map_json_whitespace",
+      "summary": "Cress JSON consumers ignore insignificant whitespace outside strings.",
+      "body": "Whitespace formatting says nothing about empty geometry semantics.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "map_region_colors",
+      "summary": "Cress map previews use muted colors for inactive regions.",
+      "body": "A display color does not create or delete a feature.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "map_upload_limit",
+      "summary": "Cress map-change uploads have a 2 MiB request-size limit.",
+      "body": "Splitting a change batch at record boundaries preserves semantics; dropping records does not.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "map_last_preview",
+      "summary": "A Cress preview once looked unchanged because the browser was displaying a cached tile.",
+      "body": "That incident was a preview-cache problem, not proof that empty changes are ignorable.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "checkout_turnstile_bridge",
+      "summary": "A checkout callback review linked an entrance-turnstile bounce incident because both involved repeated signals. The review did not establish that distinct checkout events represent one purchase.",
+      "body": "The association is a lead to inspect mechanisms, not permission to collapse checkout records. No code or identity contract was shared between the systems.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "turnstile_debounce_lesson",
+      "summary": "A mechanical entrance switch emitted several pulses for one rotation. A 200 ms debounce window prevented duplicate counts on that switch.",
+      "body": "An instrumented trace established that the pulses came from contact bounce during the same physical rotation. The chosen window was shorter than the minimum possible interval between two real rotations; that physical guarantee was essential.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "checkout_old_retry",
+      "summary": "An earlier checkout transport retry delivered the same purchase_id twice.",
+      "body": "Deduplicating by purchase_id removed that duplicate without merging separate purchases.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "checkout_timestamp_precision",
+      "summary": "Checkout timestamps are recorded at millisecond precision.",
+      "body": "Two distinct events can share a timestamp. The timestamp is useful for ordering displays, not as a unique identifier.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "checkout_button_spacing",
+      "summary": "Checkout buttons were widened for touchscreen use.",
+      "body": "The visual spacing change did not alter callback identity or purchase semantics.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "checkout_daily_chart",
+      "summary": "The checkout dashboard groups purchases into five-minute bins.",
+      "body": "Aggregating a display into bins does not authorize dropping purchases within a bin.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "turnstile_paint",
+      "summary": "The entrance-turnstile repaint used a matte finish to reduce glare.",
+      "body": "This maintenance note contains no counting or event-identity mechanism.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "atlas_initial_handoff",
+      "summary": "2026-04-08, synthetic atlas work: tile atlas generation completed for source revision 31; edge-alpha review remained open. This was a handoff, not a claim that the atlas passed review.",
+      "body": "The existing atlas and manifest were to be kept while inspecting edge transparency. Rebuilding from scratch was not the recorded next action.",
+      "kind": "episode",
+      "thread": "session-spruce"
+    },
+    {
+      "key": "invoice_midway_episode",
+      "summary": "2026-04-08, synthetic invoice preview work: paused after changing the heading font; footer alignment still needed review. This is not tile-atlas work.",
+      "body": "The invoice task occurred between two atlas observations in the same working session. Its heading and footer actions do not apply to image generation.",
+      "kind": "episode",
+      "thread": "session-spruce"
+    },
+    {
+      "key": "atlas_latest_handoff",
+      "summary": "2026-04-09, synthetic atlas work, source revision 31: preview showed a pale fringe at transparent tile edges. Next: inspect premultiplied-alpha handling against the existing atlas, retaining its manifest for comparison.",
+      "body": "The suspect condition was an edge artifact, not a confirmed cause. The handoff requested verification before editing the alpha path. Current on-disk files must still be checked; this episode is context, not proof of their present contents.",
+      "kind": "episode",
+      "thread": "session-hazel"
+    },
+    {
+      "key": "invoice_latest_episode",
+      "summary": "2026-04-10, synthetic invoice preview work: footer alignment was accepted; next export a PDF proof. This latest overall episode is not the latest atlas observation.",
+      "body": "The accepted invoice work was a separate task sharing an editor session. Do not infer atlas completion or an atlas export format from it.",
+      "kind": "episode",
+      "thread": "session-hazel"
+    },
+    {
+      "key": "atlas_palette_experiment",
+      "summary": "2026-04-09, synthetic atlas color experiment: a sepia preview palette was rejected and left unapplied.",
+      "body": "This experiment happened after the atlas edge observation in the same session. It did not supersede the edge-alpha review or authorize modifying the source palette.",
+      "kind": "episode",
+      "thread": "session-hazel"
+    },
+    {
+      "key": "atlas_old_revision",
+      "summary": "2026-03-18, synthetic atlas source revision 22: rebuilding missing tile outputs was the correct recovery step after a failed export.",
+      "body": "That event involved missing files in revision 22. It does not establish that existing revision-31 files need regeneration.",
+      "kind": "episode",
+      "thread": "session-cedar"
+    },
+    {
+      "key": "atlas_layout_reference",
+      "summary": "The synthetic tile atlas uses a two-pixel gutter between neighboring tiles.",
+      "body": "The gutter convention is documented in the local manifest. It does not determine whether RGB values at transparent edges were premultiplied correctly.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "sensor_roi_basis",
+      "summary": "Larch annotation packet v3 polygon coordinates use the unrotated sensor frame, even when the image has EXIF orientation. Crop in that frame before rotation, or transform every polygon with the same rotation as the image.",
+      "body": "A rare portrait-photo import cut off a face because the image was rotated but its region polygon was not. Both crop-then-rotate and rotate-image-plus-transform-polygon passed the geometry check. This applies to packet v3; it is not a universal rule for all image annotations.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "sensor_preview_orientation",
+      "summary": "The Larch preview automatically honors EXIF orientation when displaying photos.",
+      "body": "A preview that looks upright does not establish the coordinate basis of the annotation packet.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "sensor_export_orientation",
+      "summary": "Larch final thumbnails should be upright and have normalized orientation metadata.",
+      "body": "The visible task already states that output requirement. It does not say when input polygons should be interpreted.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "sensor_v1_annotations",
+      "summary": "Larch annotation packet v1 stored normalized display coordinates after orientation.",
+      "body": "Packet v1 and packet v3 differ. Reusing the v1 interpretation for v3 changes the crop region.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "sensor_jpeg_quality",
+      "summary": "A Larch thumbnail experiment used JPEG quality 88.",
+      "body": "Compression quality did not affect polygon coordinates or image orientation.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "sensor_color_profile",
+      "summary": "Larch gallery exports attach an sRGB color profile.",
+      "body": "Color profile metadata is independent of the orientation-coordinate mismatch.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "sensor_old_square_case",
+      "summary": "An earlier Larch crop smoke test used a square centered region on an unrotated image.",
+      "body": "That symmetric input could not expose orientation-related coordinate mistakes.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "poster_vector_experiment",
+      "summary": "A synthetic poster exporter experiment produced SVG from an unreleased development branch with the vector-backend feature enabled. It was not evidence that packaged RasterDesk 2.4 supports SVG.",
+      "body": "The experiment used a developer build with extra libraries. No installed-release verification or rollout followed.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "poster_png_contract",
+      "summary": "Packaged RasterDesk 2.4 can export PNG at explicit pixel dimensions.",
+      "body": "This capability is already listed in the current installed-capabilities fixture. Repeating it is not new help.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "poster_old_install_guide",
+      "summary": "An old RasterDesk installation note described an optional vector-backend plugin for a development build.",
+      "body": "The note does not establish compatibility with the current packaged application or authorize installing dependencies.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "poster_print_density",
+      "summary": "The synthetic poster print test accepted 2400 by 3600 pixels for the requested raster proof.",
+      "body": "The current brief already includes these proof dimensions; no density calculation or alternate format is needed.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "poster_draft_font",
+      "summary": "A poster draft once used a serif display font before the text was finalized.",
+      "body": "The current task asks for an export plan, not typography changes.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "poster_browser_preview",
+      "summary": "The poster editor can preview its canvas in a browser window.",
+      "body": "An editable preview is not an SVG export capability.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "poster_alpha_background",
+      "summary": "The poster proof should retain its opaque cream background.",
+      "body": "The current brief already fixes the background. This prior note adds no missing export behavior.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "exhibition_print_bridge",
+      "summary": "The offline exhibition package design was linked to a sewn-handbook reprint review during a workshop. That link records a comparison, not a shared implementation or an already selected layout.",
+      "body": "The designer thought the handbook review might provide another way to account for revision cost. The exhibition download service and printing process have no software in common.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "handbook_signature_lesson",
+      "summary": "For a sewn handbook, replacing one page required reprinting its entire signature. Grouping pages by which revisions occurred together reduced reprint waste more than grouping by chapter.",
+      "body": "The designer totaled all signatures touched by each revision event, including unchanged pages reprinted with them. Co-revised pages could share one signature while stable pages stayed together elsewhere. The lesson depends on whole-signature replacement, not merely thematic resemblance.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "exhibition_topic_layout",
+      "summary": "An early exhibition package sketch grouped assets by visitor-facing topic: welcome materials, activity materials and static models.",
+      "body": "That arrangement was easy to explain to curators. It was not checked against the scheduled update campaign or download budget.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "exhibition_asset_colors",
+      "summary": "The exhibition map palette uses high-contrast category colors.",
+      "body": "Map colors support navigation but do not determine package download amplification.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "exhibition_image_codec",
+      "summary": "An exhibition image-codec experiment reduced one banner file by 8%.",
+      "body": "The campaign sizes supplied in the current fixture are already finalized. Recompressing artwork is outside the requested packaging decision.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "exhibition_audio_transcript",
+      "summary": "The exhibition narration includes a transcript for visitors who do not use audio.",
+      "body": "Both assets remain required. Removing accessibility assets is not a packaging optimization.",
+      "kind": "semantic",
+      "thread": null
+    },
+    {
+      "key": "handbook_cover_stock",
+      "summary": "The sewn handbook used a matte cover to reduce glare under bright lights.",
+      "body": "Cover finish was independent of signature grouping and reprint cost.",
+      "kind": "semantic",
+      "thread": null
+    }
+  ],
+  "cases": [
+    {
+      "id": "a01",
+      "split": "development",
+      "family": "integration_contract_positive",
+      "scene": {
+        "prompt": "Choose a patch plan for the Sable annotation JSON adapter. It must mark the intended substring, preserve the input text, and reject malformed boundaries. Inspect the local example and code as useful, then submit the operations you would apply. No exporter documentation or network service is available in this workspace; if its coordinate contract cannot be established, name that blocking contract rather than inventing one.",
+        "files": {
+          "adapter.py": "def mark(text, span):\n    return text[span[\"start\"]:span[\"end\"]]\n",
+          "example.json": "{\"text\":\"A🌿rose\",\"span\":{\"start\":3,\"end\":7},\"format\":\"sable-annotation-json\"}\n",
+          "tests/test_adapter.py": "def test_ascii():\n    assert mark(\"a rose\", {\"start\": 2, \"end\": 6}) == \"rose\"\n"
+        },
+        "actions": [
+          "replace_slice_with_utf16_boundary_mapper",
+          "replace_slice_with_utf8_byte_mapper",
+          "keep_python_character_slice",
+          "add_non_ascii_and_invalid_boundary_regressions",
+          "normalize_input_before_slicing",
+          "record_blocker_exporter_offset_contract"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "annotation_offset_contract",
+        "annotation_ascii_fixture",
+        "annotation_binary_index",
+        "annotation_normalization",
+        "annotation_editor_theme",
+        "annotation_batch_size",
+        "annotation_csv_quotes"
+      ],
+      "edges": [
+        {
+          "from": "annotation_ascii_fixture",
+          "to": "annotation_offset_contract",
+          "kind": "derived_from",
+          "weight": 0.65
+        }
+      ],
+      "host": {
+        "accepted_plans": [
+          [
+            "replace_slice_with_utf16_boundary_mapper",
+            "add_non_ascii_and_invalid_boundary_regressions"
+          ],
+          [
+            "record_blocker_exporter_offset_contract"
+          ],
+          [
+            "add_non_ascii_and_invalid_boundary_regressions",
+            "replace_slice_with_utf16_boundary_mapper"
+          ]
+        ],
+        "forbidden_actions": [
+          "replace_slice_with_utf8_byte_mapper",
+          "keep_python_character_slice",
+          "normalize_input_before_slicing"
+        ],
+        "required_memory": [
+          "annotation_offset_contract"
+        ],
+        "irrelevant_memory": [
+          "annotation_binary_index",
+          "annotation_normalization",
+          "annotation_editor_theme",
+          "annotation_batch_size",
+          "annotation_csv_quotes"
+        ],
+        "memory_expectation": "needed",
+        "information_gap": "The file identifies the exporter but does not state its offset units. The sample suggests UTF-16 but is not a normative contract, and the ASCII test cannot distinguish units.",
+        "decision_rationale": "The remembered integration check supports a concrete Unicode-safe adapter and regression tests. A contract blocker is an honest alternative without memory, not an error forced to manufacture lift. Report completed patch plans separately from safe deferrals. The sample can also support an independently reasoned hypothesis; do not attribute every correct plan to memory.",
+        "deferred_plans": [
+          [
+            "record_blocker_exporter_offset_contract"
+          ]
+        ]
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "Reading the adapter, fixture and tests creates legitimate file-tool work. Do not add sleeps or an extra read merely to obtain context. Score delivery at the first submitted plan; a later correction does not repair timeliness."
+      }
+    },
+    {
+      "id": "a02",
+      "split": "development",
+      "family": "cross_domain_package_design",
+      "scene": {
+        "prompt": "Choose a package layout for an offline exhibition update campaign. Preserve every asset. Total update downloads must be at most 100 MB; the publishing team can build at most three packages. Use the supplied sizes and campaign, ignoring package metadata overhead. Submit the layout and its calculated campaign total. This is a design plan, not a live export.",
+        "files": {
+          "assets.csv": "asset,size_mb\nnarration,4\nwelcome_map,4\nevent_cards,6\nactivity_captions,6\nmodel_east,12\nmodel_west,12\n",
+          "campaign.csv": "repetitions,changed_assets\n4,narration+event_cards\n4,welcome_map+activity_captions\n",
+          "package-plan.yaml": "packages:\n  - [narration, welcome_map]\n  - [event_cards, activity_captions]\n  - [model_east, model_west]\n",
+          "delivery-contract.md": "If any member changes, a device downloads that entire package once for that update. Packages not touched by an update need no download. Each campaign row represents independent updates already separated in time; do not combine them into one update. All assets must remain available. Initial installation is outside this campaign budget.\n"
+        },
+        "actions": [
+          "set_packages_narration_welcome_map__event_cards_activity_captions__model_east_model_west",
+          "set_packages_narration_event_cards__welcome_map_activity_captions__model_east_model_west",
+          "set_packages_narration_model_east__welcome_map_model_west__event_cards_activity_captions",
+          "set_packages_narration_welcome_map_event_cards_activity_captions__model_east__model_west",
+          "set_one_package_per_asset",
+          "record_campaign_total_80_mb",
+          "record_campaign_total_160_mb",
+          "record_campaign_total_224_mb"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "exhibition_print_bridge",
+        "handbook_signature_lesson",
+        "exhibition_topic_layout",
+        "exhibition_asset_colors",
+        "exhibition_image_codec",
+        "exhibition_audio_transcript",
+        "handbook_cover_stock"
+      ],
+      "edges": [
+        {
+          "from": "exhibition_print_bridge",
+          "to": "handbook_signature_lesson",
+          "kind": "associative",
+          "weight": 0.7
+        },
+        {
+          "from": "exhibition_print_bridge",
+          "to": "exhibition_topic_layout",
+          "kind": "associative",
+          "weight": 0.3
+        }
+      ],
+      "host": {
+        "accepted_plans": [
+          [
+            "set_packages_narration_event_cards__welcome_map_activity_captions__model_east_model_west",
+            "record_campaign_total_80_mb"
+          ],
+          [
+            "record_campaign_total_80_mb",
+            "set_packages_narration_event_cards__welcome_map_activity_captions__model_east_model_west"
+          ]
+        ],
+        "forbidden_actions": [],
+        "required_memory": [
+          "handbook_signature_lesson"
+        ],
+        "irrelevant_memory": [
+          "exhibition_asset_colors",
+          "exhibition_image_codec",
+          "exhibition_audio_transcript",
+          "handbook_cover_stock"
+        ],
+        "memory_expectation": "ambiguous",
+        "information_gap": "The local delivery contract and campaign contain enough facts to derive an optimal layout. The potentially useful remote addition is the weighted co-revision design lesson, not hidden package mechanics or an arbitrary name.",
+        "decision_rationale": "Co-changing pairs make two 10 MB packages; four updates of each cost 80 MB total. The current topic grouping costs 160 MB; the mixed-static layout costs 224 MB; one package per asset also costs 80 MB but violates the visible three-package production cap. A correct independent calculation is legitimate. Required memory marks a proposed useful cross-domain target, not proof that graph-off cannot discover it. Credit a graph benefit only if actual native candidate/path and delivered-context differences precede a changed outcome at equal budget. Do not tune scores until this association wins.",
+        "deferred_plans": []
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "The asset sizes, campaign schedule, existing layout and delivery contract invite ordinary file inspection and arithmetic. No sleep, dummy tool call or instructed wait is present. Discovery and selection of the printing lesson are distinct from its actual pre-decision visibility."
+      }
+    },
+    {
+      "id": "a03",
+      "split": "development",
+      "family": "scoped_revision_and_archive",
+      "scene": {
+        "prompt": "Repair the calendar importer without breaking archived exports. Preserve the timestamp interpretation specified by each export schema, for both the current live export and the historical archive. Pick a compatibility rule and a regression plan. Do not rewrite archive files or infer format from their filenames; if the archive contract is unavailable, identify that gap.",
+        "files": {
+          "importer.py": "def import_time(event, metadata):\n    return parse_as_utc(event[\"start\"])\n",
+          "fixtures/archive.json": "{\"export_schema\":1,\"site_zone\":\"Europe/Paris\",\"events\":[{\"id\":\"archive-opening\",\"start\":\"2024-01-15T09:00:00\"}]}\n",
+          "fixtures/live.json": "{\"export_schema\":2,\"site_zone\":\"Europe/Paris\",\"events\":[{\"id\":\"live-tour\",\"start\":\"2026-06-18T13:30:00Z\"}]}\n",
+          "live_contract.md": "Schema 2 event timestamps are UTC. site_zone controls display. Archive interpretation is not documented here.\n"
+        },
+        "actions": [
+          "interpret_schema1_in_site_zone_and_schema2_as_utc",
+          "interpret_all_timestamps_as_utc",
+          "interpret_all_timestamps_in_site_zone",
+          "add_paired_archive_and_live_regressions",
+          "rewrite_archives_as_schema2",
+          "record_blocker_schema1_timestamp_contract"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "harbor_export_v1",
+        "harbor_export_v2",
+        "harbor_preview_zone",
+        "harbor_filename_date",
+        "harbor_zip_level",
+        "harbor_all_day",
+        "harbor_machine_zone"
+      ],
+      "edges": [
+        {
+          "from": "harbor_export_v2",
+          "to": "harbor_export_v1",
+          "kind": "derived_from",
+          "weight": 0.7
+        }
+      ],
+      "host": {
+        "accepted_plans": [
+          [
+            "interpret_schema1_in_site_zone_and_schema2_as_utc",
+            "add_paired_archive_and_live_regressions"
+          ],
+          [
+            "record_blocker_schema1_timestamp_contract"
+          ],
+          [
+            "add_paired_archive_and_live_regressions",
+            "interpret_schema1_in_site_zone_and_schema2_as_utc"
+          ]
+        ],
+        "forbidden_actions": [
+          "interpret_all_timestamps_as_utc",
+          "interpret_all_timestamps_in_site_zone",
+          "rewrite_archives_as_schema2"
+        ],
+        "required_memory": [
+          "harbor_export_v1"
+        ],
+        "irrelevant_memory": [
+          "harbor_export_v2",
+          "harbor_preview_zone",
+          "harbor_filename_date",
+          "harbor_zip_level",
+          "harbor_all_day",
+          "harbor_machine_zone"
+        ],
+        "memory_expectation": "needed",
+        "information_gap": "The live schema-2 rule is authoritative and already present. The historical schema-1 interpretation is absent; these are different events, so cross-fixture equality cannot establish the old contract.",
+        "decision_rationale": "The old card is useful precisely because its scope still applies to the archived input. The current card is redundant, not the universal winner. A safe explicit request for the archive contract is accepted and must be reported separately from a completed compatibility patch. Do not reward selection of two cards merely because there are two versions.",
+        "deferred_plans": [
+          [
+            "record_blocker_schema1_timestamp_contract"
+          ]
+        ]
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "The importer and two small fixture files provide organic inspection work; no timed workload is imposed. A card arriving after the compatibility plan is submitted is late even if the actor later cites it."
+      }
+    },
+    {
+      "id": "a04",
+      "split": "development",
+      "family": "unresolved_conflicting_evidence",
+      "scene": {
+        "prompt": "Write the next decision for Courier cache compression. A default change is allowed only if the available measurements establish a repeatable latency benefit on the intended workload; otherwise leave the current setting and specify the smallest comparison needed. Choose operations for the decision record, not a deployment.",
+        "files": {
+          "config.json": "{\"build\":12,\"compression\":false,\"cpu_cores\":2}\n",
+          "proposal.md": "Trial P: compression on reduced median latency 17%. Consider changing the default. Raw requests and CPU quota were not attached.\n",
+          "benchmark_plan.json": "{\"vary\":[\"payload_compressibility\",\"concurrent_requests\"],\"measure\":[\"p50_ms\",\"p95_ms\",\"cpu_ms\"],\"paired\":true}\n"
+        },
+        "actions": [
+          "record_default_on",
+          "record_default_off_as_settled",
+          "retain_current_setting_pending_paired_matrix",
+          "run_paired_matrix_with_fixed_corpus_and_cpu_quota",
+          "repeat_only_trial_p_summary"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "compression_trial_positive",
+        "compression_trial_negative",
+        "compression_summary_memo",
+        "compression_disk_archive",
+        "compression_diagnostic_log",
+        "compression_old_build",
+        "compression_ui_toggle"
+      ],
+      "edges": [
+        {
+          "from": "compression_trial_positive",
+          "to": "compression_trial_negative",
+          "kind": "associative",
+          "weight": 0.65
+        },
+        {
+          "from": "compression_summary_memo",
+          "to": "compression_trial_positive",
+          "kind": "derived_from",
+          "weight": 0.8
+        }
+      ],
+      "host": {
+        "accepted_plans": [
+          [
+            "retain_current_setting_pending_paired_matrix",
+            "run_paired_matrix_with_fixed_corpus_and_cpu_quota"
+          ]
+        ],
+        "forbidden_actions": [
+          "record_default_on",
+          "record_default_off_as_settled"
+        ],
+        "required_memory": [
+          "compression_trial_negative"
+        ],
+        "irrelevant_memory": [
+          "compression_summary_memo",
+          "compression_disk_archive",
+          "compression_diagnostic_log",
+          "compression_old_build",
+          "compression_ui_toggle"
+        ],
+        "memory_expectation": "ambiguous",
+        "information_gap": "The proposal contains only the favorable aggregate. The second trial supplies actual counter-evidence, while both trials lack enough retained controls to establish a universal default.",
+        "decision_rationale": "A conditional decision with a paired workload/CPU comparison is justified by the conflicting trials and also by visible missing metadata alone. Do not force a memory-only success. The negative trial adds missing counter-evidence; the positive trial is allowable but mostly overlaps the visible proposal and is not required to fill both packet slots. A single selected negative card can preserve the disagreement with the proposal. Chronology and repetition of a summary cannot adjudicate it. This does not exercise persistent contradiction marking or reconciliation.",
+        "deferred_plans": [
+          [
+            "retain_current_setting_pending_paired_matrix",
+            "run_paired_matrix_with_fixed_corpus_and_cpu_quota"
+          ]
+        ]
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "Reading the configuration, proposal and existing benchmark skeleton is natural preparation. No benchmark is actually launched by the fixture; submitting a benchmark operation is the graded first decision."
+      }
+    },
+    {
+      "id": "a05",
+      "split": "development",
+      "family": "self_contained_artifact",
+      "scene": {
+        "prompt": "Fix the local account-total reducer to implement contract.md, and add the regression that exercises this input. The supplied contract is complete for this task. Preserve refunds and do not contact any external service.",
+        "files": {
+          "contract.md": "Count each event_id once per account. A replay has the same event_id and amount. Different event IDs count separately even when amounts match. Sum integer amount_minor values, including negative refunds.\n",
+          "events.json": "[{\"account\":\"a\",\"event_id\":\"e1\",\"amount_minor\":500},{\"account\":\"a\",\"event_id\":\"e1\",\"amount_minor\":500},{\"account\":\"a\",\"event_id\":\"e2\",\"amount_minor\":500},{\"account\":\"a\",\"event_id\":\"e3\",\"amount_minor\":-100}]\n",
+          "reduce.py": "def total(events):\n    return sum({e[\"amount_minor\"] for e in events})\n"
+        },
+        "actions": [
+          "deduplicate_by_account_and_event_id_then_sum",
+          "deduplicate_by_amount_then_sum",
+          "sum_every_transport_row",
+          "drop_negative_amounts_then_sum",
+          "add_regression_account_a_equals_900",
+          "query_external_tax_rates"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "billing_current_contract",
+        "billing_old_import",
+        "billing_rounding",
+        "billing_refunds",
+        "billing_batch_retry",
+        "billing_chart_layout",
+        "billing_external_tax"
+      ],
+      "edges": [],
+      "host": {
+        "accepted_plans": [
+          [
+            "deduplicate_by_account_and_event_id_then_sum",
+            "add_regression_account_a_equals_900"
+          ],
+          [
+            "add_regression_account_a_equals_900",
+            "deduplicate_by_account_and_event_id_then_sum"
+          ]
+        ],
+        "forbidden_actions": [
+          "deduplicate_by_amount_then_sum",
+          "sum_every_transport_row",
+          "drop_negative_amounts_then_sum",
+          "query_external_tax_rates"
+        ],
+        "required_memory": [],
+        "irrelevant_memory": [
+          "billing_current_contract",
+          "billing_old_import",
+          "billing_rounding",
+          "billing_refunds",
+          "billing_batch_retry",
+          "billing_chart_layout",
+          "billing_external_tax"
+        ],
+        "memory_expectation": "unnecessary",
+        "information_gap": "There is no task-relevant information gap. The complete live contract and input determine both the reducer rule and the expected total.",
+        "decision_rationale": "This is not a trivial greeting-based abstention case: it requires inspecting code and reasoning about identity versus value. A redundant matching card does not earn marginal benefit, and mentioning rejection of the old importer does not make its delivery useful. Measure any unsolicited context burden independently of plan correctness.",
+        "deferred_plans": []
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "Inspecting the reducer, contract and input supplies ordinary tool boundaries. Reader abstention must not be achieved by labeling all substantive code tasks memory-dependent or skipping their discovery phase."
+      }
+    },
+    {
+      "id": "a06",
+      "split": "development",
+      "family": "no_tool_timeliness",
+      "scene": {
+        "prompt": "Quick decision, no tools: for a Cress map-change JSON import, should the prefilter keep or drop records with empty geometry? Choose the setting, or state the precise contract you need before deciding. Keep the answer to that decision.",
+        "files": {},
+        "actions": [
+          "keep_empty_geometry_records",
+          "drop_empty_geometry_records",
+          "request_change_stream_empty_geometry_contract"
+        ],
+        "max_actions": 1,
+        "tool_policy": "none"
+      },
+      "memory_keys": [
+        "map_empty_geometry_contract",
+        "map_static_export",
+        "map_point_simplification",
+        "map_json_whitespace",
+        "map_region_colors",
+        "map_upload_limit",
+        "map_last_preview"
+      ],
+      "edges": [],
+      "host": {
+        "accepted_plans": [
+          [
+            "keep_empty_geometry_records"
+          ],
+          [
+            "request_change_stream_empty_geometry_contract"
+          ]
+        ],
+        "forbidden_actions": [
+          "drop_empty_geometry_records"
+        ],
+        "required_memory": [
+          "map_empty_geometry_contract"
+        ],
+        "irrelevant_memory": [
+          "map_static_export",
+          "map_point_simplification",
+          "map_json_whitespace",
+          "map_region_colors",
+          "map_upload_limit",
+          "map_last_preview"
+        ],
+        "memory_expectation": "needed",
+        "information_gap": "Whether an empty geometry is invalid data or a tombstone is not stated in the prompt. The prior integration fact can resolve it; guessing from static-geometry conventions cannot.",
+        "decision_rationale": "A request for the exact missing contract is a legitimate no-memory outcome, distinct from completing the configuration choice. The current PostToolUse delivery design has no covered boundary here. Count an absent pre-decision packet as a missed timing opportunity when useful memory exists, not selector failure and not a reason to insert a fake tool call.",
+        "deferred_plans": [
+          [
+            "request_change_stream_empty_geometry_contract"
+          ]
+        ]
+      },
+      "timing": {
+        "kind": "no_tool",
+        "decision_event": "first_submission",
+        "notes": "No files, tools, sleeps, polling, hidden yield or wait hint. Submit immediately under the ordinary actor flow. Discovery/selection may finish after submission; that is late, not useful delivery. This deliberately measures the current no-tool limitation."
+      }
+    },
+    {
+      "id": "a07",
+      "split": "holdout",
+      "family": "tempting_false_analogy",
+      "scene": {
+        "prompt": "Repair the checkout callback reducer using the current contract and trace. Every distinct purchase must remain represented, including rapid purchases from different kiosks. Choose a rule and regression; changes must not rely on guessed minimum purchase intervals.",
+        "files": {
+          "contract.md": "purchase_id identifies a purchase. Transport retries retain purchase_id. Distinct purchase IDs are distinct purchases, regardless of kiosk or timestamp.\n",
+          "callbacks.json": "[{\"purchase_id\":\"p1\",\"kiosk\":\"north\",\"at_ms\":1000},{\"purchase_id\":\"p2\",\"kiosk\":\"south\",\"at_ms\":1040},{\"purchase_id\":\"p1\",\"kiosk\":\"north\",\"at_ms\":1070}]\n",
+          "reducer.py": "def keep(event, previous):\n    return previous is None or event[\"at_ms\"] - previous[\"at_ms\"] > 200\n"
+        },
+        "actions": [
+          "replace_time_window_with_purchase_id_deduplication",
+          "widen_time_window_to_500_ms",
+          "use_one_time_window_per_kiosk",
+          "add_regression_preserving_p1_and_p2_once_each",
+          "keep_current_time_window",
+          "remove_all_deduplication"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "checkout_turnstile_bridge",
+        "turnstile_debounce_lesson",
+        "checkout_old_retry",
+        "checkout_timestamp_precision",
+        "checkout_button_spacing",
+        "checkout_daily_chart",
+        "turnstile_paint"
+      ],
+      "edges": [
+        {
+          "from": "checkout_turnstile_bridge",
+          "to": "turnstile_debounce_lesson",
+          "kind": "associative",
+          "weight": 0.7
+        },
+        {
+          "from": "checkout_turnstile_bridge",
+          "to": "checkout_old_retry",
+          "kind": "associative",
+          "weight": 0.4
+        }
+      ],
+      "host": {
+        "accepted_plans": [
+          [
+            "replace_time_window_with_purchase_id_deduplication",
+            "add_regression_preserving_p1_and_p2_once_each"
+          ],
+          [
+            "add_regression_preserving_p1_and_p2_once_each",
+            "replace_time_window_with_purchase_id_deduplication"
+          ]
+        ],
+        "forbidden_actions": [
+          "widen_time_window_to_500_ms",
+          "use_one_time_window_per_kiosk",
+          "keep_current_time_window",
+          "remove_all_deduplication"
+        ],
+        "required_memory": [],
+        "irrelevant_memory": [
+          "checkout_turnstile_bridge",
+          "turnstile_debounce_lesson",
+          "checkout_old_retry",
+          "checkout_timestamp_precision",
+          "checkout_button_spacing",
+          "checkout_daily_chart",
+          "turnstile_paint"
+        ],
+        "memory_expectation": "unnecessary",
+        "information_gap": "There is no missing identity contract. The tempting source-domain debounce lesson depends on a physical spacing guarantee explicitly absent here.",
+        "decision_rationale": "The right abstraction is stable identity, not shared temporal appearance. The source lesson is valid in its own domain but unnecessary for this fully specified task. Its rejection is not automatic evidence of helpfulness. Track delivery burden and harmful application separately; an irrelevant selected card need not cause a bad plan.",
+        "deferred_plans": []
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "The current reducer and trace justify normal local inspection. Holdout is reserved from retrieval and model preflight; author/scorer review is permitted and is not unseen-data evaluation."
+      }
+    },
+    {
+      "id": "a08",
+      "split": "holdout",
+      "family": "episodic_interleaving_and_scope",
+      "scene": {
+        "prompt": "Resume the synthetic tile-atlas review and choose the next bounded inspection plan. Continue from the latest unresolved finding if you can establish it; otherwise inventory the open review questions before choosing a fix. Keep the existing artifacts until you have identified a reason to regenerate them. A remembered observation does not prove the current output is correct.",
+        "files": {
+          "atlas/manifest.json": "{\"source_revision\":31,\"atlas\":\"atlas-r31.png\",\"gutter_px\":2,\"export_completed\":true,\"review\":\"pending\"}\n",
+          "atlas/review.md": "Review pending. Existing atlas is available to the reviewer; no current finding is recorded in this local note.\n",
+          "generator.py": "def export_tiles(source, writer):\n    for tile in source:\n        writer.add(tile.rgba, gutter=2)\n"
+        },
+        "actions": [
+          "verify_existing_atlas_against_revision31_manifest",
+          "inspect_transparent_edge_alpha_in_existing_atlas",
+          "inspect_tile_order_against_source_index",
+          "inspect_gutter_width_at_tile_boundaries",
+          "write_inspection_findings_before_editing",
+          "regenerate_all_tiles_immediately",
+          "export_invoice_pdf_proof",
+          "apply_sepia_palette",
+          "inventory_open_atlas_review_questions"
+        ],
+        "max_actions": 3,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "atlas_initial_handoff",
+        "invoice_midway_episode",
+        "atlas_latest_handoff",
+        "invoice_latest_episode",
+        "atlas_palette_experiment",
+        "atlas_old_revision",
+        "atlas_layout_reference"
+      ],
+      "edges": [
+        {
+          "from": "atlas_initial_handoff",
+          "to": "invoice_midway_episode",
+          "kind": "transition",
+          "weight": 0.6
+        },
+        {
+          "from": "atlas_initial_handoff",
+          "to": "atlas_latest_handoff",
+          "kind": "transition",
+          "weight": 0.7
+        },
+        {
+          "from": "atlas_latest_handoff",
+          "to": "invoice_latest_episode",
+          "kind": "transition",
+          "weight": 0.6
+        },
+        {
+          "from": "atlas_latest_handoff",
+          "to": "atlas_palette_experiment",
+          "kind": "transition",
+          "weight": 0.5
+        }
+      ],
+      "host": {
+        "accepted_plans": [
+          [
+            "verify_existing_atlas_against_revision31_manifest",
+            "inspect_transparent_edge_alpha_in_existing_atlas",
+            "write_inspection_findings_before_editing"
+          ],
+          [
+            "verify_existing_atlas_against_revision31_manifest",
+            "inventory_open_atlas_review_questions"
+          ],
+          [
+            "inspect_transparent_edge_alpha_in_existing_atlas",
+            "verify_existing_atlas_against_revision31_manifest",
+            "write_inspection_findings_before_editing"
+          ],
+          [
+            "inventory_open_atlas_review_questions",
+            "verify_existing_atlas_against_revision31_manifest"
+          ]
+        ],
+        "forbidden_actions": [
+          "regenerate_all_tiles_immediately",
+          "export_invoice_pdf_proof",
+          "apply_sepia_palette"
+        ],
+        "required_memory": [
+          "atlas_latest_handoff"
+        ],
+        "irrelevant_memory": [
+          "invoice_midway_episode",
+          "invoice_latest_episode",
+          "atlas_palette_experiment",
+          "atlas_old_revision",
+          "atlas_layout_reference"
+        ],
+        "memory_expectation": "needed",
+        "information_gap": "The workspace says review is pending but omits the latest task-specific observation and next check. The latest overall episode belongs to an interleaved invoice task; thread identity alone cannot choose a task.",
+        "decision_rationale": "A focused alpha inspection can recover useful continuity; a general review inventory is an honest alternative without that context and is classified deferred. Ready here means a concrete plan for the requested next inspection, not an executed diagnosis or a resolved rendering defect. The initial atlas handoff also supports a coarser edge-alpha review and is not irrelevant; the latest handoff is the target hypothesis for its specific pale-fringe/premultiplication clue, not uniquely necessary causal evidence. Cards remain native episodes, not semantic replacements. If the current native candidate surface cannot discover episode cards, report that capability limitation and leave episode selection/benefit not exercised. Summary text carries scope/time because the present selector does not see typed episode facets. No permanent threads-as-buckets policy, automatic chain reconstruction or automatic ingestion is implied.",
+        "deferred_plans": [
+          [
+            "verify_existing_atlas_against_revision31_manifest",
+            "inventory_open_atlas_review_questions"
+          ],
+          [
+            "inventory_open_atlas_review_questions",
+            "verify_existing_atlas_against_revision31_manifest"
+          ]
+        ]
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "Manifest and generator inspection are legitimate tool boundaries; no image payload is required for this first-decision plan. This case tests only authored episode retrieval/selection and continuity planning, not executed visual diagnosis. Reserved from native/model preflight, not unseen to authors or scorer reviewers."
+      }
+    },
+    {
+      "id": "a09",
+      "split": "holdout",
+      "family": "rare_contextual_recurrence",
+      "scene": {
+        "prompt": "Choose a patch plan for portrait thumbnails from Larch annotation packet v3. Output must be upright and the selected region must be preserved. Inspect the local pipeline and manifest; do not silently reinterpret coordinate units if the packet contract cannot be established.",
+        "files": {
+          "pipeline.py": "def thumbnail(image, polygon):\n    upright = apply_exif_orientation(image)\n    return crop_polygon(upright, polygon)\n",
+          "input.json": "{\"packet_version\":3,\"sensor_width\":1200,\"sensor_height\":800,\"exif_orientation\":6,\"polygon\":[[100,100],[400,100],[400,500],[100,500]]}\n",
+          "tests.md": "Existing smoke test: square centered polygon; orientation=1. Add an asymmetric orientation=6 regression to check region preservation.\n"
+        },
+        "actions": [
+          "crop_sensor_frame_then_apply_orientation",
+          "orient_image_and_transform_polygon_together",
+          "orient_image_only_before_using_polygon",
+          "remove_orientation_handling",
+          "add_asymmetric_orientation6_region_regression",
+          "record_blocker_v3_polygon_coordinate_basis"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "sensor_roi_basis",
+        "sensor_preview_orientation",
+        "sensor_export_orientation",
+        "sensor_v1_annotations",
+        "sensor_jpeg_quality",
+        "sensor_color_profile",
+        "sensor_old_square_case"
+      ],
+      "edges": [
+        {
+          "from": "sensor_preview_orientation",
+          "to": "sensor_roi_basis",
+          "kind": "associative",
+          "weight": 0.55
+        }
+      ],
+      "host": {
+        "accepted_plans": [
+          [
+            "crop_sensor_frame_then_apply_orientation",
+            "add_asymmetric_orientation6_region_regression"
+          ],
+          [
+            "orient_image_and_transform_polygon_together",
+            "add_asymmetric_orientation6_region_regression"
+          ],
+          [
+            "record_blocker_v3_polygon_coordinate_basis"
+          ],
+          [
+            "add_asymmetric_orientation6_region_regression",
+            "crop_sensor_frame_then_apply_orientation"
+          ],
+          [
+            "add_asymmetric_orientation6_region_regression",
+            "orient_image_and_transform_polygon_together"
+          ]
+        ],
+        "forbidden_actions": [
+          "orient_image_only_before_using_polygon",
+          "remove_orientation_handling"
+        ],
+        "required_memory": [
+          "sensor_roi_basis"
+        ],
+        "irrelevant_memory": [
+          "sensor_preview_orientation",
+          "sensor_export_orientation",
+          "sensor_v1_annotations",
+          "sensor_jpeg_quality",
+          "sensor_color_profile",
+          "sensor_old_square_case"
+        ],
+        "memory_expectation": "needed",
+        "information_gap": "The packet version and orientation are visible, but the stored polygon coordinate basis is not. The rare prior integration incident supplies that applicability-specific fact.",
+        "decision_rationale": "Two geometrically equivalent repairs are accepted, avoiding one arbitrary favored implementation. A precise contract blocker is also legitimate and distinct from a completed patch. This is an authored rare-lesson recurrence opportunity, not evidence of retention, decay resistance, long-run learning or independent prior experience.",
+        "deferred_plans": [
+          [
+            "record_blocker_v3_polygon_coordinate_basis"
+          ]
+        ]
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "Reading the implementation, manifest and smoke-test description is ordinary local work. No artificial image rendering or delay is required before first submission. Reserved from retrieval/model preflight; authors and scorer reviewers have seen it."
+      }
+    },
+    {
+      "id": "a10",
+      "split": "holdout",
+      "family": "installed_capability_over_past_experiment",
+      "scene": {
+        "prompt": "Prepare a local export plan for this poster proof, using only the installed application. The recipient accepts a PNG proof at the stated dimensions. Do not install plugins, change dependencies, claim an unsupported format was produced, or redesign the poster.",
+        "files": {
+          "installed-capabilities.json": "{\"application\":\"RasterDesk\",\"version\":\"2.4\",\"exports\":[\"png\"],\"vector_backend\":false}\n",
+          "proof-brief.md": "Deliver a 2400 x 3600 pixel PNG proof. Preserve the opaque cream background and current typography. Editable vector source is not required for this review.\n",
+          "poster.json": "{\"width\":2400,\"height\":3600,\"background\":\"#f6eed8\",\"text_status\":\"approved\"}\n"
+        },
+        "actions": [
+          "export_png_at_2400_by_3600",
+          "verify_dimensions_and_opaque_background",
+          "export_svg_from_installed_app",
+          "install_vector_backend_plugin",
+          "change_poster_typography"
+        ],
+        "max_actions": 2,
+        "tool_policy": "allowed"
+      },
+      "memory_keys": [
+        "poster_vector_experiment",
+        "poster_png_contract",
+        "poster_old_install_guide",
+        "poster_print_density",
+        "poster_draft_font",
+        "poster_browser_preview",
+        "poster_alpha_background"
+      ],
+      "edges": [],
+      "host": {
+        "accepted_plans": [
+          [
+            "export_png_at_2400_by_3600",
+            "verify_dimensions_and_opaque_background"
+          ]
+        ],
+        "forbidden_actions": [
+          "export_svg_from_installed_app",
+          "install_vector_backend_plugin",
+          "change_poster_typography"
+        ],
+        "required_memory": [],
+        "irrelevant_memory": [
+          "poster_vector_experiment",
+          "poster_png_contract",
+          "poster_old_install_guide",
+          "poster_print_density",
+          "poster_draft_font",
+          "poster_browser_preview",
+          "poster_alpha_background"
+        ],
+        "memory_expectation": "unnecessary",
+        "information_gap": "There is no missing capability or output requirement. The current installed inventory and proof brief settle the plan.",
+        "decision_rationale": "A past successful experiment cannot upgrade the current installed artifact. The reader should not inject a development-branch capability as if it were available here, nor require the user to manage a memory ritual. Matching PNG and background notes are redundant. This is a local synthetic capability fixture, not inspection or modification of any real application.",
+        "deferred_plans": []
+      },
+      "timing": {
+        "kind": "organic_tools",
+        "decision_event": "first_submission",
+        "notes": "Reading the installed-capability fixture and proof brief is enough organic task work; no real app, plugin, service or model is invoked by fixture preparation. Reserved from retrieval/model preflight and explicitly author/scorer-visible."
+      }
+    }
+  ]
+}

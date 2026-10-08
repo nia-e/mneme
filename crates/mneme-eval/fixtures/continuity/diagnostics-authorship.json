@@ -1,0 +1,46 @@
+{
+  "schema": "frozen_authorship_v1",
+  "source": "Fixture-controlled synthetic authorship derived only from the scripted learn observation and the revise public API notice, independently of grading rules. Frozen before comparison; it is not natural authorship by real actors.",
+  "after_learn": [
+    {
+      "op": "note",
+      "alias": "lesson",
+      "summary": "Absent backend: opening catalog created storage.",
+      "body": "Observed in the catalog experiment: open_or_create made an absent backend usable and created state. For diagnostics using this opener, inspect presence first and report missing without opening an absent backend. This restriction concerns the opener used in that observation."
+    },
+    {
+      "op": "note",
+      "alias": "context",
+      "summary": "Catalog backend diagnostics experience.",
+      "body": "The catalog experiment records the effects of opening an absent backend. Inspect this experience before using that backend opener for diagnostics."
+    }
+  ],
+  "after_transfer": [],
+  "after_revise": [
+    {
+      "op": "note",
+      "alias": "correction",
+      "summary": "Correction: inspect_existing can open absent storage without initialization.",
+      "body": "The search API explicitly guarantees inspect_existing returns missing without creation. Exercise it when testing diagnostics compatibility. Keep presence-first handling for components still using open_or_create. The original observation remains true for the old API; its broad operational restriction does not apply to this new opener."
+    },
+    {
+      "op": "supersede",
+      "winner": "correction",
+      "loser": "lesson"
+    }
+  ],
+  "graph_after_learn": [
+    {
+      "op": "link",
+      "from": "context",
+      "to": "lesson"
+    }
+  ],
+  "graph_after_revise": [
+    {
+      "op": "link",
+      "from": "context",
+      "to": "correction"
+    }
+  ]
+}

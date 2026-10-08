@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mneme Bootstrap Inspect"
+  short_description: "Inspect bootstrap state without mutations"
+  default_prompt: "Use $mneme-bootstrap-inspect to inspect this repository’s Mneme bootstrap state without writing anything."

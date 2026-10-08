@@ -1,0 +1,20 @@
+[package]
+license.workspace = true
+name = "mneme-library"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["fast-rerank"]
+fast-rerank = ["dep:mneme-embed"]
+
+[dependencies]
+async-trait.workspace = true
+futures = "0.3"
+mneme-core.workspace = true
+mneme-present.workspace = true
+mneme-mcp-client = { path = "../mneme-mcp-client" }
+mneme-embed = { path = "../mneme-embed", optional = true, features = ["fastembed"] }
+serde.workspace = true
+serde_json = "1"
+tokio = { workspace = true, features = ["time", "sync"] }

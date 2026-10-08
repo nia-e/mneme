@@ -1,0 +1,270 @@
+{
+  "schema": "mneme.episodic-v1.assessment.v1",
+  "marker": "PRIVATE_ASSESSMENT_ONLY_EPISODIC_V1",
+  "synthetic": true,
+  "mechanics": {
+    "counts": {
+      "episode_roots": 8,
+      "episode_editions": 9,
+      "semantic_nodes": 3
+    },
+    "occurrence_ascending_groups": [
+      [
+        "e07"
+      ],
+      [
+        "e01"
+      ],
+      [
+        "e02"
+      ],
+      [
+        "e03",
+        "e04"
+      ],
+      [
+        "e05"
+      ],
+      [
+        "e06"
+      ],
+      [
+        "e08"
+      ]
+    ],
+    "tie_break": "Within an equal occurrence-start group, use the frozen public timeline contract and returned IDs, never fixture alias order or insertion order.",
+    "root_recording_ascending": [
+      "e01",
+      "e02",
+      "e03",
+      "e04",
+      "e05",
+      "e06",
+      "e08",
+      "e07"
+    ],
+    "late_recorded_root": "e07",
+    "tied_concurrent_roots": [
+      "e03",
+      "e04"
+    ],
+    "page_size": 2,
+    "thread_roots": {
+      "lantern-viewer": [
+        "e01",
+        "e02",
+        "e03",
+        "e05",
+        "e06",
+        "e08"
+      ],
+      "beacon-import": [
+        "e04"
+      ],
+      "rainmap": [
+        "e07"
+      ]
+    },
+    "current_editions": {
+      "e01": "e01",
+      "e02": "e02",
+      "e03": "e03",
+      "e04": "e04",
+      "e05": "e05-r1",
+      "e06": "e06",
+      "e07": "e07",
+      "e08": "e08"
+    },
+    "no_lesson_root": "e05",
+    "edition_case": {
+      "root": "e05",
+      "original": "e05",
+      "current": "e05-r1",
+      "original_excerpt": "lovely amreb",
+      "current_excerpt": "lovely amber",
+      "old_summary_cue": "amreb",
+      "current_summary_cue": "amber",
+      "incoming_reference": {
+        "from": "e08",
+        "to": "e05",
+        "kind": "associative"
+      },
+      "assertions": [
+        "Generic exact get of the original edition retains original content and source proof.",
+        "Dedicated root get resolves the current edition and identifies both root and current IDs.",
+        "Revision history contains the original and current editions in ordinal order.",
+        "Original recording time and occurrence interval survive editorial revision; edition creation time advances.",
+        "Current-summary lexical cue search excludes the obsolete amreb edition and returns e05-r1 for amber.",
+        "The existing e08 to e05 reference remains intact and can lead intentionally to the root/current episode.",
+        "No semantic lesson link is required for either edition."
+      ]
+    },
+    "semantic_revision": {
+      "winner": "l02",
+      "loser": "l01",
+      "unmodified_experience": "e03"
+    },
+    "cue_cases": [
+      {
+        "cue": "manifest",
+        "required_roots": [
+          "e07"
+        ]
+      },
+      {
+        "cue": "kite",
+        "required_roots": [
+          "e05"
+        ],
+        "required_current_editions": [
+          "e05-r1"
+        ]
+      },
+      {
+        "cue": "decoder",
+        "required_roots": [
+          "e04"
+        ]
+      },
+      {
+        "cue": "prototype",
+        "required_roots": [
+          "e08"
+        ]
+      }
+    ],
+    "assertions": [
+      "All corpus content, source proofs, occurrence intervals, threads and authored links round-trip.",
+      "A complete size-two page walk visits every root exactly once, including the tied pair; no order is inferred from ULID timestamps.",
+      "Late recording is ordered by occurrence when occurrence order is requested, independently of root recording and edition creation.",
+      "Thread filters return the listed roots, with current editions, and do not expose unrelated thread episodes.",
+      "Semantic seed ranking and expansion exclude all episode editions before consuming their semantic top-k or traversal budgets.",
+      "Episodic lexical current-summary search excludes semantic notes and prior editions; explicit cross-kind reference reads remain possible.",
+      "L02 remains the current recommendation; L01 remains historically readable with supersession metadata. E03 retains its original successful local outcome.",
+      "Exact append replay returns the same root and edition without adding a node; conflicting reuse follows the source-key conflict contract and does not edit.",
+      "Exact editorial replay adds no further edition. A competing new successor with a stale expected head is rejected without changing current head.",
+      "Semantic maintenance preserves every episode edition and episode-incident evidence link; similar descriptions are not merged as duplicate facts.",
+      "Read/page bounds and exhaustion metadata follow the public contract; the fixture never requires an unbounded scan.",
+      "Two scripted rehearsals yield identical semantic artifacts after excluding explicitly unavailable wall-clock or inference metrics."
+    ]
+  },
+  "qualitative": {
+    "actor_budget": {
+      "max_memory_calls": 12,
+      "max_tool_response_bytes": 8192,
+      "max_answer_words": 250
+    },
+    "method": "Three independent fresh read-only actors. Score actual packets manually against these assertions; no keyword-only or scripted-success claim.",
+    "dimensions": [
+      {
+        "name": "factual_distinctions",
+        "points": {
+          "0": "Wrong or substantially unsupported account.",
+          "1": "Mostly right with a material omission.",
+          "2": "Required factual distinctions are clear."
+        }
+      },
+      {
+        "name": "supporting_references",
+        "points": {
+          "0": "Missing or unrelated references.",
+          "1": "Some relevant references but weak support for key claims.",
+          "2": "A few actual returned episode/lesson IDs support the key claims."
+        }
+      },
+      {
+        "name": "historical_vs_current",
+        "points": {
+          "0": "Conflates past belief, experience, or obsolete advice with current knowledge.",
+          "1": "No direct contradiction, but an important temporal distinction is implicit.",
+          "2": "Explicitly preserves the relevant uncertainty, revision, or current-versus-historical boundary."
+        }
+      },
+      {
+        "name": "concise_usefulness",
+        "points": {
+          "0": "Diary dump, unhelpful generality, or answer over budget.",
+          "1": "Usable but diffuse or missing a practical connection.",
+          "2": "Specific, compact recollection that answers the question without importing the whole corpus."
+        }
+      }
+    ],
+    "hard_failures": [
+      "Presents an invented experience or unrecorded completion as fact.",
+      "Presents superseded L01 as the current recommendation.",
+      "Claims the new dashboard definitely has the same cause without current evidence.",
+      "Reads coordinator fixture/assessment files or any live store.",
+      "Exceeds the enforced read/response envelope or mutates memory."
+    ],
+    "cases": [
+      {
+        "id": "recent_activity",
+        "question": "What have you been up to since September 24?",
+        "required_distinctions": [
+          "The bounded field request was installed after checks; it is not merely a plan.",
+          "The floating layout is only a rough, unreviewed prototype.",
+          "The beacon image catalog import remains paused; no import completion is recorded."
+        ],
+        "supporting_aliases": [
+          "e06",
+          "e08",
+          "e04"
+        ],
+        "optional_character": "The paper-kite pause may add texture; do not manufacture a productivity lesson from it.",
+        "forbidden_claims": [
+          "The floating layout is installed.",
+          "The beacon import finished."
+        ]
+      },
+      {
+        "id": "changed_recommendation",
+        "question": "Why did the edge-loading recommendation change?",
+        "required_distinctions": [
+          "Capped per-node reads worked in local checks and were actually installed.",
+          "Remote use exposed repeated-request latency.",
+          "A checked, installed bounded field request replaced the old approach.",
+          "L02 is current while E03 still describes a true earlier local success."
+        ],
+        "supporting_aliases": [
+          "e03",
+          "e06",
+          "l02"
+        ],
+        "optional_aliases": [
+          "l01",
+          "l03",
+          "e02"
+        ],
+        "forbidden_claims": [
+          "The per-node approach never worked.",
+          "The old episode has been rewritten to describe the batch implementation."
+        ]
+      },
+      {
+        "id": "similar_situation",
+        "question": "A dashboard is blank. Have we encountered anything similar before?",
+        "required_distinctions": [
+          "At least one prior incident involved an incomplete view rather than missing underlying records.",
+          "The recalled cause is a diagnostic possibility for the new dashboard, not an established diagnosis."
+        ],
+        "supporting_alternatives": [
+          [
+            "e02"
+          ],
+          [
+            "e07"
+          ]
+        ],
+        "optional_aliases": [
+          "e01",
+          "l03"
+        ],
+        "forbidden_claims": [
+          "The current dashboard definitely has an unloaded manifest.",
+          "The current database definitely lacks relationships."
+        ]
+      }
+    ],
+    "reporting": "Report each dimension and any hard failure plus the actual packet. This is a small synthetic acceptance exercise, not a statistical benchmark, graph advantage, semantic-search evaluation, or natural memory-authoring result."
+  }
+}

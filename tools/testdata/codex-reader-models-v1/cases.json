@@ -1,0 +1,603 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "c01",
+      "domain": "coding/build-operations",
+      "difficulty": "simple",
+      "dialogue": [
+        {
+          "role": "user",
+          "text": "The Linux debug build of our Rust workspace suddenly recompiles the shader crate after almost any asset edit. I only need the likely local cause and the smallest thing to inspect next."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c01_342868060a",
+          "label": "Release linker tuning",
+          "summary": "The release profile uses thin LTO and a single codegen unit to reduce the shipped binary size. This does not affect the debug shader rebuild path.",
+          "source": "ops/releases/2026-07-03-linux-linker.md#profile",
+          "fingerprint": "sha256:02ff83010586ce365ae797fb4fabd48b0b19651cd47a5a4da27bfe78c03c54fa"
+        },
+        {
+          "id": "c01_7d58be8225",
+          "label": "Shader build-script watch scope",
+          "summary": "The shader crate's build.rs emits cargo:rerun-if-changed=assets, so Cargo fingerprints the whole directory. The intended narrow input is assets/shaders.toml; inspecting the emitted directives is the quickest confirmation.",
+          "source": "notes/build/2026-08-14-shader-watch.md#watch-scope",
+          "fingerprint": "sha256:d6b0d08829695cd33090abf51debe6697c0f1ec49fa0c0cda58d8710dbdb7fa8"
+        },
+        {
+          "id": "c01_5e267396c2",
+          "label": "Workspace build-script map",
+          "summary": "The shader crate is the only member of this workspace with a custom build script; the other crates consume its generated module but do not declare asset inputs themselves.",
+          "source": "notes/build/2026-08-02-workspace-map.md#build-scripts",
+          "fingerprint": "sha256:05235ea8cae2844f32284a3fecff57baff7581fffb0e78adc4f14647ee2c03f8"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c01_7d58be8225"
+        ],
+        "drop": [
+          "c01_342868060a"
+        ],
+        "allow": [
+          "c01_5e267396c2"
+        ],
+        "rationale": "The build-script watch note names the matching symptom, mechanism, and next inspection. The workspace map is optional corroborating context; release linker tuning concerns an unrelated build profile."
+      },
+      "kind": "useful"
+    },
+    {
+      "id": "c02",
+      "domain": "creative-writing",
+      "difficulty": "moderate",
+      "dialogue": [
+        {
+          "role": "assistant",
+          "text": "The opening can go lyrical or spare. Which revision are we doing first?"
+        },
+        {
+          "role": "user",
+          "text": "Revise the lighthouse story's opening scene. Preserve the established narrator rule, but make the first page less dreamy and get us to the missing-boat problem sooner."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c02_0d6ea07125",
+          "label": "Unused storm ending",
+          "summary": "An abandoned outline ended with the keeper destroying the lens during a storm. The ending was cut before the current missing-boat draft began.",
+          "source": "workshop/lighthouse/archive/outline-03.md#discarded-ending",
+          "fingerprint": "sha256:8c7d20fd2301060a505d6303130d4657b843db0ccdbbd091eded10248910e768"
+        },
+        {
+          "id": "c02_1872e643ec",
+          "label": "Poem cadence preference",
+          "summary": "For the unrelated salt-marsh poem, alternating long and one-word lines produced the desired tidal rhythm.",
+          "source": "workshop/poems/2026-08-19-salt-marsh.md#cadence",
+          "fingerprint": "sha256:4a0467e85333872e00d166835186979431326b74d5661281beb05796c76632aa"
+        },
+        {
+          "id": "c02_bcc6368ec7",
+          "label": "Lighthouse narrator constraint",
+          "summary": "Workshop decision: the lighthouse narrates only what its beam physically illuminates. It may infer emotion from visible action, but it cannot report thoughts, sounds beyond the glass, or events during the dark interval.",
+          "source": "workshop/lighthouse/2026-09-02-voice-rules.md#beam-pov",
+          "fingerprint": "sha256:a4f3068f8be7319798d1f39f84ba095a8a1aa4c498bcd7a3cf7dfabba805d3c0"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c02_bcc6368ec7"
+        ],
+        "drop": [
+          "c02_0d6ea07125",
+          "c02_1872e643ec"
+        ],
+        "allow": [],
+        "rationale": "The narrator constraint is required to revise the current opening without breaking its point of view. A discarded ending and another work's cadence are not useful."
+      },
+      "kind": "useful"
+    },
+    {
+      "id": "c03",
+      "domain": "planning/dinner-logistics",
+      "difficulty": "simple",
+      "dialogue": [
+        {
+          "role": "user",
+          "text": "Pick one starter for Friday's dinner with Mara: smashed cucumber with sesame dressing, tomato toast, or mushroom skewers. Optimize for something she can actually eat; explain the choice in a sentence."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c03_5a906ad27d",
+          "label": "Old picnic favorite",
+          "summary": "At a 2024 picnic, Mara liked a tahini noodle salad before the sesame reaction was diagnosed.",
+          "source": "archive/picnics/2024-06-22-menu.md#feedback",
+          "fingerprint": "sha256:334cefcf2c7e4f3925948c6646c48e8face13609bfc7fbb5ce0bcc277bf99997"
+        },
+        {
+          "id": "c03_f952536c54",
+          "label": "Mara's current food constraints",
+          "summary": "Mara avoids sesame entirely because even small amounts trigger hives. She eats gluten and mushrooms, and asked that raw onion be left off her portion.",
+          "source": "people/meal-notes/2026-09-10-mara.md#constraints",
+          "fingerprint": "sha256:08fc5e0d5af8dc6bb8496ea84024f84a2244e9337b23ab38e208b3d8f4dc2a7c"
+        },
+        {
+          "id": "c03_3500871313",
+          "label": "Friday oven schedule",
+          "summary": "The main course occupies the oven from 18:10 to 18:50, leaving the grill pan and toaster free for starters.",
+          "source": "plans/dinners/2026-09-25-friday.md#equipment",
+          "fingerprint": "sha256:7d5a65f60779a42b9f1a71e80a256d7deb124cd88eb8ba274e9522cc726b354d"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c03_f952536c54"
+        ],
+        "drop": [
+          "c03_3500871313",
+          "c03_5a906ad27d"
+        ],
+        "allow": [],
+        "rationale": "The current allergy note distinguishes the safe options and supplies the raw-onion caveat. Equipment is not a constraint for these choices, and the pre-diagnosis favorite is dangerously stale."
+      },
+      "kind": "useful"
+    },
+    {
+      "id": "c04",
+      "domain": "learning/language-study",
+      "difficulty": "moderate",
+      "dialogue": [
+        {
+          "role": "assistant",
+          "text": "You have thirty minutes tonight. We can do a grammar lesson, a podcast, or review."
+        },
+        {
+          "role": "user",
+          "text": "Choose tonight's Japanese study activity. I want the option most likely to fix the mistake pattern my tutor has been seeing, not just whatever is generally good practice."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c04_d6c50e680c",
+          "label": "Podcast backlog",
+          "summary": "There are six unplayed beginner podcasts about travel vocabulary, each about twenty minutes long.",
+          "source": "study/japanese/backlog.md#podcasts",
+          "fingerprint": "sha256:d59746af16b792e1633759249869a9221e587128a7f2edb53f954e35b895977a"
+        },
+        {
+          "id": "c04_242534abd5",
+          "label": "Kanji streak",
+          "summary": "The daily kanji review streak is 41 days, and today's queue contains eight mature cards.",
+          "source": "study/japanese/2026-09-28-dashboard.txt#reviews",
+          "fingerprint": "sha256:dca9de26905c2df123134bd931d97c0bb874a0b2ac53cbaac6407540d6eddc0d"
+        },
+        {
+          "id": "c04_30ed0bfb26",
+          "label": "Recent tutor diagnosis",
+          "summary": "Across the last three sessions, the recurring error was choosing wa where ga was needed when introducing new information. The tutor assigned ten contrastive sentence pairs and recommended explaining each choice aloud before checking.",
+          "source": "study/japanese/2026-09-24-tutor-notes.md#particles",
+          "fingerprint": "sha256:be46fa17f7563911fb08edf150c1aba056751db0211faba902b23e3b07b781b0"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c04_30ed0bfb26"
+        ],
+        "drop": [
+          "c04_d6c50e680c",
+          "c04_242534abd5"
+        ],
+        "allow": [],
+        "rationale": "The tutor diagnosis directly identifies both the error pattern and a targeted thirty-minute-compatible exercise. Backlog and streak data do not address the requested weakness."
+      },
+      "kind": "useful"
+    },
+    {
+      "id": "c05",
+      "domain": "coding/database-debugging",
+      "difficulty": "simple",
+      "dialogue": [
+        {
+          "role": "user",
+          "text": "Help me form a first-pass hypothesis for a PostgreSQL deadlock between invoice creation and account closure. Which memory here is actually worth loading?"
+        }
+      ],
+      "cards": [
+        {
+          "id": "c05_5af05a66bf",
+          "label": "Redis expiry incident",
+          "summary": "A session cleanup worker caused a Redis latency spike by deleting large hashes synchronously instead of unlinking them.",
+          "source": "incidents/2026-08-01-redis-cleanup.md#cause",
+          "fingerprint": "sha256:2b229451e282edd1f800403c8418e85048bbcac945a23b356c0fce43790f7f55"
+        },
+        {
+          "id": "c05_85341d9d42",
+          "label": "Invoice PDF font setup",
+          "summary": "The invoice renderer embeds Noto Sans to keep currency symbols stable across Linux hosts.",
+          "source": "services/invoice-renderer/fonts.md#deployment",
+          "fingerprint": "sha256:18c80d5c3167834fd9c4f35ab6a04f556bcf549dc4b0c51381344c7406182a05"
+        },
+        {
+          "id": "c05_c0115d6741",
+          "label": "Support account closure copy",
+          "summary": "The account-closure email should say data is queued for deletion rather than immediately erased.",
+          "source": "content/support/account-closure.md#wording",
+          "fingerprint": "sha256:c09714fc850d6a6e3fa195ff7e7bae51ee9f0b4015d492b6ed1779034b06ea77"
+        }
+      ],
+      "host": {
+        "keep": [],
+        "drop": [
+          "c05_5af05a66bf",
+          "c05_85341d9d42",
+          "c05_c0115d6741"
+        ],
+        "allow": [],
+        "rationale": "None of the cards describes PostgreSQL locking, transaction order, or the interaction between invoice creation and account closure. Keyword overlap is not evidence."
+      },
+      "kind": "abstain"
+    },
+    {
+      "id": "c06",
+      "domain": "planning/rail-travel",
+      "difficulty": "moderate",
+      "dialogue": [
+        {
+          "role": "user",
+          "text": "For the Utrecht trip: the hotel is cancellable without charge until 18:00 on 3 October, and the intercity ticket is non-refundable. Make a two-item cancellation checklist from exactly those facts; don't add advice."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c06_1dd6aa3cb0",
+          "label": "Utrecht booking terms",
+          "summary": "The Utrecht hotel can be cancelled free until 18:00 on 3 October. The intercity ticket is non-refundable.",
+          "source": "travel/utrecht/2026-10-bookings.md#terms",
+          "fingerprint": "sha256:d19506192913b3722d7daf7178a4f82bc7939398a67eb1592c416bcaa46e651b"
+        },
+        {
+          "id": "c06_e9efa8350c",
+          "label": "Rotterdam museum hours",
+          "summary": "The Rotterdam design museum closes at 17:00 on Mondays and is unrelated to the Utrecht booking.",
+          "source": "travel/rotterdam/2026-07-notes.md#hours",
+          "fingerprint": "sha256:9eec46ed3ac7f09fca4d67f253fcbf7201b181795366e0a8cda2060d14185bd3"
+        },
+        {
+          "id": "c06_0d81afb912",
+          "label": "Generic packing list",
+          "summary": "The reusable weekend packing list includes a charger, medication, rain shell, and water bottle.",
+          "source": "travel/templates/weekend-pack.md#core",
+          "fingerprint": "sha256:17a907e6d266a4fcb961b96ebbbe1e692e8ef1556e8becd7978236f5ecc6f350"
+        }
+      ],
+      "host": {
+        "keep": [],
+        "drop": [
+          "c06_1dd6aa3cb0",
+          "c06_e9efa8350c",
+          "c06_0d81afb912"
+        ],
+        "allow": [],
+        "rationale": "The only relevant booking terms are already fully present in the current request, so loading their duplicate adds nothing. The remaining cards do not concern cancellation."
+      },
+      "kind": "abstain"
+    },
+    {
+      "id": "c07",
+      "domain": "design/print-accessibility",
+      "difficulty": "moderate",
+      "dialogue": [
+        {
+          "role": "assistant",
+          "text": "Is this another social tile or the venue print piece?"
+        },
+        {
+          "role": "user",
+          "text": "The venue print piece: choose a treatment for an A3 grayscale poster that stays legible from three metres. I need print-specific guidance, not brand ideas from the launch campaign."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c07_19c81bf920",
+          "label": "Launch social-tile palette",
+          "summary": "The launch campaign's square social tiles use coral-to-violet gradients, 20 px white captions, and photography cropped for phone screens.",
+          "source": "design/launch/2026-05-social-tiles.md#visual-system",
+          "fingerprint": "sha256:24e4963e2fa9273a8a5b093ca71d4f16798037f2d61e05585ff3575746625ca6"
+        },
+        {
+          "id": "c07_933bab9617",
+          "label": "Animated logo timing",
+          "summary": "The web logo reveal lasts 900 ms and uses a blur-to-sharp transition before navigation appears.",
+          "source": "design/web/motion-spec.md#logo-reveal",
+          "fingerprint": "sha256:ac9567f592c1f1d081a426b9794d9db044717150d1d5641a9755451b1e9c92ff"
+        },
+        {
+          "id": "c07_4fb3b41c11",
+          "label": "Letterpress postcard stock",
+          "summary": "A6 donor postcards were printed in two spot colors on 600 gsm cotton stock, with blind embossing around the mark.",
+          "source": "design/print/2025-donor-postcard.md#production",
+          "fingerprint": "sha256:c2fd222ce6b459d1a41d8e03881c1083794d0b405d69033de951ef027b0518c6"
+        }
+      ],
+      "host": {
+        "keep": [],
+        "drop": [
+          "c07_19c81bf920",
+          "c07_933bab9617",
+          "c07_4fb3b41c11"
+        ],
+        "allow": [],
+        "rationale": "All cards are tied to incompatible media, sizes, or color processes and contain no evidence about A3 grayscale distance legibility. Reusing them would fake relevance."
+      },
+      "kind": "abstain"
+    },
+    {
+      "id": "c08",
+      "domain": "games/tactical-decision",
+      "difficulty": "hard",
+      "dialogue": [
+        {
+          "role": "user",
+          "text": "In tonight's co-op run, should we spend our last favor on the east gate or save it for the archive? Select memory only if it gives reliable evidence about this patch's tradeoff."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c08_0a53040a9d",
+          "label": "Unverified east-gate rumor",
+          "summary": "A chat message guessed that the east gate reward may have been doubled in the current patch, but the writer had not reached the gate and cited no patch note or run result.",
+          "source": "games/ember-vault/chat/2026-09-27.txt#east-gate-rumor",
+          "fingerprint": "sha256:7963552351e0bc9a0250b52abf4c0b5184a2490e2626e5d6067de4c936b786b1"
+        },
+        {
+          "id": "c08_53c0d8b3e3",
+          "label": "Pre-release archive speculation",
+          "summary": "Before release, a forum thread speculated that saving favor for the archive would unlock a permanent codex bonus. No one in the thread had played the shipped build.",
+          "source": "games/ember-vault/archive/beta-forum-notes.md#favor",
+          "fingerprint": "sha256:fa491118b157958842364f55f3bdcde5c7c0d5efb24e14b73bc51bd0fc4ebb71"
+        },
+        {
+          "id": "c08_41123106af",
+          "label": "Different difficulty run",
+          "summary": "On patch 1.1, a solo story-mode run spent favor at the east gate; the note records the choice but not its reward or the forgone archive outcome.",
+          "source": "games/ember-vault/runs/1.1-solo-story.md#floor-four",
+          "fingerprint": "sha256:5137ec65d0b6b1afed05cd8dfb5c2671a4c679fab4f4fb18ff9fab6c3bebbfb0"
+        }
+      ],
+      "host": {
+        "keep": [],
+        "drop": [
+          "c08_0a53040a9d",
+          "c08_53c0d8b3e3",
+          "c08_41123106af"
+        ],
+        "allow": [],
+        "rationale": "The candidates are rumor, pre-release speculation, or an incomparable run without outcomes. None supports this patch's co-op tradeoff, so abstention is the honest result."
+      },
+      "kind": "abstain"
+    },
+    {
+      "id": "c09",
+      "domain": "coding/ci-triage",
+      "difficulty": "hard",
+      "dialogue": [
+        {
+          "role": "assistant",
+          "text": "The red job is called greenhouse now. Do you want the broad CI history or just the likely cause?"
+        },
+        {
+          "role": "user",
+          "text": "Just the likely cause. Greenhouse fails only on pull requests that change generated API snapshots, usually after the second push. Find the smallest connected context that explains that pattern."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c09_c26305b2be",
+          "label": "Greenhouse browser timeout",
+          "summary": "A separate end-to-end job using the greenhouse test environment timed out when its browser image lacked fonts. That environment name is not the renamed snapshot job.",
+          "source": "ci/incidents/2026-09-12-browser-fonts.md#timeout",
+          "fingerprint": "sha256:72610b29e959bff483296f46af4d2278f0e8f099316b3795fa094b0b189879bf"
+        },
+        {
+          "id": "c09_000a38c78a",
+          "label": "Orchid-to-greenhouse rename",
+          "summary": "The CI job formerly named orchid was renamed greenhouse during the workflow cleanup. Its script and cache namespace were not changed, so older orchid notes describe the current job.",
+          "source": "ci/migrations/2026-09-05-job-names.md#orchid",
+          "fingerprint": "sha256:b30f532df8491a8dc9f79ab3277f5194b149ea5aeadf2360627fb42505d79cb8"
+        },
+        {
+          "id": "c09_e190e5e446",
+          "label": "Snapshot format release note",
+          "summary": "API snapshot files changed from YAML to JSON last year; all repositories completed that migration before the current workflow was introduced.",
+          "source": "releases/2025-11-api-snapshot-format.md#migration",
+          "fingerprint": "sha256:90dc3d2eeaa3bdea02cec8afc01817b9719c0bbbb579f0f139a58d97e0fa27c1"
+        },
+        {
+          "id": "c09_56d2074487",
+          "label": "Generated-snapshot cache defect",
+          "summary": "The orchid job restores generated API snapshots from a cache keyed only by pull-request number. A later push can therefore compare against artifacts from the earlier head; the planned fix is to include the head SHA.",
+          "source": "ci/incidents/2026-08-22-orchid-snapshots.md#root-cause",
+          "fingerprint": "sha256:741783bac41014b2d90def659b19847c9db4189ff0a0303e5fbf73158bef2c3f"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c09_000a38c78a",
+          "c09_56d2074487"
+        ],
+        "drop": [
+          "c09_c26305b2be",
+          "c09_e190e5e446"
+        ],
+        "allow": [],
+        "rationale": "The rename card connects the current job name to the older incident, whose pull-request-only cache key explains failures after a later push. The environment timeout is a false alias, and the old format migration does not explain timing."
+      },
+      "kind": "hard"
+    },
+    {
+      "id": "c10",
+      "domain": "coding/api-migration",
+      "difficulty": "hard",
+      "dialogue": [
+        {
+          "role": "user",
+          "text": "Reassess whether we should move the payments client to the current v3 line this sprint. I want the newest compatibility status, but retain any old warning that still constrains the rollout."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c10_79acff862d",
+          "label": "Earlier v3 hold recommendation",
+          "summary": "The team previously stayed on v2.4 because v3.0 dropped unknown enum values during deserialization. The same review warned that v3 serializes absent idempotency keys as null, so mixed v2/v3 workers must not share retry records until all workers migrate.",
+          "source": "decisions/payments/2026-05-18-v3-hold.md#compatibility",
+          "fingerprint": "sha256:4bc6c1d50a669db70ecd146bfb2080fad755ed9bd1252665ed48ca6929b3006e"
+        },
+        {
+          "id": "c10_f36750e9da",
+          "label": "Payments dashboard colors",
+          "summary": "The operations dashboard uses amber for pending captures and red only for terminal failures.",
+          "source": "design/ops-dashboard/payments.md#status-colors",
+          "fingerprint": "sha256:b990b4c2f82fa59bb6beca863bb64b48e82826106368e1358b142d65bd533e41"
+        },
+        {
+          "id": "c10_1f414414c7",
+          "label": "Current v3 compatibility update",
+          "summary": "Version 3.2 preserves unknown enum values, and the contract test that blocked adoption now passes. It does not change the null idempotency-key encoding, so the mixed-worker rollout warning remains active.",
+          "source": "decisions/payments/2026-09-21-v3-2-retest.md#result",
+          "fingerprint": "sha256:d203b76ead5a10894645e68365d76233832e2c867ba2fa670bc12290c27f10a0"
+        },
+        {
+          "id": "c10_fbfdb1576f",
+          "label": "v2 connection-pool tuning",
+          "summary": "A v2.1 production incident increased the client connection pool from 20 to 40 after a traffic spike. Capacity has since been moved behind the service proxy.",
+          "source": "incidents/payments/2025-12-09-pool.md#mitigation",
+          "fingerprint": "sha256:6b869aa5100631713655df0067b48ae300ea41f26b1c88c44b203f35b618096c"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c10_1f414414c7"
+        ],
+        "drop": [
+          "c10_f36750e9da",
+          "c10_fbfdb1576f"
+        ],
+        "allow": [
+          "c10_79acff862d"
+        ],
+        "rationale": "The current retest supplies both the resolved blocker and the still-active mixed-worker restriction. The earlier hold decision is optional provenance; dashboard styling and obsolete pool tuning do not bear on compatibility."
+      },
+      "kind": "hard"
+    },
+    {
+      "id": "c11",
+      "domain": "creative-design/typography",
+      "difficulty": "hard",
+      "dialogue": [
+        {
+          "role": "assistant",
+          "text": "The lineup has a very long headliner name, so the headline needs to work in a narrow column."
+        },
+        {
+          "role": "user",
+          "text": "Choose between a condensed grotesk and a wide geometric face for the concert poster headline. Apply my actual typography preference at the right scope, not a universalized version of it."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c11_e6e0bad2b5",
+          "label": "Condensed-type preference recap",
+          "summary": "A project recap records the user as disliking condensed fonts and preferring open, wide letterforms. It does not identify the project, text role, or size where the preference was observed.",
+          "source": "design/archive/2026-07-brief-recap.md#fonts",
+          "fingerprint": "sha256:2d9d91b22cd94ce1a41d931e3e37a5148080aaa9623ce004cbcfe1ddad4dff85"
+        },
+        {
+          "id": "c11_cec6b0b497",
+          "label": "Contextual condensed-type preference",
+          "summary": "The user dislikes condensed type for paragraphs and interface labels because it feels cramped, but explicitly likes it for oversized gig-poster headlines where compression creates tension and prevents awkward line breaks.",
+          "source": "design/preferences/2026-08-30-type-context.md#condensed",
+          "fingerprint": "sha256:e8527bd9934d69faa31196902f97b912451ff531a2af143b5e352a4e9d9ad810"
+        },
+        {
+          "id": "c11_c58f3a3b2f",
+          "label": "Book-jacket geometric face",
+          "summary": "A wide geometric face worked well for a quiet essay collection whose title had two short words and ample horizontal space.",
+          "source": "design/case-studies/2025-essay-jacket.md#type",
+          "fingerprint": "sha256:2788411e9aa389895c27cb3082d281c67c8bd99c05ff77de777833eb0f3bf81e"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c11_cec6b0b497"
+        ],
+        "drop": [
+          "c11_e6e0bad2b5",
+          "c11_c58f3a3b2f"
+        ],
+        "allow": [],
+        "rationale": "The scoped preference directly endorses condensed type for this display context. The context-free recap should not override the more precise record, and the book-jacket result depends on opposite spatial and tonal conditions."
+      },
+      "kind": "hard"
+    },
+    {
+      "id": "c12",
+      "domain": "everyday-planning/day-hike",
+      "difficulty": "hard",
+      "dialogue": [
+        {
+          "role": "assistant",
+          "text": "You are taking the short ridge loop, right—not camping?"
+        },
+        {
+          "role": "user",
+          "text": "Right. We start at 11:00, expect to cross the exposed ridge around 14:30, and return before 17:00. Decide whether the shell belongs in the daypack using the relevant time and route conditions only."
+        }
+      ],
+      "cards": [
+        {
+          "id": "c12_29ca2fa497",
+          "label": "Campsite overnight minimum",
+          "summary": "The valley campsite is forecast to reach 4 C between 03:00 and 05:00, so overnight campers need an insulated layer and a warmer sleeping bag.",
+          "source": "outdoors/trips/2026-09-28-overnight-forecast.md#minimum",
+          "fingerprint": "sha256:6d9a1ff49f3a23199961466d33a5263cd6786e3279b5f213c2b6a76e7f4fb79e"
+        },
+        {
+          "id": "c12_1f5cf216b0",
+          "label": "Morning river-ford condition",
+          "summary": "The long loop's river ford is lowest before 09:00 and can require sandals after noon. The short ridge loop does not use the ford.",
+          "source": "outdoors/routes/long-loop.md#ford",
+          "fingerprint": "sha256:bc79e499dcafeabdc64684793401f3dcffb16ba3cf456250611641b48285c2f4"
+        },
+        {
+          "id": "c12_6913518991",
+          "label": "Winter ridge equipment",
+          "summary": "For winter ascents after snow, the ridge guide requires microspikes, poles, and an emergency bivy.",
+          "source": "outdoors/routes/short-ridge-loop-winter.md#equipment",
+          "fingerprint": "sha256:f7e52ae61ebf3e7ed7312b9a05a075149f0bedca5d58b0ecbc402ac3c244e37d"
+        },
+        {
+          "id": "c12_eb59da30e9",
+          "label": "Ridge-loop afternoon wind",
+          "summary": "On the short ridge loop, the exposed section becomes sharply colder when the sea breeze arrives after about 14:00. Even on dry days, the local trip note recommends carrying a windproof shell for afternoon crossings.",
+          "source": "outdoors/routes/short-ridge-loop.md#afternoon-exposure",
+          "fingerprint": "sha256:589f0651e0b1392ee8db95057782d76bdff35713fb0f4a4f70ea21bf4d33d20c"
+        }
+      ],
+      "host": {
+        "keep": [
+          "c12_eb59da30e9"
+        ],
+        "drop": [
+          "c12_29ca2fa497",
+          "c12_1f5cf216b0",
+          "c12_6913518991"
+        ],
+        "allow": [],
+        "rationale": "The afternoon exposure note matches both the chosen route and the 14:30 crossing, supporting the shell. Overnight, long-loop, and winter conditions are outside the stated trip."
+      },
+      "kind": "hard"
+    }
+  ]
+}

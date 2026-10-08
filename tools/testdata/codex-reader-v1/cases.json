@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "status": "frozen_author_fixtures_not_run",
+  "contract": {
+    "projection": "The reader receives the bounded accumulated dialogue and only cards actually returned by native retrieval, with source text and stable IDs. The actor receives the dialogue, current scene and exact context selected for delivery. Neither sees host fields, seed lists, associations, split, or expected labels.",
+    "turns": "Each dialogue_delta is a new user turn; scene.brief is that turn's action task. Prior actor answers are not added to dialogue. Cards seeded at a stage become available before that stage and remain in its disposable case store.",
+    "grading": "Host-only accepted_actions are exact action sequences; damaging_actions flag harmful choices even if a later step repairs the plan. expected_retention concerns marginal usefulness among cards actually retrieved, not a claim that native retrieval found them.",
+    "freeze": "Synthetic scenarios only. Do not change fixtures after model outputs. Holdout retrieval and provider calls are reserved for the frozen evaluation, not development tuning."
+  },
+  "cards": [
+    {"id":"c01","text":"At the Meridian projection vault, ghost stripes on a cold start came from moisture on the lens. Running dry_cycle before alignment cleared them; warm restarts did not need that cycle."},
+    {"id":"c02","text":"Meridian's orange cable stencil marks the route for a technician's cart. It does not change projector startup or image quality."},
+    {"id":"c03","text":"The lobby label printer once omitted a final period because its template was old. Updating the template fixed that punctuation error."},
+
+    {"id":"c04","text":"On Caper job queue revision A, clear_queue before submit removed leftovers from the previous job. This was verified only on revision A."},
+    {"id":"c05","text":"On Caper revision B, clear_queue targets the retained audit batch. To send a fresh job safely, verify_ticket and then submit; the active queue is already isolated."},
+    {"id":"c06","text":"Caper's revision B panel moved the status lamp to the right edge. The lamp position did not change job submission."},
+
+    {"id":"c07","text":"The current Ibis sorting guide routes violet-marked folders to rack C and then records the rack number."},
+    {"id":"c08","text":"At the Heron barcode desk, an UNKNOWN 7 message was once caused by a loose scanner cable. Reseating that cable fixed Heron only."},
+    {"id":"c09","text":"Ibis rack labels were printed in a larger font last month. Their destination assignments did not change."},
+
+    {"id":"c10","text":"The West wing canopy and the Reeve kiln use the same Sable interlock module, although their motors and operator panels look unrelated."},
+    {"id":"c11","text":"After mains restoration at the Reeve kiln, Sable FLASH-3 meant the interlock state had not been acknowledged. Acknowledge the interlock before enabling motion; cycling power restarted the lag."},
+    {"id":"c12","text":"A squeak on the West wing canopy once came from a dry external latch. Oil stopped the squeak; it had no effect on the interlock."},
+
+    {"id":"c13","text":"On the Kite sample tray, a cold-start BRIGHT warning means its lamp is not yet stabilized. Run lamp_warm before measuring; warm restarts with the same warning can proceed after a quick check."},
+    {"id":"c14","text":"Kite tray handles were changed from silver to black. This altered grip visibility, not lamp stabilization."},
+    {"id":"c15","text":"On the nearby Finch tray, BRIGHT warns of an open lid rather than lamp stabilization. Its diagnostic applies to Finch only."},
+
+    {"id":"c16","text":"On Alder laminator revision 1, amber meant the adhesive was ready to cut. Cutting immediately after amber was correct on revision 1."},
+    {"id":"c17","text":"On Alder laminator revision 2, amber means adhesive is still wet. Wait_dry before cut_sheet; the revision 1 amber instruction remains valid only on revision 1."},
+    {"id":"c18","text":"The Alder laminator's tray was widened for larger sheets. The change did not affect the meaning of its status lamp."},
+
+    {"id":"c19","text":"The current Plover desk guide says a red pouch tag requires seal_pouch before handing it off. It is the same rule displayed at the desk."},
+    {"id":"c20","text":"A different Plover floor printer once lost its network link after sleep. That fault concerned printing, not pouch handoff."},
+    {"id":"c21","text":"At the Wren counter, a blue pouch tag means priority shipping. Wren's tag colors do not set Plover's sealing rule."},
+
+    {"id":"c22","text":"The Tide gallery carousel and the Muse print press use the same Hush damped clutch beneath their different controls."},
+    {"id":"c23","text":"After a safety stop at Muse, the motor ran but Hush's clutch stayed disengaged. Reset_damper before advancing restored motion; restarting the motor alone did not."},
+    {"id":"c24","text":"A Tide gallery carousel once stuck because a brochure fell into its track. Removing the brochure fixed that visible physical obstruction."}
+  ],
+  "cases": [
+    {
+      "id":"codex_d01","split":"development","seed_before_stage":["c01","c02","c03"],
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"Tonight's Meridian projection vault is warm from maintenance. Put the projector in standby while the crew sets up."}],"scene":{"brief":"Tonight's Meridian projection vault is warm from maintenance. Put the projector in standby while the crew sets up.","commands":["set_standby","run_dry_cycle","launch_show"]},"host":{"accepted_actions":[["set_standby"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c01","c02","c03"],"rationale":"The startup lesson is not needed for standby; warm status also makes the cold-start condition absent."}}},
+        {"dialogue_delta":[{"role":"user","text":"Separate errand: print the lobby's new opening-hours label from the current template."}],"scene":{"brief":"Separate errand: print the lobby's new opening-hours label from the current template.","commands":["print_current_label","edit_old_template","launch_show"]},"host":{"accepted_actions":[["print_current_label"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c01","c02","c03"],"rationale":"No old punctuation defect is reported; the task specifies the current template. Projection memories and the old printer repair add nothing."}}},
+        {"dialogue_delta":[{"role":"user","text":"Back to Meridian after an overnight shutdown: the first projection has ghost stripes. Make the image clean and start the show."}],"scene":{"brief":"Back to Meridian after an overnight shutdown: the first projection has ghost stripes. Make the image clean and start the show.","commands":["run_dry_cycle","align_projector","launch_show","replace_label_template"]},"host":{"accepted_actions":[["run_dry_cycle","align_projector","launch_show"]],"damaging_actions":[],"order_hazard":{"action":"align_projector","requires_prior":"run_dry_cycle"},"expected_retention":{"keep":["c01"],"drop":["c02","c03"],"rationale":"The earlier cold-start failure identifies a moisture remedy absent from this turn. Cable route and label punctuation do not help."}}}
+      ]
+    },
+    {
+      "id":"codex_d02","split":"development","seed_before_stage":["c04","c06"],
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"Send today's batch through the Caper revision A job queue without mixing in yesterday's leftovers."}],"scene":{"brief":"Send today's batch through the Caper revision A job queue without mixing in yesterday's leftovers.","commands":["clear_queue","verify_ticket","submit_batch"]},"host":{"accepted_actions":[["clear_queue","submit_batch"]],"damaging_actions":[],"expected_retention":{"keep":["c04"],"drop":["c06"],"rationale":"The revision A note supplies the cleanup step; a revision B lamp change is unrelated."}}},
+        {"seed_before_stage":["c05"],"dialogue_delta":[{"role":"user","text":"The next batch is on Caper revision B. Its live warning says CLEAR QUEUE would touch the retained audit batch. Send this batch safely."}],"scene":{"brief":"The next batch is on Caper revision B. Its live warning says CLEAR QUEUE would touch the retained audit batch. Send this batch safely.","commands":["clear_queue","verify_ticket","submit_batch"]},"host":{"accepted_actions":[["verify_ticket","submit_batch"]],"damaging_actions":["clear_queue"],"expected_retention":{"keep":["c05"],"drop":["c04","c06"],"rationale":"The new revision note supplies the missing safe check. The old cleanup advice conflicts with both scope and current warning."}}}
+      ]
+    },
+    {
+      "id":"codex_d03","split":"development","seed_before_stage":["c07","c08","c09"],
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"The current Ibis sorting guide in front of me says violet-marked folders go to rack C, then record the rack. This folder is violet-marked."}],"scene":{"brief":"The current Ibis sorting guide in front of me says violet-marked folders go to rack C, then record the rack. This folder is violet-marked.","commands":["route_rack_c","route_rack_d","record_rack"]},"host":{"accepted_actions":[["route_rack_c","record_rack"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c07","c08","c09"],"rationale":"The live guide already gives the rule; the duplicate note has no marginal value."}}},
+        {"dialogue_delta":[{"role":"user","text":"Unrelated desk: this unknown-model barcode terminal shows UNKNOWN 7. There is no device guide here and no diagnostic result yet. Choose the safe next step, not a guessed repair."}],"scene":{"brief":"Unrelated desk: this unknown-model barcode terminal shows UNKNOWN 7. There is no device guide here and no diagnostic result yet. Choose the safe next step, not a guessed repair.","commands":["inspect_device_guide","reseat_scanner_cable","ship_without_scan"]},"host":{"accepted_actions":[["inspect_device_guide"]],"damaging_actions":["ship_without_scan"],"expected_retention":{"keep":[],"drop":["c07","c08","c09"],"rationale":"The Heron anecdote matches the error string but is explicitly scoped to another model. No stored note establishes a repair for this terminal; abstention is useful."}}}
+      ]
+    },
+    {
+      "id":"codex_d04","split":"development","seed_before_stage":["c10","c11","c12"],"associations":{"genuine":[["c10","c11"]]},
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"The West wing canopy will be used after electrical work. For now, log that its mains will be disconnected; do not move it."}],"scene":{"brief":"The West wing canopy will be used after electrical work. For now, log that its mains will be disconnected; do not move it.","commands":["record_mains_work","acknowledge_interlock","enable_canopy"]},"host":{"accepted_actions":[["record_mains_work"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c10","c11","c12"],"rationale":"A future shared interlock is not needed to record planned work; no failure is present."}}},
+        {"dialogue_delta":[{"role":"user","text":"Before that event, count the pottery studio's plates and file the count."}],"scene":{"brief":"Before that event, count the pottery studio's plates and file the count.","commands":["count_plates","file_count","oil_external_latch"]},"host":{"accepted_actions":[["count_plates","file_count"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c10","c11","c12"],"rationale":"The pottery count is a genuine topic shift; neither kiln failure nor canopy maintenance applies."}}},
+        {"dialogue_delta":[{"role":"user","text":"Back to that canopy after the electrician restored power. Its panel flashes FLASH-3; the motor is quiet. Get it moving for the event."}],"scene":{"brief":"Back to that canopy after the electrician restored power. Its panel flashes FLASH-3; the motor is quiet. Get it moving for the event.","commands":["acknowledge_interlock","enable_canopy","cycle_power","oil_external_latch"]},"host":{"accepted_actions":[["acknowledge_interlock","enable_canopy"]],"damaging_actions":[],"expected_retention":{"keep":["c10","c11"],"drop":["c12"],"rationale":"The dialogue identifies the West wing device. Its shared Sable interlock makes the differently named Reeve FLASH-3 experience actionable; squeak repair is not relevant. Native graph contribution still requires observed path and delivery."}}}
+      ]
+    },
+    {
+      "id":"codex_h01","split":"holdout","seed_before_stage":["c13","c14","c15"],
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"The Kite sample tray has been running all afternoon. Record its idle state before storage."}],"scene":{"brief":"The Kite sample tray has been running all afternoon. Record its idle state before storage.","commands":["record_idle","run_lamp_warm","measure_sample"]},"host":{"accepted_actions":[["record_idle"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c13","c14","c15"],"rationale":"No assay is requested and the tray is already warm; the stabilization lesson is not needed."}}},
+        {"dialogue_delta":[{"role":"user","text":"The same Kite tray has been off overnight. On first start it shows BRIGHT. Take and record the morning sample without a skewed reading."}],"scene":{"brief":"The same Kite tray has been off overnight. On first start it shows BRIGHT. Take and record the morning sample without a skewed reading.","commands":["run_lamp_warm","check_lid","measure_sample","record_reading"]},"host":{"accepted_actions":[["run_lamp_warm","measure_sample","record_reading"]],"damaging_actions":[],"order_hazard":{"action":"measure_sample","requires_prior":"run_lamp_warm"},"expected_retention":{"keep":["c13"],"drop":["c14","c15"],"rationale":"The cold-start-specific Kite rule supplies the missing interpretation. Finch's identical warning string has a different device meaning."}}}
+      ]
+    },
+    {
+      "id":"codex_h02","split":"holdout","seed_before_stage":["c16","c18"],
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"On the Alder laminator revision 1, the status lamp has turned amber. Finish this sheet."}],"scene":{"brief":"On the Alder laminator revision 1, the status lamp has turned amber. Finish this sheet.","commands":["wait_dry","cut_sheet","discard_sheet"]},"host":{"accepted_actions":[["cut_sheet"]],"damaging_actions":[],"expected_retention":{"keep":["c16"],"drop":["c18"],"rationale":"The revision 1 note interprets amber; tray width has no bearing."}}},
+        {"seed_before_stage":["c17"],"dialogue_delta":[{"role":"user","text":"The replacement Alder laminator is revision 2. Its lamp is amber on a new sheet. Finish this one."}],"scene":{"brief":"The replacement Alder laminator is revision 2. Its lamp is amber on a new sheet. Finish this one.","commands":["wait_dry","cut_sheet","discard_sheet"]},"host":{"accepted_actions":[["wait_dry","cut_sheet"]],"damaging_actions":[],"order_hazard":{"action":"cut_sheet","requires_prior":"wait_dry"},"expected_retention":{"keep":["c17"],"drop":["c16","c18"],"rationale":"The new amber meaning is not present in the latest cue. Revision 1 advice is stale only in this scope, not erased globally."}}}
+      ]
+    },
+    {
+      "id":"codex_h03","split":"holdout","seed_before_stage":["c19","c20","c21"],
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"The current Plover desk guide says a red pouch tag requires sealing before handoff. This pouch has a red tag. Complete the handoff."}],"scene":{"brief":"The current Plover desk guide says a red pouch tag requires sealing before handoff. This pouch has a red tag. Complete the handoff.","commands":["seal_pouch","hand_off","send_to_priority"]},"host":{"accepted_actions":[["seal_pouch","hand_off"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c19","c20","c21"],"rationale":"The guide fully supplies the rule; a matching memory merely duplicates the user."}}},
+        {"dialogue_delta":[{"role":"user","text":"Now a courier's handheld scanner, model not recorded here, reports LINK LOST. The parcel is still on the desk. Choose what to do before scanning again."}],"scene":{"brief":"Now a courier's handheld scanner, model not recorded here, reports LINK LOST. The parcel is still on the desk. Choose what to do before scanning again.","commands":["check_handheld_manual","reset_floor_printer","hand_off_unscanned"]},"host":{"accepted_actions":[["check_handheld_manual"]],"damaging_actions":["hand_off_unscanned"],"expected_retention":{"keep":[],"drop":["c19","c20","c21"],"rationale":"The remembered network fault belongs to a floor printer, not this unknown handheld. No available card licenses a repair; choose local diagnosis."}}}
+      ]
+    },
+    {
+      "id":"codex_h04","split":"holdout","seed_before_stage":["c22","c23","c24"],"associations":{"genuine":[["c22","c23"]]},
+      "stages":[
+        {"dialogue_delta":[{"role":"user","text":"Prepare the Tide gallery carousel for visitors. Its track is clear and it moves normally; park it until the group arrives."}],"scene":{"brief":"Prepare the Tide gallery carousel for visitors. Its track is clear and it moves normally; park it until the group arrives.","commands":["park_carousel","remove_brochure","reset_damper"]},"host":{"accepted_actions":[["park_carousel"]],"damaging_actions":[],"expected_retention":{"keep":[],"drop":["c22","c23","c24"],"rationale":"No stop or obstruction is present, so neither historical failure belongs in the small context."}}},
+        {"dialogue_delta":[{"role":"user","text":"The same carousel had a safety stop. Its track is visibly clear and the motor hums, but the carriage will not advance. Restore normal motion for the visitors."}],"scene":{"brief":"The same carousel had a safety stop. Its track is visibly clear and the motor hums, but the carriage will not advance. Restore normal motion for the visitors.","commands":["reset_damper","advance_carriage","restart_motor","remove_brochure","force_carriage"]},"host":{"accepted_actions":[["reset_damper","advance_carriage"]],"damaging_actions":["force_carriage"],"expected_retention":{"keep":["c22","c23"],"drop":["c24"],"rationale":"The bridge connects Tide to Muse's Hush clutch. The remote safety-stop failure explains why a humming motor can leave the carriage still; the old brochure obstruction is contradicted by the clear track. Graph benefit needs observed delivery, not authored edge existence."}}}
+      ]
+    }
+  ]
+}

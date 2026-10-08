@@ -1,0 +1,30 @@
+[
+  {
+    "path": "diagnostics/1.4.0/adapter.rs",
+    "family": "catalog-storage",
+    "version": "1.4.0",
+    "kind": "source",
+    "body": "// catalog-storage adapter release 1.4.0\n// Dependency contract: diagnostics/1.4.0/dependency-contract.json\n// This adapter delegates to backend::open(path); it adds no storage or scheduling policy.\nfn open(path: &Path) -> Result<Handle, Error> { backend::open(path) }"
+  },
+  {
+    "path": "diagnostics/1.4.0/dependency-contract.json",
+    "family": "catalog-storage",
+    "version": "1.4.0",
+    "kind": "contract",
+    "body": "{\n  \"family\": \"catalog-storage\",\n  \"version\": \"1.4.0\",\n  \"operation\": \"open\",\n  \"absent_storage\": \"create and return usable\",\n  \"present_storage\": \"return usable\",\n  \"diagnostics\": \"Presence inspection does not open storage. A usable report must be backed by a successful open. The opener is suitable for absent-storage diagnostics only when it does not create storage.\"\n}"
+  },
+  {
+    "path": "diagnostics/2.0.0/adapter.rs",
+    "family": "catalog-storage",
+    "version": "2.0.0",
+    "kind": "source",
+    "body": "// catalog-storage adapter release 2.0.0\n// Dependency contract: diagnostics/2.0.0/dependency-contract.json\n// This adapter delegates to backend::open(path); it adds no storage or scheduling policy.\nfn open(path: &Path) -> Result<Handle, Error> { backend::open(path) }"
+  },
+  {
+    "path": "diagnostics/2.0.0/dependency-contract.json",
+    "family": "catalog-storage",
+    "version": "2.0.0",
+    "kind": "contract",
+    "body": "{\n  \"family\": \"catalog-storage\",\n  \"version\": \"2.0.0\",\n  \"operation\": \"open\",\n  \"absent_storage\": \"return missing without creating storage\",\n  \"present_storage\": \"return usable\",\n  \"diagnostics\": \"Presence inspection does not open storage. A usable report must be backed by a successful open. The opener is suitable for absent-storage diagnostics only when it does not create storage.\"\n}"
+  }
+]

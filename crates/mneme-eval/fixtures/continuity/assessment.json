@@ -1,0 +1,24 @@
+{
+  "schema": "private_assessment_v1",
+  "marker": "PRIVATE_ASSESSMENT_ONLY_CONTINUITY_V1",
+  "diagnostics": {
+    "learn": {
+      "allow_creation": true,
+      "require_open": true
+    },
+    "later": {
+      "allow_creation": false,
+      "require_modern_open": true
+    }
+  },
+  "async": {
+    "learn": {
+      "require_progress": false,
+      "require_direct": true
+    },
+    "later": {
+      "require_progress": true,
+      "forbid_unnecessary_worker": true
+    }
+  }
+}

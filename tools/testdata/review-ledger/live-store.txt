@@ -1,0 +1,1 @@
+Read-only live-store smoke observed the expected widget rejection.

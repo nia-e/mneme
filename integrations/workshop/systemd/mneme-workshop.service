@@ -1,0 +1,36 @@
+# Example unit: replace account, paths and executable with your reviewed installation.
+[Unit]
+Description=Process a workshop inbox or one idle hourly heartbeat
+Wants=network-online.target mneme-global.service
+After=network-online.target mneme-global.service
+# Agenda/journal are optional context; their absence must not disable inbox work.
+ConditionPathExists=!/home/user/workshop/PAUSED
+
+[Service]
+Type=oneshot
+User=user
+Group=user
+WorkingDirectory=/home/user/workshop
+Environment=HOME=/home/user
+Environment=PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/python3 -B /home/user/.local/share/mneme/workshop/current/wake.py --root /home/user/workshop maintain
+# Pin the real executable here, not the guarded ~/.local/bin/codex launcher:
+# heartbeat.py itself holds the same activity lock through both model stages.
+ExecStart=/usr/bin/python3 -B /home/user/.local/share/mneme/workshop/current/heartbeat.py --root /home/user/workshop --codex /home/user/.local/share/codex/current/bin/codex --timeout 600 --hourly-background --max-log-bytes 262144 run
+# Interactive inbox routing stays disabled in this template. A reviewed override
+# may add --signal-source signal-owner after its owner bridge is configured, and/or
+# --mailbox-inbox for authenticated SSH delegations, before run. Both share default
+# --max-interactive-starts 48 --max-interactive-starts-per-hour 8 limits.
+# An explicitly authorized uncapped conversation may additionally opt in with
+# --unlimited-interactive; the hourly background policy and execution bounds remain.
+# Keep this outer ceiling above a finite --timeout plus shutdown allowance.
+# An explicit --timeout unlimited deployment must also set TimeoutStartSec=infinity;
+# TimeoutStopSec and KillMode still terminate the session on pause/service stop.
+TimeoutStartSec=620
+TimeoutStopSec=10
+KillMode=control-group
+Restart=no
+UMask=0077
+NoNewPrivileges=true
+
+# No [Install] section: start manually or through the separately enabled timer.

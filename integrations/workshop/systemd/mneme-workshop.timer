@@ -1,0 +1,13 @@
+[Unit]
+Description=Optional local workshop eligibility check (install disabled)
+
+[Timer]
+# Cheap minute checks notice inboxes; --hourly-background admits at most one
+# idle background heartbeat per UTC hour. Missed hours are never backfilled.
+OnCalendar=*-*-* *:*:00 UTC
+Persistent=false
+AccuracySec=1s
+Unit=mneme-workshop.service
+
+[Install]
+WantedBy=timers.target

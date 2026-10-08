@@ -1,0 +1,2118 @@
+{
+  "schema": "mneme.recall-selection.inputs.v1",
+  "split": "test",
+  "cases": [
+    {
+      "id": "ho01",
+      "family": "complementary",
+      "query": "What is known about the reed-farm water gate after the test evening?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Reed-farm water gate draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Reed-farm water gate planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Reed-farm water gate retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Reed-farm water gate materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n05",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n07",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Peer recap of the same check: the west gate closed cleanly at dusk. A second observer repeated the observation, but this is not an additional independent completion criterion."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Planning margin: The evening test used the small channel; the flood route was not exercised. A finished test and a finished handoff are different states."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "This note survived the handoff because the first rehearsal exposed a gap between a tidy dashboard and what the next shift could actually do. The team walked the physical route, compared the paper log with the device state, and wrote down which observation belonged to this task rather than to the neighboring setup. Several adjacent checks passed, and those remain useful context, but they are not the observation that settles the question. The decisive line from the shift log follows: Completion log: the west gate closed cleanly at dusk. This was observed during the relevant handoff, not inferred from the planning board. The evening test used the small channel; the flood route was not exercised."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Follow-up ledger: the east timer was left in manual mode for the morning keeper. Keep this open as a separate dependency even though the first check looked good."
+        }
+      ]
+    },
+    {
+      "id": "ho02",
+      "family": "complementary",
+      "query": "Can we retire the old atlas thumbnails for the gallery search?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Follow-up ledger: the download archive still points at the old thumbnail paths. Keep this open as a separate dependency even though the first check looked good."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Atlas gallery thumbnails materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Atlas gallery thumbnails planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Planning margin: A visual review alone does not establish that archive links have migrated. A finished test and a finished handoff are different states."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "Completion log: the new thumbnails render correctly in the public gallery. This was observed during the relevant handoff, not inferred from the planning board. A visual review alone does not establish that archive links have migrated."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Atlas gallery thumbnails draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Atlas gallery thumbnails retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Peer recap of the same check: the new thumbnails render correctly in the public gallery. A second observer repeated the observation, but this is not an additional independent completion criterion."
+        },
+        {
+          "key": "n14",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n16",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        }
+      ]
+    },
+    {
+      "id": "ho03",
+      "family": "complementary",
+      "query": "What should the next agent carry into the ferry queue rollout?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Ferry queue rollout retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Planning margin: The simulator run used recorded arrivals rather than live boarding. A finished test and a finished handoff are different states."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Ferry queue rollout planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "Ferry queue rollout materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Ferry queue rollout draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Peer recap of the same check: the queue simulator held 60 passengers without dropping a ticket. A second observer repeated the observation, but this is not an additional independent completion criterion."
+        },
+        {
+          "key": "n10",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Follow-up ledger: the pier display has not been checked in daylight glare. Keep this open as a separate dependency even though the first check looked good."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Completion log: the queue simulator held 60 passengers without dropping a ticket. This was observed during the relevant handoff, not inferred from the planning board. The simulator run used recorded arrivals rather than live boarding."
+        },
+        {
+          "key": "n14",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        }
+      ]
+    },
+    {
+      "id": "ho04",
+      "family": "complementary",
+      "query": "What remains for the basalt kiln temperature alert?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Basalt kiln alert planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n02",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Basalt kiln alert retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Follow-up ledger: the night shift runbook has not yet named an acknowledgement owner. Keep this open as a separate dependency even though the first check looked good."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n06",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Peer recap of the same check: the sensor alert fires at 870 degrees. A second observer repeated the observation, but this is not an additional independent completion criterion."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Planning margin: A workshop demonstration is not a staffed incident procedure. A finished test and a finished handoff are different states."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Basalt kiln alert materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "This note survived the handoff because the first rehearsal exposed a gap between a tidy dashboard and what the next shift could actually do. The team walked the physical route, compared the paper log with the device state, and wrote down which observation belonged to this task rather than to the neighboring setup. Several adjacent checks passed, and those remain useful context, but they are not the observation that settles the question. The decisive line from the shift log follows: Completion log: the sensor alert fires at 870 degrees. This was observed during the relevant handoff, not inferred from the planning board. A workshop demonstration is not a staffed incident procedure."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Basalt kiln alert draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        }
+      ]
+    },
+    {
+      "id": "ho05",
+      "family": "complementary",
+      "query": "Is the meadow map import fully ready for the trail guides?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Meadow trail map retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Follow-up ledger: the printed legend still calls the southern fork by its retired name. Keep this open as a separate dependency even though the first check looked good."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "Peer recap of the same check: the new map coordinates align with the north trail markers. A second observer repeated the observation, but this is not an additional independent completion criterion."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Planning margin: The map coordinates were checked against the walking survey. A finished test and a finished handoff are different states."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Completion log: the new map coordinates align with the north trail markers. This was observed during the relevant handoff, not inferred from the planning board. The map coordinates were checked against the walking survey."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Meadow trail map planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Meadow trail map materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Meadow trail map draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n13",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n14",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        }
+      ]
+    },
+    {
+      "id": "ho06",
+      "family": "complementary",
+      "query": "Can the dye workshop reopen both rinse loops today?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Planning margin: The shared pump inspection applies to both loops but does not replace sampling. A finished test and a finished handoff are different states."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n04",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Adjacent setup note: The shared pump inspection applies to both loops but does not replace sampling. The record does not state the second fact needed to complete this task."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Dye workshop rinse loops planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Dye workshop rinse loops materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Dye workshop rinse loops draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Dye workshop rinse loops retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Completion log: the indigo rinse loop was flushed and signed off. This was observed during the relevant handoff, not inferred from the planning board. The shared pump inspection applies to both loops but does not replace sampling."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Open question: the steward asked for the second fact, but the notebook excerpt ends before an answer. The shared pump inspection applies to both loops but does not replace sampling."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        }
+      ]
+    },
+    {
+      "id": "ho07",
+      "family": "scoped_correction",
+      "query": "What are the current and legacy procedures for the observatory shutter?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Legacy procedure card: The manual shutter required a rope check before opening. The western dome still has the manual shutter and keeps its rope check."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "Scope reconciliation: The western dome still has the manual shutter and keeps its rope check. The replacement procedure does not erase a still-operated legacy installation."
+        },
+        {
+          "key": "n07",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Observatory shutter retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Handover reminder: compare version and physical location before applying a procedure. The same task noun can refer to equipment on both sides of the change."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "During the second review, the steward deliberately separated a previous version, the currently installed version, and the fallback kept for small jobs. The draft had blended all three under one familiar noun. They checked the labels at the actual work site, then amended the card so that a later agent would not mistake a replacement procedure for a universal override. The version-specific record is: Replacement procedure card: The motorized shutter requires a limit-switch check before opening. This card applies to the newer named setup, not every surviving device."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Observatory shutter planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Observatory shutter materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Observatory shutter draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        }
+      ]
+    },
+    {
+      "id": "ho08",
+      "family": "scoped_correction",
+      "query": "Which seed inventory rule applies to greenhouse B and the old greenhouse A?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Greenhouse seed inventory draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Greenhouse seed inventory retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Handover reminder: compare version and physical location before applying a procedure. The same task noun can refer to equipment on both sides of the change."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Greenhouse seed inventory planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n06",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Replacement procedure card: Greenhouse B records seed trays at germination check. This card applies to the newer named setup, not every surviving device."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Legacy procedure card: Greenhouse A records seed trays at sowing time. A is still in use for winter starts; its sowing-time record is not obsolete."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Greenhouse seed inventory materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Scope reconciliation: A is still in use for winter starts; its sowing-time record is not obsolete. The replacement procedure does not erase a still-operated legacy installation."
+        },
+        {
+          "key": "n16",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        }
+      ]
+    },
+    {
+      "id": "ho09",
+      "family": "scoped_correction",
+      "query": "How do we handle slate backups on the new server and the offline laptop?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Slate backups retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n04",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "Slate backups planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n07",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Handover reminder: compare version and physical location before applying a procedure. The same task noun can refer to equipment on both sides of the change."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Slate backups draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Replacement procedure card: The new server backup uses nightly snapshots with a Sunday restore probe. This card applies to the newer named setup, not every surviving device."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Legacy procedure card: The offline laptop backup used a Friday removable-drive copy. The laptop remains the field fallback, so its Friday copy stays required."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Scope reconciliation: The laptop remains the field fallback, so its Friday copy stays required. The replacement procedure does not erase a still-operated legacy installation."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Slate backups materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        }
+      ]
+    },
+    {
+      "id": "ho10",
+      "family": "scoped_correction",
+      "query": "What lighting cue should stage crews use for the old rig and the replacement rig?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Stage lighting cues materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Stage lighting cues draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Stage lighting cues planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Scope reconciliation: Rig A is still used in the courtyard and retains channel 17. The replacement procedure does not erase a still-operated legacy installation."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "During the second review, the steward deliberately separated a previous version, the currently installed version, and the fallback kept for small jobs. The draft had blended all three under one familiar noun. They checked the labels at the actual work site, then amended the card so that a later agent would not mistake a replacement procedure for a universal override. The version-specific record is: Replacement procedure card: Rig B calls the dusk cue from channel 24. This card applies to the newer named setup, not every surviving device."
+        },
+        {
+          "key": "n10",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Stage lighting cues retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Handover reminder: compare version and physical location before applying a procedure. The same task noun can refer to equipment on both sides of the change."
+        },
+        {
+          "key": "n13",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Legacy procedure card: Rig A calls the dusk cue from channel 17. Rig A is still used in the courtyard and retains channel 17."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        }
+      ]
+    },
+    {
+      "id": "ho11",
+      "family": "scoped_correction",
+      "query": "How should the mill record flour lots on both packaging lines?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Handover reminder: compare version and physical location before applying a procedure. The same task noun can refer to equipment on both sides of the change."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Mill flour lots planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Mill flour lots materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n06",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Legacy procedure card: Line 1 wrote the lot on the paper seam label. Line 1 still packages the coarse flour and still needs seam labels."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Scope reconciliation: Line 1 still packages the coarse flour and still needs seam labels. The replacement procedure does not erase a still-operated legacy installation."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Mill flour lots retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n13",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Replacement procedure card: Line 2 prints the lot on the side barcode sticker. This card applies to the newer named setup, not every surviving device."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Mill flour lots draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        }
+      ]
+    },
+    {
+      "id": "ho12",
+      "family": "scoped_correction",
+      "query": "What is the current tide bell instruction, and does the old pier rule survive anywhere?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Legacy procedure card: The old pier rang twice at the first low-tide mark. The old pier rule may still be used on the museum demonstration bell."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Open question: the steward asked for the second fact, but the notebook excerpt ends before an answer. The old pier rule may still be used on the museum demonstration bell."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Tide bell instruction draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Tide bell instruction retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n07",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Tide bell instruction planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n12",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Tide bell instruction materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Handover reminder: compare version and physical location before applying a procedure. The same task noun can refer to equipment on both sides of the change."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Adjacent setup note: The old pier rule may still be used on the museum demonstration bell. The record does not state the second fact needed to complete this task."
+        }
+      ]
+    },
+    {
+      "id": "ho13",
+      "family": "rough_notes",
+      "query": "When the keeper says “no red rope” and “ask Mira,” what is the safe stable setup?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Stable north pulley retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Checklist draft says not to turn shorthand into a new universal rule without the named context."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Conversation transcript says the short phrases were local vocabulary for the team. The shorthand came from the repair-day conversation rather than a formal checklist."
+        },
+        {
+          "key": "n06",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Annotated margin: Mira holds the current load certificate for the north pulley. This is the second half of the working instruction rather than a restatement of the first."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Stable north pulley planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "The shorthand was written for someone who had already been present at the rehearsal. A later reader guessed that a color referred to a warning light, while the author had meant a shelf or a mark on the sketch. Rather than promote the guess, the team found the original conversation and had the keeper translate each phrase. The translation relevant to this task is: Keeper translation of the shorthand: do not use the red rope on the repaired north pulley. The shorthand came from the repair-day conversation rather than a formal checklist."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Stable north pulley materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n13",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Stable north pulley draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        }
+      ]
+    },
+    {
+      "id": "ho14",
+      "family": "rough_notes",
+      "query": "What does the shorthand “J3 after hush” mean in the radio rehearsal?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n02",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Annotated margin: after hush means wait until the announcer microphone is muted. This is the second half of the working instruction rather than a restatement of the first."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Radio rehearsal cue draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n05",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Radio rehearsal cue materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Keeper translation of the shorthand: J3 is the third jingle segment, not channel three. The producer wrote this beside a crossed-out older cue number."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Conversation transcript says the short phrases were local vocabulary for the team. The producer wrote this beside a crossed-out older cue number."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Radio rehearsal cue retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Checklist draft says not to turn shorthand into a new universal rule without the named context."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Radio rehearsal cue planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        }
+      ]
+    },
+    {
+      "id": "ho15",
+      "family": "rough_notes",
+      "query": "Can you decode “sand first, not sun” for the garden mural repair?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Checklist draft says not to turn shorthand into a new universal rule without the named context."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Conversation transcript says the short phrases were local vocabulary for the team. A hurried note calls the wall west-facing even though the workface is north."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Keeper translation of the shorthand: sand first means prepare the wall with fine abrasive before painting. A hurried note calls the wall west-facing even though the workface is north."
+        },
+        {
+          "key": "n08",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Garden mural repair draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Garden mural repair retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Garden mural repair materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n14",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Garden mural repair planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Annotated margin: not sun means do the paint pass in the shaded morning window. This is the second half of the working instruction rather than a restatement of the first."
+        }
+      ]
+    },
+    {
+      "id": "ho16",
+      "family": "rough_notes",
+      "query": "What do “two knocks” and “skip the shiny one” mean in the cave guide notes?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Cave guide signals planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Checklist draft says not to turn shorthand into a new universal rule without the named context."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Conversation transcript says the short phrases were local vocabulary for the team. The guide wrote the phrases for another guide, not for visitors to follow alone."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Cave guide signals retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Cave guide signals materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n09",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Annotated margin: skip the shiny one refers to the loose quartz stair. This is the second half of the working instruction rather than a restatement of the first."
+        },
+        {
+          "key": "n11",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "The shorthand was written for someone who had already been present at the rehearsal. A later reader guessed that a color referred to a warning light, while the author had meant a shelf or a mark on the sketch. Rather than promote the guess, the team found the original conversation and had the keeper translate each phrase. The translation relevant to this task is: Keeper translation of the shorthand: two knocks is the signal that the guide has reached the safe ledge. The guide wrote the phrases for another guide, not for visitors to follow alone."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Cave guide signals draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        }
+      ]
+    },
+    {
+      "id": "ho17",
+      "family": "rough_notes",
+      "query": "What was meant by “small spoon” and “the second bell” in the tea service plan?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Tea service plan planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n03",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Tea service plan materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n06",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Annotated margin: the second bell is the start of the quiet seating interval. This is the second half of the working instruction rather than a restatement of the first."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Tea service plan draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Tea service plan retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Checklist draft says not to turn shorthand into a new universal rule without the named context."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Keeper translation of the shorthand: small spoon means the narrow silver measure for mint. The first bell only calls volunteers to arrange cups."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Conversation transcript says the short phrases were local vocabulary for the team. The first bell only calls volunteers to arrange cups."
+        }
+      ]
+    },
+    {
+      "id": "ho18",
+      "family": "rough_notes",
+      "query": "The raft note says “not the green tie”; where should the repaired line attach?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Keeper translation of the shorthand: not the green tie means avoid the temporary shore cleat. The green tie was only a paint mark during inspection."
+        },
+        {
+          "key": "n02",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Adjacent setup note: The green tie was only a paint mark during inspection. The record does not state the second fact needed to complete this task."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "Raft mooring repair draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n08",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Raft mooring repair materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Raft mooring repair planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Checklist draft says not to turn shorthand into a new universal rule without the named context."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Raft mooring repair retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Open question: the steward asked for the second fact, but the notebook excerpt ends before an answer. The green tie was only a paint mark during inspection."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        }
+      ]
+    },
+    {
+      "id": "ho19",
+      "family": "distractors",
+      "query": "What is the actual state of the south signal tower before Friday’s event?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Adjacent setup note: The north tower has an active chime and an unrelated waiver. The similar nouns refer to another check or device."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "South signal tower planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "South signal tower materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "South signal tower retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n08",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "A nearby successful test made this work item look done in the summary board. The detailed log was less cheerful: it identified the exact piece of equipment tested, the condition used, and a separate item still waiting for its own evidence. The board was corrected so that passing one gate would no longer silently clear another. The specific record for this task is: Checked result for this specific setup: the south tower clock is synchronized within two seconds. The log records the observation and its boundary."
+        },
+        {
+          "key": "n10",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Work queue reminder: close only the check named by its own observation or signature; neighboring green marks do not transfer."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "South signal tower draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Open-item card for this specific setup: the public chime is disabled until the noise waiver is posted. It was not closed by the nearby successful test."
+        }
+      ]
+    },
+    {
+      "id": "ho20",
+      "family": "distractors",
+      "query": "Can the ferry team use the revised boarding signs and the new ramp?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Work queue reminder: close only the check named by its own observation or signature; neighboring green marks do not transfer."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Ferry boarding update draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n04",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "Open-item card for this specific setup: the new ramp is still awaiting a wet-surface grip check. It was not closed by the nearby successful test."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Ferry boarding update materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Adjacent setup note: The old ramp passed a dry-surface inspection last month. The similar nouns refer to another check or device."
+        },
+        {
+          "key": "n10",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Ferry boarding update retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Checked result for this specific setup: the revised boarding signs passed the bilingual walk-through. The log records the observation and its boundary."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Ferry boarding update planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        }
+      ]
+    },
+    {
+      "id": "ho21",
+      "family": "distractors",
+      "query": "What is settled about the ceramics kiln ventilation for the workshop?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Adjacent setup note: The adjacent glass studio has a separate clean intake and is not the kiln. The similar nouns refer to another check or device."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Open-item card for this specific setup: the intake grille still needs the fabric screen removed. It was not closed by the nearby successful test."
+        },
+        {
+          "key": "n04",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n05",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "Work queue reminder: close only the check named by its own observation or signature; neighboring green marks do not transfer."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Ceramics kiln ventilation draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "Ceramics kiln ventilation planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Ceramics kiln ventilation retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Checked result for this specific setup: the exhaust fan passed the smoke-pencil test. The log records the observation and its boundary."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Ceramics kiln ventilation materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        }
+      ]
+    },
+    {
+      "id": "ho22",
+      "family": "distractors",
+      "query": "Which parts of the night-market power setup are cleared?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Work queue reminder: close only the check named by its own observation or signature; neighboring green marks do not transfer."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Night-market power retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Night-market power materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Night-market power draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "A nearby successful test made this work item look done in the summary board. The detailed log was less cheerful: it identified the exact piece of equipment tested, the condition used, and a separate item still waiting for its own evidence. The board was corrected so that passing one gate would no longer silently clear another. The specific record for this task is: Checked result for this specific setup: the east cable run passed continuity testing. The log records the observation and its boundary."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "Night-market power planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Adjacent setup note: The central generator fuel log is complete but does not clear either cable. The similar nouns refer to another check or device."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n13",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Open-item card for this specific setup: the west extension needs a new trip guard before stalls open. It was not closed by the nearby successful test."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n16",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        }
+      ]
+    },
+    {
+      "id": "ho23",
+      "family": "distractors",
+      "query": "What can the library cart crew rely on for the harbor branch?",
+      "budget_bytes": 4096,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "Harbor library cart materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Adjacent setup note: The inland branch cart has its own lift key and a lighter frame. The similar nouns refer to another check or device."
+        },
+        {
+          "key": "n03",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "Checked result for this specific setup: the harbor cart brakes passed the loaded incline test. The log records the observation and its boundary."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n08",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n10",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Harbor library cart planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Work queue reminder: close only the check named by its own observation or signature; neighboring green marks do not transfer."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Harbor library cart retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n15",
+          "status": "active",
+          "summary": "Open-item card for this specific setup: the harbor lift key has not been returned to the branch desk. It was not closed by the nearby successful test."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "Harbor library cart draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        }
+      ]
+    },
+    {
+      "id": "ho24",
+      "family": "distractors",
+      "query": "For the amphitheater rain plan, which cover is usable and who holds the approval?",
+      "budget_bytes": 8192,
+      "nodes": [
+        {
+          "key": "n01",
+          "status": "active",
+          "summary": "The printed field guide keeps retired names in an appendix because old labels survive in conversations. The appendix is a translation aid, not permission to use retired settings on a replacement unit."
+        },
+        {
+          "key": "n02",
+          "status": "active",
+          "summary": "Amphitheater rain plan draft announcement: the public-facing wording was prepared early so the editor would have time to review it. The draft should not be used as evidence that the release or opening condition is satisfied."
+        },
+        {
+          "key": "n03",
+          "status": "active",
+          "summary": "Work queue reminder: close only the check named by its own observation or signature; neighboring green marks do not transfer."
+        },
+        {
+          "key": "n04",
+          "status": "active",
+          "summary": "Amphitheater rain plan planning board: the task has an owner and an intended next review, but this card was written before field verification. Its green planning mark says nothing about completion of the checks asked in the handoff."
+        },
+        {
+          "key": "n05",
+          "status": "active",
+          "summary": "The project diary describes a tempting shortcut: reuse a previous approval when a component appears identical. The follow-up review rejected that shortcut because the installed context and approving role had changed. It is background caution, not a new approval."
+        },
+        {
+          "key": "n06",
+          "status": "active",
+          "summary": "For a prior exhibition the team prepared a detailed opening packet: it included a responsible person for each public-facing feature, a measurement record, the emergency contact chain, and a list of intentionally disabled features. The packet helped reviewers spot a missing signature even though rehearsals had looked healthy. The point of keeping this note is to remind future agents that “worked in rehearsal” and “authorized to open” are separate claims. It does not say that the current task has that packet or that any specific feature has been signed off."
+        },
+        {
+          "key": "n07",
+          "status": "active",
+          "summary": "One volunteer marked a task done when the first of two independent checks passed. The steward reopened it, recorded the missing second check, and changed the checklist to put evidence next to each box. The anecdote concerns an unrelated handoff."
+        },
+        {
+          "key": "n08",
+          "status": "candidate",
+          "summary": "A candidate note from the route-planning notebook says to check the weather board before scheduling outdoor trials. It has not been promoted because its advice is broad and the original author did not name the affected route or date."
+        },
+        {
+          "key": "n09",
+          "status": "active",
+          "summary": "Adjacent setup note: The storage cover was approved for equipment, not occupied seating. The record does not state the second fact needed to complete this task."
+        },
+        {
+          "key": "n10",
+          "status": "active",
+          "summary": "Amphitheater rain plan materials note: the team confirmed that the required tools or files were available at the start of rehearsal. Availability is not the same as a completed operational check."
+        },
+        {
+          "key": "n11",
+          "status": "active",
+          "summary": "Checked result for this specific setup: the canvas stage cover survived the hose rehearsal. The log records the observation and its boundary."
+        },
+        {
+          "key": "n12",
+          "status": "active",
+          "summary": "The equipment inventory distinguishes the original rig, its replacement, and borrowed fallback gear. Similar color labels caused a mistaken assumption once, so the inventory records both version and location. This general warning does not establish which rig a given task uses."
+        },
+        {
+          "key": "n13",
+          "status": "active",
+          "summary": "Open question: the steward asked for the second fact, but the notebook excerpt ends before an answer. The storage cover was approved for equipment, not occupied seating."
+        },
+        {
+          "key": "n14",
+          "status": "active",
+          "summary": "Amphitheater rain plan retrospective: a previous round was slowed by confusion between a tested component and an approved whole workflow. The team asked the next shift to preserve the precise observations, not to infer a blanket clearance."
+        },
+        {
+          "key": "n15",
+          "status": "candidate",
+          "summary": "A candidate workshop note recommends leaving enough daylight for the second observer to repeat a trial. The team has not decided whether this belongs in the standing procedure; it is not a test result."
+        },
+        {
+          "key": "n16",
+          "status": "active",
+          "summary": "In an older garden project, a loosely written handoff mentioned the east gate three times, once as a location, once as a control, and once as a sign title. A later agent followed the wrong interpretation and sent workers to the wrong place. The team repaired the note by recording exact physical nouns, the currently installed version, and the observation that justified the instruction. The example is preserved as a language lesson, not as evidence about this case. If the current query contains a similarly overloaded shorthand, use its own source record rather than importing the garden meaning."
+        }
+      ]
+    }
+  ]
+}

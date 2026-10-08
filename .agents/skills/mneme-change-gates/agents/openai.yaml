@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mneme Change Gates"
+  short_description: "Select safety gates for Mneme changes"
+  default_prompt: "Use $mneme-change-gates to select and verify the required gates for this Mneme change."

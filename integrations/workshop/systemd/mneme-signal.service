@@ -1,0 +1,23 @@
+# Example unit: replace account, paths and executable with your reviewed installation.
+[Unit]
+Description=Private Signal bridge for Mneme workshop
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/home/user
+UMask=0077
+ExecStart=/usr/bin/python3 /home/user/.local/share/mneme/workshop/current/signal_bridge.py run --config /home/user/.local/share/mneme/signal/config/bridge.json
+Restart=on-failure
+RestartSec=20s
+TimeoutStopSec=20s
+KillMode=mixed
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

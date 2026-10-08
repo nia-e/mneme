@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/mindcraft-bots/mindcraft.git",
+  "revision": "5f3acc87b479864124173de444f31fa5538f94a6",
+  "files": {
+    "src/agent/commands/index.js": "585635620bfd71560f630c33049d17cc8479623261bbd7656c1f52e6f5a9545c",
+    "src/agent/history.js": "5360fc1a4f4d845f7f717ddbe2170d1f69e3d9c61b7448e4a9d0f14444027c3e"
+  }
+}

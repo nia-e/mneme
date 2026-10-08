@@ -1,0 +1,24 @@
+[package]
+license.workspace = true
+name = "mneme-walk"
+version = "0.1.0"
+edition = "2024"
+
+# A bounded read-only traversal session with free movement and a recorded trail;
+# explicit post-factum reflection can train the completed walk. Shared by `mnemed
+# repl` (renders text/json) and `mneme-mcp`'s receipt-bound walk/reflect tools.
+# Depends only on the engine.
+[dependencies]
+mneme-core.workspace = true
+mneme-engine.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+# Reference adapters, to wire a real Memory for the session tests.
+mneme-cozo.workspace = true
+mneme-embed.workspace = true
+mneme-body.workspace = true
+ulid.workspace = true
+unordered-pair.workspace = true

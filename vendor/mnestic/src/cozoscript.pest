@@ -1,0 +1,297 @@
+/*
+ * Copyright 2022, The Cozo Project Authors.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+ * If a copy of the MPL was not distributed with this file,
+ * You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+script = _{sys_script | imperative_script | query_script}
+query_script = {SOI ~ (option | rule | const_rule | fixed_rule)+ ~ EOI}
+query_script_inner = {"{" ~ (option | rule | const_rule | fixed_rule)+ ~ "}"}
+query_script_inner_no_bracket = { (option | rule | const_rule | fixed_rule)+ }
+imperative_script = {SOI ~ imperative_stmt+ ~ EOI}
+sys_script = {SOI ~ "::" ~ (history_op | history_gc_op | evict_op | list_relations_op | list_columns_op | list_indices_op | describe_relation_op | repair_corrupt_op | reindex_op | remove_relations_op | trigger_relation_op |
+                    trigger_relation_show_op | rename_relations_op | running_op | kill_op | explain_op |
+                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | list_fixed_rules | graph_op) ~ EOI}
+sys_script_inner = {"{" ~ "::" ~ (history_op | history_gc_op | evict_op | list_relations_op | list_columns_op | list_indices_op | describe_relation_op | repair_corrupt_op | reindex_op | remove_relations_op | trigger_relation_op |
+                    trigger_relation_show_op | rename_relations_op | running_op | kill_op | explain_op |
+                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | list_fixed_rules | graph_op) ~ "}"}
+index_op = {"index" ~ (index_create | index_drop)}
+vec_idx_op = {"hnsw" ~ (index_create_adv | index_drop)}
+fts_idx_op = {"fts" ~ (index_create_adv | index_drop)}
+lsh_idx_op = {"lsh" ~ (index_create_adv | index_drop)}
+graph_op = {"graph" ~ (graph_create | graph_drop | graph_list)}
+graph_create = {"create" ~ ident ~ "{" ~ (graph_opt_field ~ ",")* ~ graph_opt_field? ~ "}"}
+graph_drop = {"drop" ~ ident}
+graph_list = {"list"}
+index_create = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (ident ~ ",")* ~ ident? ~ "}"}
+index_create_adv = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (index_opt_field ~ ",")* ~ index_opt_field? ~ "}"}
+index_drop = {"drop" ~ compound_ident ~ ":" ~ ident }
+compact_op = {"compact"}
+history_op = {"history" ~ compound_ident ~ expr ~ (pos_int ~ pos_int?)?}
+history_gc_op = {"history_gc" ~ compound_ident ~ expr}
+evict_op = {"evict" ~ compound_ident ~ expr ~ evict_unredacted?}
+evict_unredacted = {"unredacted"}
+list_fixed_rules = {"fixed_rules"}
+running_op = {"running"}
+kill_op = {"kill" ~ expr}
+explain_op = {"explain" ~ "{" ~ query_script_inner_no_bracket ~ "}"}
+list_relations_op = {"relations"}
+list_columns_op = {"columns" ~ compound_or_index_ident}
+list_indices_op = {"indices" ~ compound_or_index_ident}
+describe_relation_op = {"describe" ~ compound_or_index_ident ~ string?}
+repair_corrupt_op = {"repair_corrupt" ~ compound_ident}
+reindex_op = {"reindex" ~ compound_ident}
+remove_relations_op = {"remove" ~ (compound_ident ~ ",")* ~ compound_ident }
+rename_relations_op = {"rename" ~ (rename_pair ~ ",")* ~ rename_pair }
+access_level_op = {"access_level" ~ access_level ~ (compound_ident ~ ",")* ~ compound_ident}
+access_level = {("normal" | "protected" | "read_only" | "hidden")}
+trigger_relation_show_op = {"show_triggers" ~ compound_ident }
+trigger_relation_op = {"set_triggers" ~ compound_ident ~ trigger_clause* }
+trigger_clause = { "on" ~ (trigger_put | trigger_rm | trigger_replace) ~ "{" ~ query_script_inner_no_bracket ~ "}" }
+trigger_put = {"put"}
+trigger_rm = {"rm"}
+trigger_replace = {"replace"}
+rename_pair = {compound_ident ~ "->" ~ compound_ident}
+from_clause = {"from" ~ expr}
+to_clause = {"to" ~ expr}
+index_opt_field = {ident ~ ":" ~ expr}
+graph_opt_field = {ident ~ ":" ~ expr}
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+BLOCK_COMMENT = _{ "/*" ~ (BLOCK_COMMENT | !"*/" ~ ANY)* ~ "*/" }
+LINE_COMMENT = _{ "#" ~ (!"\n" ~ ANY)* }
+COMMENT = _{(BLOCK_COMMENT | LINE_COMMENT)}
+
+prog_entry = {"?"}
+var = @{(XID_START | "_") ~ (XID_CONTINUE | "." | "_")*}
+param = @{"$" ~ (XID_CONTINUE | "_" | ".")+}
+ident = @{XID_START ~ ("_" | XID_CONTINUE)*}
+underscore_ident = @{("_" | XID_START) ~ ("_" | XID_CONTINUE)*}
+definitely_underscore_ident = @{"_" ~ XID_CONTINUE+}
+relation_ident = @{"*" ~ (compound_or_index_ident | underscore_ident)}
+search_index_ident = _{"~" ~ compound_or_index_ident}
+compound_ident = @{ident ~ ("." ~ ident)*}
+compound_or_index_ident = @{ident ~ ("." ~ ident)* ~ (":" ~ ident)*}
+
+rule = {rule_head ~ ":=" ~ rule_body ~ ";"?}
+const_rule = {rule_head ~ "<-" ~ expr ~ ";"?}
+fixed_rule = {rule_head ~ "<~" ~ compound_ident ~ fixed_args_list ~ ";"?}
+fixed_args_list = {"(" ~ (fixed_arg ~ ",")* ~ fixed_arg? ~ ")"}
+
+rule_head = {(prog_entry | ident) ~ "[" ~ (head_arg ~ ",")* ~ head_arg? ~ "]"}
+head_arg = {aggr_arg | var}
+aggr_arg = {ident ~ "(" ~ var ~ ("," ~ expr)* ~ ")"}
+fixed_arg = _{fixed_rel | fixed_opt_pair}
+fixed_opt_pair = {ident ~ ":" ~ expr}
+fixed_rel = {fixed_rule_rel | fixed_relation_rel | fixed_named_relation_rel }
+fixed_rule_rel = {ident ~ "[" ~ (var ~ ",")* ~ var? ~ "]"}
+fixed_relation_rel = {relation_ident ~ "[" ~ (var ~ ",")* ~ var? ~ validity_clause? ~ "]"}
+fixed_named_relation_rel = {relation_ident ~ "{" ~ (fixed_named_relation_arg_pair ~ ",")* ~ fixed_named_relation_arg_pair? ~ validity_clause? ~ "}"}
+fixed_named_relation_arg_pair = {ident ~ (":" ~ ident)?}
+
+validity_clause = {"@" ~ (temporal_axes | expr)}
+temporal_axes = {"(" ~ axis_pair ~ ("," ~ axis_pair)? ~ ")"}
+axis_pair = {axis_label ~ ":" ~ expr}
+axis_label = {"vt" | "tt"}
+
+rule_body = {(disjunction ~ ",")* ~ disjunction?}
+rule_apply = {underscore_ident ~ "[" ~ apply_args ~ "]"}
+relation_named_apply = {relation_ident ~ "{" ~ named_apply_args ~ validity_clause? ~ "}"}
+relation_apply = {relation_ident ~ "[" ~ apply_args ~ validity_clause? ~ "]"}
+search_apply = {search_index_ident ~ "{" ~ named_apply_args ~ "|" ~ (index_opt_field ~ ",")* ~ index_opt_field? ~ "}"}
+
+disjunction = {(atom ~ or_op )* ~ atom}
+or_op = @{"or" ~ !XID_CONTINUE}
+atom = _{ negation | relation_named_apply | relation_apply | search_apply | rule_apply | unify_multi | unify | expr | grouped}
+unify = {var ~ "=" ~ expr}
+unify_multi = {var ~ in_op ~ expr}
+in_op = @{"in" ~!XID_CONTINUE}
+negation = {not_op ~ atom}
+not_op = @{"not" ~ !XID_CONTINUE}
+apply = {ident ~ "(" ~ apply_args ~ ")"}
+apply_args = {(expr ~ ",")* ~ expr?}
+named_apply_args = {(named_apply_pair ~ ",")* ~ named_apply_pair?}
+named_apply_pair = {underscore_ident ~ (":" ~ expr)?}
+grouped = _{"(" ~ rule_body ~ ")"}
+
+expr = {unary_op* ~ term ~ (operation ~ unary_op* ~ term)*}
+operation = _{ (op_and | op_or | op_pow | op_concat | op_add | op_field_access | op_sub | op_mul | op_div | op_mod |
+                op_ge | op_le | op_gt | op_lt | op_eq | op_ne | op_coalesce )}
+op_or = { "||" }
+op_and = { "&&" }
+op_concat = { "++" }
+op_add = { "+" }
+op_field_access = { "->" }
+op_sub = { "-" }
+op_mul = { "*" }
+op_div = { "/" }
+op_mod = { "%" }
+op_eq = { "==" }
+op_ne = { "!=" }
+op_gt = { ">" }
+op_lt = { "<" }
+op_ge = { ">=" }
+op_le = { "<=" }
+op_pow = { "^" }
+op_coalesce = { "~" }
+unary_op = _{ minus | negate }
+minus = { "-" }
+negate = { "!" }
+
+term = _{ literal | param | grouping | apply | var | list | object }
+object = { "{" ~ (object_pair ~ ",")* ~ object_pair? ~ "}" }
+object_pair = {expr ~ ":" ~ expr}
+list = { "[" ~ (expr ~ ",")* ~ expr? ~ "]" }
+grouping = { "(" ~ expr ~ ")" }
+
+option = _{(limit_option|offset_option|sort_option|relation_option|timeout_option|as_of_option|sleep_option|returning_option|
+            assert_none_option|assert_some_option|disable_magic_rewrite_option|reorder_option) ~ ";"?}
+out_arg = @{var ~ ("(" ~ var ~ ")")?}
+disable_magic_rewrite_option = {":disable_magic_rewrite" ~ expr}
+limit_option = {":limit"  ~ expr}
+offset_option = {":offset" ~ expr}
+sort_option = {(":sort" | ":order") ~ (sort_arg ~ ",")* ~ sort_arg }
+returning_option = {":returning"}
+relation_option = {relation_op ~ (compound_ident | underscore_ident) ~ table_schema?}
+relation_op = _{relation_create | relation_replace | relation_reconcile | relation_insert | relation_put | relation_update | relation_rm | relation_delete | relation_ensure_not | relation_ensure }
+relation_create = {":create"}
+relation_replace = {":replace"}
+relation_reconcile = {":reconcile"}
+relation_insert = {":insert"}
+relation_delete = {":delete"}
+relation_put = {":put"}
+relation_update = {":update"}
+relation_rm = {":rm"}
+relation_ensure = {":ensure"}
+relation_ensure_not = {":ensure_not"}
+timeout_option = {":timeout" ~ expr }
+reorder_option = {":reorder" ~ ident }
+as_of_option = {":as_of" ~ expr }
+sleep_option = {":sleep" ~ expr }
+sort_arg = { sort_dir? ~ out_arg }
+sort_dir = _{ sort_asc | sort_desc }
+sort_asc = {"+"}
+sort_desc = {"-"}
+assert_none_option = {":assert" ~ "none"}
+assert_some_option = {":assert" ~ "some"}
+
+// literals
+
+quoted_string = ${ "\"" ~ quoted_string_inner ~ "\"" }
+quoted_string_inner = { char* }
+char = {
+    !("\"" | "\\") ~ ANY
+    | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+    | "\\" ~ ("u" ~ ASCII_HEX_DIGIT{4})
+}
+s_quoted_string = ${ "\'" ~ s_quoted_string_inner ~ "\'" }
+s_quoted_string_inner = { s_char* }
+s_char = {
+    !("\'" | "\\") ~ ANY
+    | "\\" ~ ("\'" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+    | "\\" ~ ("u" ~ ASCII_HEX_DIGIT{4})
+}
+raw_string = {
+    PUSH("_"*) ~ "\""    // push the number signs onto the stack
+    ~ raw_string_inner
+    ~ "\"" ~ POP               // match a quotation mark and the number signs
+}
+raw_string_inner = {
+    (
+        !("\"" ~ PEEK)    // unless the next character is a quotation mark
+                          // followed by the correct amount of number signs,
+        ~ ANY             // consume one character
+    )*
+}
+string = _{(raw_string | s_quoted_string | quoted_string)}
+// Boolean and null. The trailing `!("_" | XID_CONTINUE)` is a word boundary so
+// these keyword literals do not greedily match a prefix of a longer identifier
+// (e.g. `nullable_column`, `trueValue`) where `term` tries `literal` before
+// `var` — upstream cozo #281.
+boolean = { ("true" | "false") ~ !("_" | XID_CONTINUE) }
+null = { "null" ~ !("_" | XID_CONTINUE) }
+// Numbers
+pos_int = @{ASCII_DIGIT ~ ("_" | ASCII_DIGIT)*}
+hex_pos_int = @{"0x" ~ ASCII_HEX_DIGIT ~ ("_" | ASCII_HEX_DIGIT)*}
+octo_pos_int = @{"0o" ~ ASCII_OCT_DIGIT ~ ("_" | ASCII_OCT_DIGIT)*}
+bin_pos_int = @{"0b" ~ ASCII_BIN_DIGIT ~ ("_" | ASCII_BIN_DIGIT)*}
+int = _{(hex_pos_int | octo_pos_int | bin_pos_int | pos_int)}
+dot_float = @{
+    ("0" | ASCII_NONZERO_DIGIT ~ ("_" | ASCII_DIGIT)*)
+    ~ ("." ~ ("_" | ASCII_DIGIT)*)
+}
+sci_float = @{
+    ("0" | ASCII_NONZERO_DIGIT ~ ("_" | ASCII_DIGIT)*)
+    ~ ("." ~ ("_" | ASCII_DIGIT)*)?
+    ~ (^"e" ~ ("+" | "-")? ~ ("_" | ASCII_DIGIT)+)
+}
+float = _{(sci_float | dot_float)}
+number = _{(float | int)}
+literal = _{ null | boolean | number | string}
+
+// schema
+
+table_schema = {"{" ~ table_cols ~ ("=>" ~ table_cols)? ~ "}"}
+table_cols = {(table_col ~ ",")* ~ table_col?}
+table_col = {ident ~ (":" ~ col_type)? ~ (("default" ~ expr) | ("=" ~ out_arg))?}
+col_type = {(
+    any_type | bool_type | int_type | float_type | string_type |
+    bytes_type | uuid_type | validity_type | txtime_type | vec_type |
+    json_type | list_type | tuple_type) ~ "?"?}
+col_type_with_term = {SOI ~ col_type ~ EOI}
+any_type = {"Any"}
+int_type = {"Int"}
+float_type = {"Float"}
+string_type = {"String"}
+bytes_type = {"Bytes"}
+uuid_type = {"Uuid"}
+bool_type = {"Bool"}
+json_type = {"Json"}
+validity_type = {"Validity"}
+txtime_type = {"TxTime"}
+list_type = {"[" ~ col_type ~ (";" ~ expr)? ~ "]"}
+tuple_type = {"(" ~ (col_type ~ ",")* ~ col_type? ~ ")"}
+vec_type = {"<" ~ vec_el_type ~ ";" ~ pos_int ~ ">"}
+vec_el_type = {"F32" | "F64" | "Float" | "Double" }
+
+imperative_stmt = _{
+    break_stmt | continue_stmt | return_stmt | debug_stmt | imperative_sysop |
+    imperative_clause | ignore_error_script | if_chain | if_not_chain | loop_block | temp_swap
+}
+imperative_sysop = {sys_script_inner ~ ("as" ~ definitely_underscore_ident)?}
+imperative_clause = {query_script_inner ~ ("as" ~ definitely_underscore_ident)?}
+imperative_condition = _{underscore_ident | imperative_clause}
+if_chain = {"%if" ~ imperative_condition
+          ~ "%then"? ~ imperative_block
+          ~ ("%else" ~ imperative_block)? ~ "%end" }
+if_not_chain = {"%if_not" ~ imperative_condition
+                         ~ "%then"? ~ imperative_block
+                         ~ ("%else" ~ imperative_block)? ~ "%end" }
+imperative_block = {imperative_stmt+}
+break_stmt = {"%break" ~ ident?}
+ignore_error_script = {"%ignore_error" ~ imperative_clause}
+continue_stmt = {"%continue" ~ ident?}
+return_stmt = {"%return" ~ (((ident | underscore_ident | imperative_clause) ~ ",")* ~ (ident | underscore_ident | imperative_clause))?}
+loop_block = {("%mark" ~ ident)? ~ "%loop" ~ imperative_block ~ "%end"}
+temp_swap = {"%swap" ~ underscore_ident ~ underscore_ident}
+debug_stmt = {"%debug" ~ (ident | underscore_ident)}
+
+fts_doc = {SOI ~ fts_expr+ ~ EOI}
+fts_phrase_simple = @{!("AND" | "OR" | "NOT" | "NEAR" | "," | ";") ~ (XID_CONTINUE+)}
+fts_phrase_group = {fts_phrase_simple+}
+fts_prefix_marker = @{"*"}
+fts_booster = {"^" ~ (dot_float | pos_int)}
+fts_phrase = {(fts_phrase_group | quoted_string | s_quoted_string | raw_string) ~ fts_prefix_marker? ~ fts_booster?}
+fts_near = {"NEAR" ~ ("/" ~ pos_int)? ~ "(" ~ fts_phrase+ ~ ")"}
+fts_term = _{fts_phrase | fts_near | fts_grouped}
+fts_grouped = {"(" ~ fts_expr+ ~ ")"}
+fts_expr = {fts_term ~ (fts_op ~ fts_term)*}
+fts_op = _{fts_and | fts_or | fts_not}
+fts_and = {"AND"}
+fts_or = {"OR" | "," | ";"}
+fts_not = {"NOT"}
+
+expression_script = {SOI ~ expr ~ EOI}
+param_list = {SOI ~ "[" ~ "[" ~ (param ~ ",")* ~ param? ~ "]" ~ "]" ~ EOI}

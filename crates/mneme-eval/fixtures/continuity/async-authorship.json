@@ -1,0 +1,46 @@
+{
+  "schema": "frozen_authorship_v1",
+  "source": "Fixture-controlled synthetic authorship derived only from the scripted learn observation and the revise public API notice, independently of grading rules. Frozen before comparison; it is not natural authorship by real actors.",
+  "after_learn": [
+    {
+      "op": "note",
+      "alias": "lesson",
+      "summary": "Synchronous dependency blocked the heartbeat during direct fetch.",
+      "body": "Observed at the catalog async boundary: direct synchronous fetch prevented the heartbeat from progressing while pending. Dispatch synchronous work to a worker so other work can progress. This workaround concerns the dependency used in that observation."
+    },
+    {
+      "op": "note",
+      "alias": "context",
+      "summary": "Catalog dependency scheduling experience.",
+      "body": "The catalog experiment records heartbeat progress during a pending synchronous fetch. Inspect this scheduling experience at an async boundary."
+    }
+  ],
+  "after_transfer": [],
+  "after_revise": [
+    {
+      "op": "note",
+      "alias": "correction",
+      "summary": "Correction: native_async fetch yields without worker dispatch.",
+      "body": "The search dependency now exposes a native_async API that yields while pending. Run native_async fetch directly and retain worker dispatch only for synchronous dependencies, including old components. The synchronous observation remains valid; applying its workaround to native async adds unnecessary dispatch."
+    },
+    {
+      "op": "supersede",
+      "winner": "correction",
+      "loser": "lesson"
+    }
+  ],
+  "graph_after_learn": [
+    {
+      "op": "link",
+      "from": "context",
+      "to": "lesson"
+    }
+  ],
+  "graph_after_revise": [
+    {
+      "op": "link",
+      "from": "context",
+      "to": "correction"
+    }
+  ]
+}

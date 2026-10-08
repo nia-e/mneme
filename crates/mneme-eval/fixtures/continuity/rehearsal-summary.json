@@ -1,0 +1,305 @@
+{
+  "schema": "continuity_pilot_compact_artifact_v1",
+  "actor_kind": "scripted_rehearsal",
+  "semantic_digest": "1dc8f4b1346e0079ce5445fccbe7a3878f6300dae9f03828a71042f3c73fd5f0",
+  "rehearsal_repetitions": 2,
+  "identical_full_artifacts": true,
+  "episodes": [
+    {
+      "episode": "diagnostics",
+      "condition": "notes_search",
+      "fixture_hash": "c8647815eb95b3aef0686f84ce42f23ce796c8c4eb44e9e6d6a08c05bc281a3c",
+      "common_authorship_hash": "ee00bd17c083d91d22ee7bdcb464adc4fb71e5610af5eb6fd66d099743c9f10a",
+      "semantic_digest": "fea19846b65636c2401d62287913155bd65d6d7b8a62525217838379f67be9c5",
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "calls": 4,
+          "context_bytes": 2282
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "calls": 7,
+          "context_bytes": 3645
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "calls": 7,
+          "context_bytes": 3654
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "calls": 10,
+          "context_bytes": 4770
+        }
+      ],
+      "common_authorship_calls": 4,
+      "common_authorship_wire_bytes": 1690,
+      "graph_intervention_calls": 0,
+      "graph_intervention_wire_bytes": 0,
+      "configuration": {
+        "dimension": 256,
+        "embedder": "HashingEmbedder",
+        "engine": "Config { ann_k: 4, lexical_k: 4, rrf_constant: 60.0, dense_weight: 1.0, lexical_weight: 1.15, graph_seed_cap: 0, graph_weight: 1.0, graph_slot_cap: 0, candidate_admission_limit: 1, similarity_link_cap: 0, similarity_link_threshold: 0.25, min_similarity_links: 2, coretrieval_link_cap: 0, strength: StrengthParams { reinforce_gain: 0.35, interference_retention: 0.6, interference_resist: 0.95, resist_trials_half: 20.0 }, bridge_strength: StrengthParams { reinforce_gain: 0.2, interference_retention: 0.8, interference_resist: 0.97, resist_trials_half: 20.0 }, budget: Budget { max_nodes: 4, max_depth: 2, min_relevance: 0.0, explore: 0.0, relevance_ratio: 0.0, dedup_similarity: 1.0, query_conditioning: 0.0 }, default_body_scheme: \"inline\", confidence_interference_retention: 0.7, confidence_restore: 0.5, confidence_floor: 0.1, promote_use_threshold: 3, archive_floor: 0.05, bridge_probability: 0.0, bridge_weight: 0.15, prune_weight_floor: 0.2, dense_degree_threshold: 24 }",
+        "fixed_clock": 1700000000000,
+        "max_calls_per_phase": 32,
+        "max_context_bytes_per_phase": 65536,
+        "max_response_bytes": 8192,
+        "seed": 20260906,
+        "store": "independent MemStore per episode and condition"
+      }
+    },
+    {
+      "episode": "diagnostics",
+      "condition": "hybrid_graph_off",
+      "fixture_hash": "c8647815eb95b3aef0686f84ce42f23ce796c8c4eb44e9e6d6a08c05bc281a3c",
+      "common_authorship_hash": "ee00bd17c083d91d22ee7bdcb464adc4fb71e5610af5eb6fd66d099743c9f10a",
+      "semantic_digest": "bf5e45777e089123be1df4b49fb9b27e49650e589d5400337af17eef21471225",
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "calls": 4,
+          "context_bytes": 2282
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "calls": 7,
+          "context_bytes": 4532
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "calls": 7,
+          "context_bytes": 4541
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "calls": 10,
+          "context_bytes": 5790
+        }
+      ],
+      "common_authorship_calls": 4,
+      "common_authorship_wire_bytes": 1690,
+      "graph_intervention_calls": 0,
+      "graph_intervention_wire_bytes": 0,
+      "configuration": {
+        "dimension": 256,
+        "embedder": "HashingEmbedder",
+        "engine": "Config { ann_k: 4, lexical_k: 4, rrf_constant: 60.0, dense_weight: 1.0, lexical_weight: 1.15, graph_seed_cap: 0, graph_weight: 1.0, graph_slot_cap: 0, candidate_admission_limit: 1, similarity_link_cap: 0, similarity_link_threshold: 0.25, min_similarity_links: 2, coretrieval_link_cap: 0, strength: StrengthParams { reinforce_gain: 0.35, interference_retention: 0.6, interference_resist: 0.95, resist_trials_half: 20.0 }, bridge_strength: StrengthParams { reinforce_gain: 0.2, interference_retention: 0.8, interference_resist: 0.97, resist_trials_half: 20.0 }, budget: Budget { max_nodes: 4, max_depth: 2, min_relevance: 0.0, explore: 0.0, relevance_ratio: 0.0, dedup_similarity: 1.0, query_conditioning: 0.0 }, default_body_scheme: \"inline\", confidence_interference_retention: 0.7, confidence_restore: 0.5, confidence_floor: 0.1, promote_use_threshold: 3, archive_floor: 0.05, bridge_probability: 0.0, bridge_weight: 0.15, prune_weight_floor: 0.2, dense_degree_threshold: 24 }",
+        "fixed_clock": 1700000000000,
+        "max_calls_per_phase": 32,
+        "max_context_bytes_per_phase": 65536,
+        "max_response_bytes": 8192,
+        "seed": 20260906,
+        "store": "independent MemStore per episode and condition"
+      }
+    },
+    {
+      "episode": "diagnostics",
+      "condition": "hybrid_authored_graph",
+      "fixture_hash": "c8647815eb95b3aef0686f84ce42f23ce796c8c4eb44e9e6d6a08c05bc281a3c",
+      "common_authorship_hash": "ee00bd17c083d91d22ee7bdcb464adc4fb71e5610af5eb6fd66d099743c9f10a",
+      "semantic_digest": "3bf0740e6fe39caae1a46c1bd102713e10fa8f9d4b110eb73f489982dc229041",
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "calls": 4,
+          "context_bytes": 2282
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "calls": 7,
+          "context_bytes": 4535
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "calls": 7,
+          "context_bytes": 4544
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "calls": 10,
+          "context_bytes": 5793
+        }
+      ],
+      "common_authorship_calls": 4,
+      "common_authorship_wire_bytes": 1690,
+      "graph_intervention_calls": 2,
+      "graph_intervention_wire_bytes": 238,
+      "configuration": {
+        "dimension": 256,
+        "embedder": "HashingEmbedder",
+        "engine": "Config { ann_k: 4, lexical_k: 4, rrf_constant: 60.0, dense_weight: 1.0, lexical_weight: 1.15, graph_seed_cap: 2, graph_weight: 1.0, graph_slot_cap: 2, candidate_admission_limit: 1, similarity_link_cap: 0, similarity_link_threshold: 0.25, min_similarity_links: 2, coretrieval_link_cap: 0, strength: StrengthParams { reinforce_gain: 0.35, interference_retention: 0.6, interference_resist: 0.95, resist_trials_half: 20.0 }, bridge_strength: StrengthParams { reinforce_gain: 0.2, interference_retention: 0.8, interference_resist: 0.97, resist_trials_half: 20.0 }, budget: Budget { max_nodes: 4, max_depth: 2, min_relevance: 0.0, explore: 0.0, relevance_ratio: 0.0, dedup_similarity: 1.0, query_conditioning: 0.0 }, default_body_scheme: \"inline\", confidence_interference_retention: 0.7, confidence_restore: 0.5, confidence_floor: 0.1, promote_use_threshold: 3, archive_floor: 0.05, bridge_probability: 0.0, bridge_weight: 0.15, prune_weight_floor: 0.2, dense_degree_threshold: 24 }",
+        "fixed_clock": 1700000000000,
+        "max_calls_per_phase": 32,
+        "max_context_bytes_per_phase": 65536,
+        "max_response_bytes": 8192,
+        "seed": 20260906,
+        "store": "independent MemStore per episode and condition"
+      }
+    },
+    {
+      "episode": "async",
+      "condition": "notes_search",
+      "fixture_hash": "9899e062f15c7955233ca010fee8b3dcb6b7fc46bba0043207ed3a78312f7993",
+      "common_authorship_hash": "baf223aff4ad025ba8e1bb766c258d5ced28eef6c2d02dc2433ecf1d313c67b6",
+      "semantic_digest": "6ff01dee463bb14836174d8a1833f58290d4af75418d8ef7fbecb1d8da524ca2",
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "calls": 6,
+          "context_bytes": 2607
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "calls": 9,
+          "context_bytes": 4005
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "calls": 9,
+          "context_bytes": 3991
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "calls": 14,
+          "context_bytes": 5272
+        }
+      ],
+      "common_authorship_calls": 4,
+      "common_authorship_wire_bytes": 1660,
+      "graph_intervention_calls": 0,
+      "graph_intervention_wire_bytes": 0,
+      "configuration": {
+        "dimension": 256,
+        "embedder": "HashingEmbedder",
+        "engine": "Config { ann_k: 4, lexical_k: 4, rrf_constant: 60.0, dense_weight: 1.0, lexical_weight: 1.15, graph_seed_cap: 0, graph_weight: 1.0, graph_slot_cap: 0, candidate_admission_limit: 1, similarity_link_cap: 0, similarity_link_threshold: 0.25, min_similarity_links: 2, coretrieval_link_cap: 0, strength: StrengthParams { reinforce_gain: 0.35, interference_retention: 0.6, interference_resist: 0.95, resist_trials_half: 20.0 }, bridge_strength: StrengthParams { reinforce_gain: 0.2, interference_retention: 0.8, interference_resist: 0.97, resist_trials_half: 20.0 }, budget: Budget { max_nodes: 4, max_depth: 2, min_relevance: 0.0, explore: 0.0, relevance_ratio: 0.0, dedup_similarity: 1.0, query_conditioning: 0.0 }, default_body_scheme: \"inline\", confidence_interference_retention: 0.7, confidence_restore: 0.5, confidence_floor: 0.1, promote_use_threshold: 3, archive_floor: 0.05, bridge_probability: 0.0, bridge_weight: 0.15, prune_weight_floor: 0.2, dense_degree_threshold: 24 }",
+        "fixed_clock": 1700000000000,
+        "max_calls_per_phase": 32,
+        "max_context_bytes_per_phase": 65536,
+        "max_response_bytes": 8192,
+        "seed": 20260907,
+        "store": "independent MemStore per episode and condition"
+      }
+    },
+    {
+      "episode": "async",
+      "condition": "hybrid_graph_off",
+      "fixture_hash": "9899e062f15c7955233ca010fee8b3dcb6b7fc46bba0043207ed3a78312f7993",
+      "common_authorship_hash": "baf223aff4ad025ba8e1bb766c258d5ced28eef6c2d02dc2433ecf1d313c67b6",
+      "semantic_digest": "9bce6075080dd968593bb1f6850d814731c49daae702b1dfbafbc67038215fc3",
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "calls": 6,
+          "context_bytes": 2607
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "calls": 9,
+          "context_bytes": 4892
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "calls": 9,
+          "context_bytes": 4878
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "calls": 14,
+          "context_bytes": 6292
+        }
+      ],
+      "common_authorship_calls": 4,
+      "common_authorship_wire_bytes": 1660,
+      "graph_intervention_calls": 0,
+      "graph_intervention_wire_bytes": 0,
+      "configuration": {
+        "dimension": 256,
+        "embedder": "HashingEmbedder",
+        "engine": "Config { ann_k: 4, lexical_k: 4, rrf_constant: 60.0, dense_weight: 1.0, lexical_weight: 1.15, graph_seed_cap: 0, graph_weight: 1.0, graph_slot_cap: 0, candidate_admission_limit: 1, similarity_link_cap: 0, similarity_link_threshold: 0.25, min_similarity_links: 2, coretrieval_link_cap: 0, strength: StrengthParams { reinforce_gain: 0.35, interference_retention: 0.6, interference_resist: 0.95, resist_trials_half: 20.0 }, bridge_strength: StrengthParams { reinforce_gain: 0.2, interference_retention: 0.8, interference_resist: 0.97, resist_trials_half: 20.0 }, budget: Budget { max_nodes: 4, max_depth: 2, min_relevance: 0.0, explore: 0.0, relevance_ratio: 0.0, dedup_similarity: 1.0, query_conditioning: 0.0 }, default_body_scheme: \"inline\", confidence_interference_retention: 0.7, confidence_restore: 0.5, confidence_floor: 0.1, promote_use_threshold: 3, archive_floor: 0.05, bridge_probability: 0.0, bridge_weight: 0.15, prune_weight_floor: 0.2, dense_degree_threshold: 24 }",
+        "fixed_clock": 1700000000000,
+        "max_calls_per_phase": 32,
+        "max_context_bytes_per_phase": 65536,
+        "max_response_bytes": 8192,
+        "seed": 20260907,
+        "store": "independent MemStore per episode and condition"
+      }
+    },
+    {
+      "episode": "async",
+      "condition": "hybrid_authored_graph",
+      "fixture_hash": "9899e062f15c7955233ca010fee8b3dcb6b7fc46bba0043207ed3a78312f7993",
+      "common_authorship_hash": "baf223aff4ad025ba8e1bb766c258d5ced28eef6c2d02dc2433ecf1d313c67b6",
+      "semantic_digest": "7e6aa04d0d3d8254f2e663eb572a68b63a4f1766f79a80802766870a8199962d",
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "calls": 6,
+          "context_bytes": 2607
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "calls": 9,
+          "context_bytes": 4895
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "calls": 9,
+          "context_bytes": 4881
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "calls": 14,
+          "context_bytes": 6295
+        }
+      ],
+      "common_authorship_calls": 4,
+      "common_authorship_wire_bytes": 1660,
+      "graph_intervention_calls": 2,
+      "graph_intervention_wire_bytes": 238,
+      "configuration": {
+        "dimension": 256,
+        "embedder": "HashingEmbedder",
+        "engine": "Config { ann_k: 4, lexical_k: 4, rrf_constant: 60.0, dense_weight: 1.0, lexical_weight: 1.15, graph_seed_cap: 2, graph_weight: 1.0, graph_slot_cap: 2, candidate_admission_limit: 1, similarity_link_cap: 0, similarity_link_threshold: 0.25, min_similarity_links: 2, coretrieval_link_cap: 0, strength: StrengthParams { reinforce_gain: 0.35, interference_retention: 0.6, interference_resist: 0.95, resist_trials_half: 20.0 }, bridge_strength: StrengthParams { reinforce_gain: 0.2, interference_retention: 0.8, interference_resist: 0.97, resist_trials_half: 20.0 }, budget: Budget { max_nodes: 4, max_depth: 2, min_relevance: 0.0, explore: 0.0, relevance_ratio: 0.0, dedup_similarity: 1.0, query_conditioning: 0.0 }, default_body_scheme: \"inline\", confidence_interference_retention: 0.7, confidence_restore: 0.5, confidence_floor: 0.1, promote_use_threshold: 3, archive_floor: 0.05, bridge_probability: 0.0, bridge_weight: 0.15, prune_weight_floor: 0.2, dense_degree_threshold: 24 }",
+        "fixed_clock": 1700000000000,
+        "max_calls_per_phase": 32,
+        "max_context_bytes_per_phase": 65536,
+        "max_response_bytes": 8192,
+        "seed": 20260907,
+        "store": "independent MemStore per episode and condition"
+      }
+    }
+  ],
+  "limits": [
+    "Scripted rehearsal only; no natural actor outcome conclusion.",
+    "MemStore and HashingEmbedder are reference plumbing, not semantic retrieval quality.",
+    "Synthetic authored inputs have identical phase scope across conditions; their authoring quality and natural cost are uncontrolled.",
+    "Task effects are deterministic simulations, not real application performance.",
+    "Obsolete workaround metrics are action proxies, not proof that a memory caused behavior.",
+    "Full logs produced by the --rehearse --json command contain private assessment data and must not enter actor context."
+  ]
+}

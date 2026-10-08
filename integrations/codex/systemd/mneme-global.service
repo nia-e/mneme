@@ -1,0 +1,32 @@
+# Example unit: replace account, paths and executable with your reviewed installation.
+[Unit]
+Description=Mneme shared private global memory
+After=network.target
+ConditionPathExists=/home/user/.local/share/mneme/memory.db
+StartLimitIntervalSec=300
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/home/user/.local/share/mneme
+Environment=HOME=/home/user
+Environment=HF_HOME=/home/user/.local/share/mneme/.fastembed_cache
+Environment=FASTEMBED_CACHE_DIR=/home/user/.local/share/mneme/.fastembed_cache
+Environment=MNEME_RERANK=0
+ExecStart=/home/user/.local/share/mneme/runtime/current/bin/mneme-mcp --capability-profile operator --http 127.0.0.1:18766 --db user=/home/user/.local/share/mneme/memory.db
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/user/.local/share/mneme
+
+[Install]
+WantedBy=multi-user.target

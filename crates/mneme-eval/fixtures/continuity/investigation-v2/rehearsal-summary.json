@@ -1,0 +1,811 @@
+{
+  "schema": "continuity_investigation_compact_rehearsal_v2",
+  "actor_kind": "scripted_rehearsal",
+  "publication_note": "Public derivative: private source lineage omitted; retained scripted synthetic rehearsal values are not current qualification.",
+  "full_artifacts_equal": true,
+  "repetitions": 2,
+  "v1_semantic_digest": "1dc8f4b1346e0079ce5445fccbe7a3878f6300dae9f03828a71042f3c73fd5f0",
+  "semantic_digest": "2b8f5dc134916ea7e9ec80fd666e0532968ae170dbe7bb1634f54b9cc2a12733",
+  "episodes": [
+    {
+      "episode": "diagnostics",
+      "condition": "empty_memory",
+      "fixture_hash": "c4cae8227e2cb22b16b386ff08368833b5a806df0abc7f37f02c607456b34fae",
+      "semantic_digest": "becc22a9247bf6506c9b89242bfc447f2f2f7cd6f6d31b662ff37114612fbbdf",
+      "authored_history_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "all_phases_passed": true,
+      "whole_episode_attempted_calls": 28,
+      "later_discovery_calls": 8,
+      "whole_episode_wire_bytes": 17430,
+      "successful_authorship_operations": 0,
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 130,
+              "response_bytes": 1104
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2232
+            },
+            "task": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 121,
+              "response_bytes": 104
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 3887,
+            "attempted_calls": 6,
+            "calls": 6,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 447,
+            "response_bytes": 3440,
+            "total_context_bytes": 3887
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 130,
+              "response_bytes": 1104
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2306
+            },
+            "task": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 125,
+              "response_bytes": 88
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 3949,
+            "attempted_calls": 6,
+            "calls": 6,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 451,
+            "response_bytes": 3498,
+            "total_context_bytes": 3949
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 130,
+              "response_bytes": 1119
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2355
+            },
+            "task": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 120,
+              "response_bytes": 107
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 4027,
+            "attempted_calls": 6,
+            "calls": 6,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 446,
+            "response_bytes": 3581,
+            "total_context_bytes": 4027
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 260,
+              "response_bytes": 2223
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2429
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 266,
+              "response_bytes": 193
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 5567,
+            "attempted_calls": 10,
+            "calls": 10,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 722,
+            "response_bytes": 4845,
+            "total_context_bytes": 5567
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        }
+      ]
+    },
+    {
+      "episode": "diagnostics",
+      "condition": "notes_search",
+      "fixture_hash": "c4cae8227e2cb22b16b386ff08368833b5a806df0abc7f37f02c607456b34fae",
+      "semantic_digest": "6b17a63c6c840f4c5a0a2043d85559d9c1200edcb3946c348e497b467a624212",
+      "authored_history_hash": "1756aad521da40c7441aae6ceac9c41c2b4bc5782547bd69a383e7677311f8c4",
+      "all_phases_passed": true,
+      "whole_episode_attempted_calls": 32,
+      "later_discovery_calls": 2,
+      "whole_episode_wire_bytes": 20915,
+      "successful_authorship_operations": 3,
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "operation_counts": {
+            "authorship": {
+              "admitted": 1,
+              "attempted": 1,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 478,
+              "response_bytes": 70
+            },
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 130,
+              "response_bytes": 1104
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2798
+            },
+            "task": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 121,
+              "response_bytes": 104
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 5001,
+            "attempted_calls": 7,
+            "calls": 7,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 925,
+            "response_bytes": 4076,
+            "total_context_bytes": 5001
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "7dbd3fb6f05abec15cedbeaea68dad8dbde5aabce91c3966fec376058807cc2b"
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "operation_counts": {
+            "memory_access": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 89,
+              "response_bytes": 857
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 224,
+              "response_bytes": 2321
+            },
+            "task": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 125,
+              "response_bytes": 88
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 3704,
+            "attempted_calls": 6,
+            "calls": 6,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 438,
+            "response_bytes": 3266,
+            "total_context_bytes": 3704
+          },
+          "authored_history_at_start": "7dbd3fb6f05abec15cedbeaea68dad8dbde5aabce91c3966fec376058807cc2b",
+          "authored_history_at_end": "7dbd3fb6f05abec15cedbeaea68dad8dbde5aabce91c3966fec376058807cc2b"
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "operation_counts": {
+            "authorship": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 980,
+              "response_bytes": 374
+            },
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 130,
+              "response_bytes": 1119
+            },
+            "memory_access": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 89,
+              "response_bytes": 857
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 224,
+              "response_bytes": 2921
+            },
+            "task": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 120,
+              "response_bytes": 107
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 6921,
+            "attempted_calls": 10,
+            "calls": 10,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 1543,
+            "response_bytes": 5378,
+            "total_context_bytes": 6921
+          },
+          "authored_history_at_start": "7dbd3fb6f05abec15cedbeaea68dad8dbde5aabce91c3966fec376058807cc2b",
+          "authored_history_at_end": "1756aad521da40c7441aae6ceac9c41c2b4bc5782547bd69a383e7677311f8c4"
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "operation_counts": {
+            "memory_access": {
+              "admitted": 3,
+              "attempted": 3,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 136,
+              "response_bytes": 1997
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 253,
+              "response_bytes": 2444
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 266,
+              "response_bytes": 193
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 5289,
+            "attempted_calls": 9,
+            "calls": 9,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 655,
+            "response_bytes": 4634,
+            "total_context_bytes": 5289
+          },
+          "authored_history_at_start": "1756aad521da40c7441aae6ceac9c41c2b4bc5782547bd69a383e7677311f8c4",
+          "authored_history_at_end": "1756aad521da40c7441aae6ceac9c41c2b4bc5782547bd69a383e7677311f8c4"
+        }
+      ]
+    },
+    {
+      "episode": "async",
+      "condition": "empty_memory",
+      "fixture_hash": "87325e63bc2b6ca435ed0af7ca502ccc2da4f7c44161d2bf1572a8f7024c0ed6",
+      "semantic_digest": "2a420d56613cf0d51786ff05587f99f882fdb6cb209be4d0cc79466416d10439",
+      "authored_history_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "all_phases_passed": true,
+      "whole_episode_attempted_calls": 38,
+      "later_discovery_calls": 8,
+      "whole_episode_wire_bytes": 19262,
+      "successful_authorship_operations": 0,
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 118,
+              "response_bytes": 1178
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2358
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 245,
+              "response_bytes": 196
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 4291,
+            "attempted_calls": 8,
+            "calls": 8,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 559,
+            "response_bytes": 3732,
+            "total_context_bytes": 4291
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 118,
+              "response_bytes": 1178
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2421
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 248,
+              "response_bytes": 201
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 4362,
+            "attempted_calls": 8,
+            "calls": 8,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 562,
+            "response_bytes": 3800,
+            "total_context_bytes": 4362
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 118,
+              "response_bytes": 1177
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2416
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 244,
+              "response_bytes": 202
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 4353,
+            "attempted_calls": 8,
+            "calls": 8,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 558,
+            "response_bytes": 3795,
+            "total_context_bytes": 4353
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "operation_counts": {
+            "discovery": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 236,
+              "response_bytes": 2355
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2530
+            },
+            "task": {
+              "admitted": 8,
+              "attempted": 8,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 536,
+              "response_bytes": 403
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 6256,
+            "attempted_calls": 14,
+            "calls": 14,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 968,
+            "response_bytes": 5288,
+            "total_context_bytes": 6256
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        }
+      ]
+    },
+    {
+      "episode": "async",
+      "condition": "notes_search",
+      "fixture_hash": "87325e63bc2b6ca435ed0af7ca502ccc2da4f7c44161d2bf1572a8f7024c0ed6",
+      "semantic_digest": "9228576a77dd51210e0aa4f03e56329646af753291007c253bd09a647b6ac2f2",
+      "authored_history_hash": "53def327c0996ea3a9a4406cc90250fb1207ed66455a80cb2dc9afca29ea3919",
+      "all_phases_passed": true,
+      "whole_episode_attempted_calls": 42,
+      "later_discovery_calls": 2,
+      "whole_episode_wire_bytes": 23353,
+      "successful_authorship_operations": 3,
+      "phases": [
+        {
+          "phase": "learn",
+          "passed": true,
+          "operation_counts": {
+            "authorship": {
+              "admitted": 1,
+              "attempted": 1,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 579,
+              "response_bytes": 70
+            },
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 118,
+              "response_bytes": 1178
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 196,
+              "response_bytes": 2924
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 245,
+              "response_bytes": 196
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 5506,
+            "attempted_calls": 9,
+            "calls": 9,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 1138,
+            "response_bytes": 4368,
+            "total_context_bytes": 5506
+          },
+          "authored_history_at_start": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "authored_history_at_end": "4f4dbc20b64e7b469a1a1df525bdcc216748617ba226d76fcbc3417bdeb4792e"
+        },
+        {
+          "phase": "transfer",
+          "passed": true,
+          "operation_counts": {
+            "memory_access": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 89,
+              "response_bytes": 958
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 224,
+              "response_bytes": 2436
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 248,
+              "response_bytes": 201
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 4156,
+            "attempted_calls": 8,
+            "calls": 8,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 561,
+            "response_bytes": 3595,
+            "total_context_bytes": 4156
+          },
+          "authored_history_at_start": "4f4dbc20b64e7b469a1a1df525bdcc216748617ba226d76fcbc3417bdeb4792e",
+          "authored_history_at_end": "4f4dbc20b64e7b469a1a1df525bdcc216748617ba226d76fcbc3417bdeb4792e"
+        },
+        {
+          "phase": "revise",
+          "passed": true,
+          "operation_counts": {
+            "authorship": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 1166,
+              "response_bytes": 374
+            },
+            "discovery": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 118,
+              "response_bytes": 1177
+            },
+            "memory_access": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 89,
+              "response_bytes": 958
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 224,
+              "response_bytes": 2982
+            },
+            "task": {
+              "admitted": 4,
+              "attempted": 4,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 244,
+              "response_bytes": 202
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 7534,
+            "attempted_calls": 12,
+            "calls": 12,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 1841,
+            "response_bytes": 5693,
+            "total_context_bytes": 7534
+          },
+          "authored_history_at_start": "4f4dbc20b64e7b469a1a1df525bdcc216748617ba226d76fcbc3417bdeb4792e",
+          "authored_history_at_end": "53def327c0996ea3a9a4406cc90250fb1207ed66455a80cb2dc9afca29ea3919"
+        },
+        {
+          "phase": "return",
+          "passed": true,
+          "operation_counts": {
+            "memory_access": {
+              "admitted": 3,
+              "attempted": 3,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 136,
+              "response_bytes": 2284
+            },
+            "protocol": {
+              "admitted": 2,
+              "attempted": 2,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 253,
+              "response_bytes": 2545
+            },
+            "task": {
+              "admitted": 8,
+              "attempted": 8,
+              "failed_admitted": 0,
+              "rejected": 0,
+              "request_bytes": 536,
+              "response_bytes": 403
+            }
+          },
+          "budget": {
+            "actual_total_wire_bytes": 6157,
+            "attempted_calls": 13,
+            "calls": 13,
+            "rejected_calls": 0,
+            "rejected_request_bytes": 0,
+            "rejected_response_bytes": 0,
+            "request_bytes": 925,
+            "response_bytes": 5232,
+            "total_context_bytes": 6157
+          },
+          "authored_history_at_start": "53def327c0996ea3a9a4406cc90250fb1207ed66455a80cb2dc9afca29ea3919",
+          "authored_history_at_end": "53def327c0996ea3a9a4406cc90250fb1207ed66455a80cb2dc9afca29ea3919"
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Scripted plumbing rehearsal, not fresh-actor evidence.",
+    "Scripted notes are generated only in rehearsal and are never supplied to real actors.",
+    "Control has an independently tested one-probe-per-later-component route, cheaper than this source-reading rehearsal.",
+    "No graph arm, provider inference, live store or production change."
+  ],
+  "all_eight_saved_v1_actor_artifacts_replay_unchanged": true,
+  "all_four_v2_scripted_session_replay_endpoints_equal": true
+}
