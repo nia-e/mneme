@@ -27,3 +27,8 @@ New to Mneme? Start with [installation and a first session](../README.md).
 
 See [architecture](architecture.md), [development criteria](../AGENTS.md) and the
 optional [review-ledger format](review-ledger-schema.md).
+
+[EBR-Bench preparation](ebr-bench.md) describes the proposed learning comparison;
+execution remains blocked on access to the upstream engine and assets.
+[Tag stewardship](tag-stewardship.md) covers shared vocabulary, capture-time tags
+and guarded background curation, including configuration and recovery boundaries.

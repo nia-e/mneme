@@ -263,3 +263,170 @@ async fn canonical_inventory_includes_exact_historical_episode_editions() {
             .all(|item| item["kind"] == "episode")
     );
 }
+
+#[test]
+fn tag_vocabulary_admission_is_closed_exact_and_bounded() {
+    assert_eq!(
+        PreparedList::parse(&json!({"kind":"tags"}))
+            .unwrap()
+            .into_json(),
+        json!({"kind":"tags","status":"all","prefix":"","limit":50})
+    );
+    assert_eq!(
+        PreparedList::parse(&json!({"kind":"tags","prefix":"Rust "}))
+            .unwrap()
+            .into_json()["prefix"],
+        "Rust "
+    );
+    for bad in [
+        json!({"kind":"tags","prefix":null}),
+        json!({"kind":"tags","prefix":"\n"}),
+        json!({"kind":"tags","prefix":"é".repeat(129)}),
+        json!({"kind":"tags","status":"unknown"}),
+        json!({"kind":"tags","after":null}),
+        json!({"kind":"tags","after":"tags-v2:{}"}),
+        json!({"kind":"tags","limit":65}),
+        json!({"kind":"tags","limit":0}),
+        json!({"kind":"tags","limit":1.5}),
+        json!({"kind":"tags","tag":"rust"}),
+        json!({"kind":"nodes","prefix":"rust"}),
+        json!({"kind":"touchstones","prefix":"rust"}),
+    ] {
+        assert!(PreparedList::parse(&bad).is_err(), "accepted {bad}");
+    }
+}
+
+#[tokio::test]
+async fn tag_vocabulary_pages_bind_owner_selection_and_report_semantic_only_bounded_work() {
+    let store = Arc::new(MemStore::new(DEFAULT_DIM));
+    let mem = memory(store.clone());
+    for (index, tags, status) in [
+        (
+            1,
+            vec!["Rust".into(), "rust".into(), "rust async".into()],
+            NodeStatus::Active,
+        ),
+        (
+            2,
+            vec!["rust".into(), "rust-lang".into()],
+            NodeStatus::Archived,
+        ),
+        (
+            3,
+            vec!["rust".into(), "rustacean".into()],
+            NodeStatus::Active,
+        ),
+    ] {
+        store
+            .put_node(&node(index, "summary never returned here", tags, status))
+            .await
+            .unwrap();
+    }
+    let first = page(
+        &mem,
+        Ulid(700),
+        json!({"kind":"tags","prefix":"rust","limit":1}),
+    )
+    .await;
+    assert_eq!(first["items"][0]["name"], "rust");
+    assert_eq!(
+        first["items"][0]["count"],
+        json!({"status":"exact","value":3})
+    );
+    assert_eq!(first["items"][0]["examples"].as_array().unwrap().len(), 3);
+    assert_eq!(first["coverage"]["semantic_only"], true);
+    assert_eq!(first["coverage"]["snapshot"], false);
+    assert_eq!(first["has_more"], true);
+    assert!(first["coverage"]["name_seeks"].as_u64().unwrap() <= 256);
+    assert!(first["coverage"]["membership_rows"].as_u64().unwrap() <= 4096);
+    let cursor = first["next_cursor"].clone();
+    assert!(PreparedList::parse(&json!({"kind":"tags","after":cursor})).is_err());
+    assert!(PreparedList::parse(&json!({"kind":"tags","prefix":"Rust","after":cursor})).is_err());
+    assert!(
+        PreparedList::parse(
+            &json!({"kind":"tags","prefix":"rust","status":"active","after":cursor})
+        )
+        .is_err()
+    );
+    let continuation = json!({"kind":"tags","prefix":"rust","after":cursor});
+    assert!(
+        PreparedList::parse(&continuation)
+            .unwrap()
+            .run(&mem, Ulid(701))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("identity mismatch")
+    );
+    let second = page(&mem, Ulid(700), continuation).await;
+    assert_eq!(
+        second["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["rust async", "rust-lang", "rustacean"]
+    );
+    assert!(second["next_cursor"].is_null());
+    let active = page(
+        &mem,
+        Ulid(700),
+        json!({"kind":"tags","prefix":"rust","status":"active"}),
+    )
+    .await;
+    assert_eq!(
+        active["items"][0]["count"],
+        json!({"status":"exact","value":2})
+    );
+    assert_eq!(active["items"].as_array().unwrap().len(), 3);
+    let unchanged = mem.get_node(NodeId(Ulid(1))).await.unwrap().unwrap();
+    assert_eq!(unchanged.exposure_count(), 0);
+    assert_eq!(unchanged.last_exposed(), None);
+    assert!(mem.neighbors(unchanged.id(), 1).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tag_vocabulary_sparse_filtered_pages_keep_progress_without_inference() {
+    let store = Arc::new(MemStore::new(DEFAULT_DIM));
+    let mem = memory(store.clone());
+    for index in 1..=200 {
+        store
+            .put_node(&node(
+                index,
+                "note",
+                vec![format!("tag-{index:03}")],
+                if index == 200 {
+                    NodeStatus::Active
+                } else {
+                    NodeStatus::Archived
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    let first = page(&mem, Ulid(800), json!({"kind":"tags","status":"active"})).await;
+    assert!(first["items"].as_array().unwrap().is_empty());
+    assert_eq!(first["coverage"]["stopped"], "seek_budget");
+    assert!(first["next_cursor"].is_string());
+    let second = page(
+        &mem,
+        Ulid(800),
+        json!({"kind":"tags","status":"active","after":first["next_cursor"]}),
+    )
+    .await;
+    assert_eq!(second["items"][0]["name"], "tag-200");
+    assert!(second["next_cursor"].is_null());
+}
+
+#[tokio::test]
+async fn tag_vocabulary_does_not_promote_episode_tags_to_semantic_vocabulary() {
+    let store = Arc::new(MemStore::new(DEFAULT_DIM));
+    let mem = memory(store);
+    crate::episode::PreparedEpisode::parse(&json!({"action":"append","summary":"Historical account",
+        "tags":["episode-only"],"source":{"namespace":"tag-list-test","key":"first","reference":"test://episode"}}))
+        .unwrap().run(&mem, Ulid(801), None).await.unwrap();
+    let result = page(&mem, Ulid(801), json!({"kind":"tags"})).await;
+    assert!(result["items"].as_array().unwrap().is_empty());
+    assert_eq!(result["coverage"]["semantic_only"], true);
+}

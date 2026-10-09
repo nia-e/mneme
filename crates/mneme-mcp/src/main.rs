@@ -1072,6 +1072,12 @@ async fn call_tool_authorized(
             let id = parse_id(req_s(a, "id")?)?;
             let node = h.mem.get_node(id).await?.ok_or("node not found")?;
             let mut v = node_json(&node);
+            // A single exact GET is the complete-record boundary. Shared card
+            // rendering remains 2 KiB for CORE/query; NodeSummary itself bounds
+            // this one record to 16 KiB before it reaches this adapter.
+            debug_assert!(node.summary().len() <= mneme_core::MAX_NODE_SUMMARY_BYTES);
+            v["summary"] = json!(node.summary());
+            v["summary_truncated"] = json!(false);
             let projection =
                 mneme_app::touchstone::node_touchstone_projection(&h.mem, h.db_id, &node).await?;
             v.as_object_mut().expect("node JSON object").extend(
@@ -3076,6 +3082,8 @@ fn node_json(n: &Node) -> Value {
     let (summary, summary_truncated) = bounded_summary(n.summary(), MAX_SUMMARY_BYTES);
     json!({
         "id": n.id().0.to_string(),
+        "content_fingerprint": mneme_core::ports::routing_content_fingerprint(n),
+        "content_fingerprint_codec": mneme_core::ports::ROUTING_CONTENT_FINGERPRINT_CODEC,
         "summary": summary,
         "summary_truncated": summary_truncated,
         "status": status_str(n.status()),
@@ -3919,7 +3927,7 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
         edit_summary::tool_schema(),
         tool(
             "get",
-            "Read one memory by id in explicit db, including summary-only snapshot hash and immutable touchstone metadata with separate current-resolution caveats. Historical episode editions stay exact. Optional body and edges are bounded; edge metadata reports returned/has_more, never a fake total.",
+            "Read one memory by id in explicit db with its complete canonical summary (up to 16384 UTF-8 bytes; summary_truncated=false), content fingerprint and summary-only snapshot hash. Immutable touchstone metadata has separate current-resolution caveats. Historical episode editions stay exact. Optional body and edges are bounded; edge metadata reports returned/has_more, never a fake total. CORE/query/list summaries remain independently bounded.",
             json!({
                 "db": db_prop(), "id": { "type": "string" },
                 "expected_db_id": expected_db_id_prop(),

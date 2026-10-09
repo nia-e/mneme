@@ -467,7 +467,7 @@ class ReaderRuntime:
 
     def assess(self, observation, overlap_cards=None, *, timeout=TURN_SECONDS,
                recording_scope="project", expected_db_id=None, global_preferences_enabled=False,
-               project_focus=None) -> dict:
+               project_focus=None, tag_context=None) -> dict:
         """Assess one complete public projection, never perform a native write.
 
         A fresh recording-contract thread is used for every admitted assessment,
@@ -479,7 +479,8 @@ class ReaderRuntime:
         receipt = self._fresh_assessment(
             lambda: recording_contract.prepare(observation, overlap_cards, budget=self.budget,
                 recording_scope=recording_scope, expected_db_id=expected_db_id,
-                global_preferences_enabled=global_preferences_enabled, project_focus=project_focus),
+                global_preferences_enabled=global_preferences_enabled, project_focus=project_focus,
+                **({"tag_context": tag_context} if tag_context is not None else {})),
             instructions=recording_contract.instructions_for, schema=recording_contract.schema_for,
             validator=recording_contract.validate_answer, field="assessment", service_name="mneme_recorder",
             success=lambda value: ("proposed" if value["proposal"] or value["maintenance"] else
@@ -493,6 +494,20 @@ class ReaderRuntime:
             if omissions is not None:
                 receipt["intent_omissions"] = omissions
         receipt.update(value if value is not None else {"proposal": None, "maintenance": []})
+        return receipt
+
+    def steward(self, targets, tag_context, *, timeout=TURN_SECONDS) -> dict:
+        """Classify one finite summary batch, on a fresh tool-free thread."""
+        import stewardship_contract
+        receipt = self._fresh_assessment(
+            lambda: stewardship_contract.prepare(targets, tag_context, budget=self.budget),
+            instructions=stewardship_contract.instructions, schema=stewardship_contract.schema,
+            validator=stewardship_contract.validate_answer, field="stewardship",
+            service_name="mneme_tag_steward", success=lambda _: "classified", timeout=timeout,
+            frame_bytes=MAX_FRAME_BYTES,
+            answer_bytes=(self.budget.stewardship_answer_bytes if self.budget else MAX_ANSWER_BYTES))
+        value = receipt.pop("stewardship")
+        receipt["decisions"] = value["decisions"] if value is not None else None
         return receipt
 
     def route(self, current, witnesses, *, expected_db_id, timeout=TURN_SECONDS) -> dict:

@@ -15,6 +15,12 @@ pub(crate) struct RetagArgs {
     /// Optional explicit intended owner identity; mismatch refuses without mutation.
     #[arg(long)]
     pub(crate) expected_db_id: Option<String>,
+    /// Canonical content fingerprint returned by get; changed content refuses atomically.
+    #[arg(long)]
+    expected_content_fingerprint: Option<String>,
+    /// Semantic guide ID=FINGERPRINT to guard atomically; repeat as needed.
+    #[arg(long = "guard-node", requires = "expected_content_fingerprint")]
+    guard_nodes: Vec<String>,
 }
 pub(crate) struct Prepared {
     pub(crate) request: PreparedRetag,
@@ -33,11 +39,28 @@ impl Prepared {
                 Ok::<_, AnyErr>(id)
             })
             .transpose()?;
+        if args.guard_nodes.len() > mneme_core::MAX_NODE_HYDRATION_BATCH {
+            return Err("too many --guard-node entries".into());
+        }
+        let mut raw = json!({"id":args.id,"expected_tags":args.expected_tags,"tags":args.tags});
+        if let Some(fingerprint) = &args.expected_content_fingerprint {
+            raw["expected_content_fingerprint"] = json!(fingerprint);
+        }
+        if !args.guard_nodes.is_empty() {
+            let guards = args
+                .guard_nodes
+                .iter()
+                .map(|value| {
+                    let (id, fingerprint) = value
+                        .split_once('=')
+                        .ok_or("--guard-node must be ID=FINGERPRINT")?;
+                    Ok::<_, AnyErr>(json!({"id":id,"content_fingerprint":fingerprint}))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            raw["guard_nodes"] = json!(guards);
+        }
         Ok(Self {
-            request: PreparedRetag::parse(
-                &json!({"id":args.id,"expected_tags":args.expected_tags,"tags":args.tags}),
-            )
-            .map_err(|error| -> AnyErr { error })?,
+            request: PreparedRetag::parse(&raw).map_err(|error| -> AnyErr { error })?,
             expected_db_id,
         })
     }
@@ -86,5 +109,53 @@ mod tests {
         assert!(parse(&["mnemed", "retag", &id, "--tags"]).is_err());
         assert!(parse(&["mnemed", "retag", &id, "--expected-tags", "--tags", ""]).is_err());
         assert!(parse(&["mnemed", "retag", &id, "--expected-tags", "a,a", "--tags"]).is_err());
+    }
+
+    #[test]
+    fn content_and_guide_guards_are_preserved_and_checked() {
+        let id = ulid::Ulid::from(1).to_string();
+        let guide = ulid::Ulid::from(2).to_string();
+        let fingerprint = "a".repeat(64);
+        let guard = format!("{guide}={fingerprint}");
+        let base = ["mnemed", "retag", &id, "--expected-tags", "--tags"];
+        let mut args = base.to_vec();
+        args.extend([
+            "--expected-content-fingerprint",
+            &fingerprint,
+            "--guard-node",
+            &guard,
+        ]);
+        let prepared = parse(&args).unwrap();
+        assert!(prepared.request.requires_content_guards());
+        assert_eq!(
+            prepared.payload()["expected_content_fingerprint"],
+            fingerprint
+        );
+        assert_eq!(
+            prepared.payload()["guard_nodes"],
+            json!([{"id":guide,"content_fingerprint":fingerprint}])
+        );
+        for extra in [
+            vec!["--guard-node", guard.as_str()],
+            vec!["--expected-content-fingerprint", "invalid"],
+            vec![
+                "--expected-content-fingerprint",
+                &fingerprint,
+                "--guard-node",
+                "missing-separator",
+            ],
+            vec![
+                "--expected-content-fingerprint",
+                &fingerprint,
+                "--guard-node",
+                &guard,
+                "--guard-node",
+                &guard,
+            ],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(extra);
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
     }
 }

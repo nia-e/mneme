@@ -24,13 +24,13 @@ except ImportError:
     raise SystemExit("Mneme installer requires Python 3.11 or newer (for TOML parsing).")
 
 SCHEMA = "mneme.codex-install.v1"
-CONFIG_REVISION = 20
-EXISTING_SERVICE_REVISION = 21
-SUPPORTED_APPLY_REVISIONS = (CONFIG_REVISION, EXISTING_SERVICE_REVISION)
+CONFIG_REVISION = 22
+EXISTING_SERVICE_REVISION = 23
+SUPPORTED_APPLY_REVISIONS = (20, 21, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
 END = "# END mneme-codex-v1"
-PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py")
+PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py")
 LEGACY_TOOLS = ["recall_context", "get", "capture", "supersede", "status"]
 EPISODE_TOOLS = [*LEGACY_TOOLS, "episode"]
 SAVE_TOOLS = [*EPISODE_TOOLS, "save"]
@@ -50,7 +50,8 @@ V13_DESTINATIONS = (*V10_DESTINATIONS, ("lib/routing_memory.py", False), ("lib/r
 V14_DESTINATIONS = (*V13_DESTINATIONS, ("lib/librarian_policy.py", False))
 V16_DESTINATIONS = (*V14_DESTINATIONS, ("lib/touchstone_contract.py", False))
 V19_DESTINATIONS = (*V16_DESTINATIONS, ("lib/target_policy.py", False))
-DESTINATIONS = (*V19_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[21:]))
+V20_DESTINATIONS = (*V19_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[21:24]))
+DESTINATIONS = (*V20_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[24:]))
 RECALL_MODES = ("reminder", "automatic", "shadow", "async")
 RECORDING_MODES = ("off", "automatic")
 SHADOW_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra")
@@ -184,11 +185,11 @@ def validate_plan(plan):
     revision = plan.get("config_revision", 1)
     if type(revision) is not int or revision not in range(1, EXISTING_SERVICE_REVISION + 1):
         raise ValueError("unsupported planned configuration revision")
-    if revision == EXISTING_SERVICE_REVISION:
+    if revision in (21, EXISTING_SERVICE_REVISION):
         if "existing_service_config" not in plan:
-            raise ValueError("revision21 requires existing service config pin")
+            raise ValueError("existing-service revision requires existing service config pin")
     elif "existing_service_config" in plan:
-        raise ValueError("existing service config requires revision21")
+        raise ValueError("existing service config requires an existing-service revision")
     if revision >= 4:
         modes = (RECALL_MODES if revision >= 9 else
                  RECALL_MODES[:3] if revision >= 8 else RECALL_MODES[:2])
@@ -286,7 +287,12 @@ def validate_plan(plan):
     python = Path(plan["python"])
     if not python.is_absolute():
         raise ValueError("planned Python path must be absolute")
-    expected_destinations = (DESTINATIONS if revision >= 20 else
+    from tag_config import FIELDS as tag_config_fields, validate as validate_tag_config
+    if revision < 22 and set(plan) & tag_config_fields:
+        raise ValueError("old install plan cannot contain tag stewardship; prepare a new plan")
+    validate_tag_config(plan)
+    expected_destinations = (DESTINATIONS if revision >= 22 else
+                             V20_DESTINATIONS if revision >= 20 else
                              V19_DESTINATIONS if revision >= 17 else
                              V16_DESTINATIONS if revision >= 16 else
                              V14_DESTINATIONS if revision >= 14 else
@@ -313,7 +319,7 @@ def validate_plan(plan):
         for value in expected.values()
     ):
         raise ValueError("planned config fingerprints are invalid")
-    if revision == EXISTING_SERVICE_REVISION:
+    if revision in (21, EXISTING_SERVICE_REVISION):
         validate_existing_service(plan)
     return root, prefix
 
@@ -396,7 +402,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
             program_root=None, library_helper=None, enroll_existing=False,
             shadow_model=None, shadow_codex=None, reader_model=None, reader_codex=None,
             recording_mode="off", librarian_effort=None, global_preferences=None,
-            existing_service_config=None):
+            existing_service_config=None, tag_stewardship=None, tag_guide_id=None):
     project_root, prefix = Path(project_root).absolute(), Path(prefix).absolute()
     if not project_root.is_dir() or project_root.is_symlink():
         raise ValueError("project root must be an existing real directory")
@@ -410,6 +416,10 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         raise ValueError("recording mode must be off or automatic")
     if recording_mode == "automatic" and recall_mode != "async":
         raise ValueError("automatic recording requires --recall-mode async")
+    from tag_config import prepared_fields
+    tag_fields = prepared_fields(recording_mode, tag_stewardship, tag_guide_id)
+    if recall_mode != "async" and tag_guide_id is not None:
+        raise ValueError("tag guide requires --recall-mode async")
     preference_pin = None
     if global_preferences is not None:
         if recall_mode != "async":
@@ -475,10 +485,13 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
             raise ValueError(f"not a usable installation source: {source}")
         files.append({"source": str(source), "destination": destination,
                       "sha256": digest(source.read_bytes()), "executable": executable})
+    if recall_mode != "async":
+        tag_fields = {}
     before = {name: read_optional(dot_codex / name) for name in CONFIG_NAMES}
     plan = {"schema": SCHEMA, "config_revision": CONFIG_REVISION,
             "recall_mode": recall_mode,
             "recording_mode": recording_mode,
+            **tag_fields,
             "shadow_model": shadow_model, "shadow_codex": shadow_pin,
             "reader_model": reader_model, "reader_codex": reader_pin,
             "librarian_effort": librarian_effort,
@@ -578,6 +591,9 @@ def runtime_configs(plan):
                     reader_model=plan["reader_model"],
                     reader_codex=reader_codex["source"],
                     reader_codex_sha256=reader_codex["sha256"])
+        for field in ("tag_stewardship", "tag_guide_id"):
+            if field in plan:
+                hook[field] = plan[field]
         if "global_preferences" in plan:
             hook.update(schema="mneme.codex-hooks.config.v10",
                         global_preferences=dict(plan["global_preferences"]))
@@ -755,6 +771,9 @@ def main():
                       help="reminder (default); automatic, shadow, and async are explicit experimental opt-ins")
     prep.add_argument("--recording-mode", choices=RECORDING_MODES, default="off",
                       help="off (default); automatic records selected completed-task outcomes and requires async recall")
+    prep.add_argument("--tag-stewardship", action=argparse.BooleanOptionalAction, default=None,
+                      help="fresh automatic recording enables owner-scoped tag stewardship by default")
+    prep.add_argument("--tag-guide-id", help="optional canonical guide node ID in the selected owner")
     prep.add_argument("--shadow-model", choices=SHADOW_MODELS,
                       help="required with --recall-mode shadow; no implicit model")
     prep.add_argument("--shadow-codex", type=Path,
@@ -787,6 +806,7 @@ def main():
                            reader_model=args.reader_model, reader_codex=args.reader_codex,
                            librarian_effort=args.librarian_effort,
                            recording_mode=args.recording_mode,
+                           tag_stewardship=args.tag_stewardship, tag_guide_id=args.tag_guide_id,
                            existing_service_config=args.existing_service_config,
                            global_preferences=(global_preferences_input(args.global_preferences)
                                                if args.global_preferences is not None else None))

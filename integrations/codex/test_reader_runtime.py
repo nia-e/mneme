@@ -85,6 +85,10 @@ for line in sys.stdin:
                 packet = json.loads(params["input"][0]["text"])
                 answer = {"judgments": [{"witness": w["id"], "applicability": "matched",
                     "current_refs": [packet["current"][0]["id"]], "correction_applicable": False} for w in packet["history"]]}
+            if params.get("outputSchema", {}).get("required") == ["decisions"]:
+                packet = json.loads(params["input"][0]["text"])
+                answer = {"decisions": [{"id": t["id"], "disposition": "noop", "tags": t["tags"]}
+                                         for t in packet["targets"]]}
             raw_answer = json.dumps(answer)
             if mode == "duplicate_raw": raw_answer = '{"proposal":null,"proposal":null}'
             if mode == "duplicate_nested":
@@ -400,6 +404,36 @@ class ReaderRuntimeTest(unittest.TestCase):
         prompt, _ = recording_contract.prepare(observation, cards)
         self.assertEqual(turn["input"], [{"type": "text", "text": prompt}])
         self.assertNotIn("native-hidden", prompt)
+
+    def test_steward_is_fresh_tool_free_thread_and_restores_selector(self):
+        from fixture_stewardship import target, context
+        import stewardship_contract
+        with ReaderRuntime(self.config,self.root/"scratch") as runtime:
+            first=runtime.select(self.dialogue,self.cards)
+            result=runtime.steward([target()],context())
+            last=runtime.select(self.dialogue,self.cards)
+        self.assertEqual([first["reason"],result["reason"],last["reason"]],["selected","classified","selected"])
+        self.assertEqual(result["decisions"][0]["disposition"],"noop")
+        starts=[r["params"] for r in self.rows() if r["method"]=="thread/start"]
+        self.assertEqual(len(starts),2)
+        self.assertEqual(starts[1]["serviceName"],"mneme_tag_steward")
+        self.assertEqual(starts[1]["baseInstructions"],stewardship_contract.INSTRUCTIONS)
+        self.assertEqual([r["thread"] for r in self.rows() if r["method"]=="turn/start"],
+                         ["thread-1","thread-2","thread-1"])
+        self.assertEqual(starts[1]["approvalPolicy"],"never")
+        self.assertEqual(starts[1].get("dynamicTools",[]),[])
+
+    def test_steward_unknown_usage_halts_without_retry(self):
+        from fixture_stewardship import target, context
+        with patch.dict(os.environ,{"FAKE_MODE":"no_usage"}):
+            with ReaderRuntime(self.config,self.root/"scratch") as runtime:
+                first=runtime.steward([target()],context())
+                second=runtime.steward([target()],context())
+        self.assertEqual(first["reason"],"usage_unknown")
+        self.assertTrue(first["provider_attempt"])
+        self.assertIsNone(first["usage"])
+        self.assertFalse(second["provider_attempt"])
+        self.assertEqual(len([r for r in self.rows() if r["method"]=="turn/start"]),1)
 
     def test_matcher_thread_cannot_be_reused_as_selector_history(self):
         from test_routing_contract import CURRENT, witness, DB

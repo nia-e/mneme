@@ -52,6 +52,64 @@ pub(super) fn delete_node_script() -> String {
         .collect()
 }
 
+fn replace_tags_checked(
+    store: &CozoStore,
+    id: NodeId,
+    expected: &mneme_core::BoundedTagSet,
+    tags: &mneme_core::BoundedTagSet,
+    guards: Option<&mneme_core::ports::RetagContentGuards>,
+) -> Result<Node> {
+    let tx = store.db.multi_transaction(true);
+    let mut result = None;
+    let staged = (|| {
+        tx_reject_episode_nodes(&tx, &[id], "atomic tag replacement")?;
+        let rows = tx_run(
+            &tx,
+            "?[id,data,status] := *node{id,data,status}, id==$id",
+            BTreeMap::from([("id".into(), dv_str(&id.0.to_string()))]),
+        )?;
+        let row = rows.rows.first().ok_or(Error::NotFound)?;
+        let mut replacement = decode_canonical_node_row(row)?;
+        if let Some(guards) = guards {
+            guards.check_target(&replacement)?;
+            for guard in &guards.guard_nodes {
+                let rows = tx_run(
+                    &tx,
+                    "?[id,data,status] := id=$id, *node{id:$id,data,status}",
+                    BTreeMap::from([("id".into(), dv_str(&guard.id.0.to_string()))]),
+                )?;
+                let node = rows
+                    .rows
+                    .first()
+                    .map(|row| decode_canonical_node_row(row))
+                    .transpose()?;
+                guard.check(node.as_ref())?;
+            }
+        }
+        if replacement.tag_set() != expected {
+            return Err(Error::Conflict(
+                "node tags changed; inspect current tags before retrying".into(),
+            ));
+        }
+        replacement.replace_tags(tags.clone());
+        touchstones::tx_validate_owner_replacement(&tx, &replacement)?;
+        tx_run(
+            &tx,
+            "?[id,data,status] <- [[$id,$data,$status]] :put node {id => data,status}",
+            BTreeMap::from([
+                ("id".into(), dv_str(&id.0.to_string())),
+                ("data".into(), dv_str(&encode_canonical_node(&replacement)?)),
+                ("status".into(), dv_str(status_str(replacement.status()))),
+            ]),
+        )?;
+        maintenance::tx_sync_tag_projection(&tx, &[&replacement])?;
+        result = Some(replacement);
+        Ok(())
+    })();
+    overlay::finish_transaction(&tx, staged)?;
+    Ok(result.expect("successful transaction produced replacement"))
+}
+
 #[async_trait]
 impl GraphStore for CozoStore {
     fn touchstones(&self) -> Option<&dyn TouchstoneStore> {
@@ -440,45 +498,31 @@ impl GraphStore for CozoStore {
             .collect()
     }
 
+    async fn tag_vocabulary_page(
+        &self,
+        request: &mneme_core::ports::TagVocabularyRequest,
+    ) -> Result<mneme_core::ports::TagVocabularyPage> {
+        super::tag_vocabulary::read(&self.db, request)
+    }
+
     async fn compare_replace_node_tags(
         &self,
         id: NodeId,
         expected: &mneme_core::BoundedTagSet,
         tags: &mneme_core::BoundedTagSet,
     ) -> Result<Node> {
-        let tx = self.db.multi_transaction(true);
-        let mut result = None;
-        let staged = (|| {
-            tx_reject_episode_nodes(&tx, &[id], "atomic tag replacement")?;
-            let rows = tx_run(
-                &tx,
-                "?[id,data,status] := *node{id,data,status}, id==$id",
-                BTreeMap::from([("id".into(), dv_str(&id.0.to_string()))]),
-            )?;
-            let row = rows.rows.first().ok_or(Error::NotFound)?;
-            let mut replacement = decode_canonical_node_row(row)?;
-            if replacement.tag_set() != expected {
-                return Err(Error::Conflict(
-                    "node tags changed; inspect current tags before retrying".into(),
-                ));
-            }
-            replacement.replace_tags(tags.clone());
-            touchstones::tx_validate_owner_replacement(&tx, &replacement)?;
-            tx_run(
-                &tx,
-                "?[id,data,status] <- [[$id,$data,$status]] :put node {id => data,status}",
-                BTreeMap::from([
-                    ("id".into(), dv_str(&id.0.to_string())),
-                    ("data".into(), dv_str(&encode_canonical_node(&replacement)?)),
-                    ("status".into(), dv_str(status_str(replacement.status()))),
-                ]),
-            )?;
-            maintenance::tx_sync_tag_projection(&tx, &[&replacement])?;
-            result = Some(replacement);
-            Ok(())
-        })();
-        overlay::finish_transaction(&tx, staged)?;
-        Ok(result.expect("successful transaction produced replacement"))
+        replace_tags_checked(self, id, expected, tags, None)
+    }
+
+    async fn compare_replace_node_tags_guarded(
+        &self,
+        id: NodeId,
+        expected: &mneme_core::BoundedTagSet,
+        tags: &mneme_core::BoundedTagSet,
+        guards: &mneme_core::ports::RetagContentGuards,
+    ) -> Result<Node> {
+        guards.validate()?;
+        replace_tags_checked(self, id, expected, tags, Some(guards))
     }
 
     async fn set_status(&self, id: NodeId, status: NodeStatus) -> Result<()> {

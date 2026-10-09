@@ -101,21 +101,24 @@ class ProjectFocusTests(unittest.TestCase):
         self.focus.chmod(0o600)
         self.assertEqual(len(self.load()["_project_focus"].encode()), contract.MAX_PROJECT_FOCUS_BYTES)
 
-    def test_hook_policy_refusal_has_safe_actionable_diagnostic(self):
+    def test_hook_policy_refusal_is_tiny_at_session_start_and_otherwise_quiet(self):
         self.write_focus("private policy must not be printed\0")
-        event = {"hook_event_name": "UserPromptSubmit", "session_id": "actor-session", "turn_id": "t1",
-                 "cwd": str(self.project), "prompt": "Inspect project storage invariants"}
-        for background in (False, True):
-            with self.subTest(background=background):
+        for name, background in product(("SessionStart", "UserPromptSubmit"), (False, True)):
+            with self.subTest(name=name, background=background):
+                event = {"hook_event_name": name, "session_id": "actor-session", "turn_id": "t1",
+                         "cwd": str(self.project), "prompt": "Inspect project storage invariants"}
+                if name == "SessionStart":
+                    event["source"] = "resume"
                 output, error = io.StringIO(), io.StringIO()
                 args = ["--config", str(self.config_path)] + (["--reader-background"] if background else [])
                 with patch("sys.stdout", output), patch("sys.stderr", error), \
                         patch("sys.stdin", io.TextIOWrapper(io.BytesIO(json.dumps(event).encode()))):
                     self.assertEqual(hooks.main(args), 0)
-                self.assertIn(".mneme/hippocampus.md", error.getvalue())
-                self.assertIn("Fix or remove the file, then reload", error.getvalue())
+                visible = name == "SessionStart" and not background
+                self.assertEqual(error.getvalue(),
+                    "Memory policy invalid: check .mneme/hippocampus.md.\n" if visible else "")
                 self.assertNotIn("private policy", error.getvalue() + output.getvalue())
-                self.assertEqual(json.loads(output.getvalue()), {} if background else hooks._warning())
+                self.assertEqual(json.loads(output.getvalue()), hooks._warning() if visible else {})
 
     def test_ordinary_checked_in_markdown_permissions_are_supported(self):
         self.write_focus()

@@ -93,6 +93,79 @@ def validate_proposal(answer, context):
     return result["proposal"]
 
 
+class TopicTagContractTests(unittest.TestCase):
+    def prepared(self, *, tags_context=None, **kwargs):
+        from test_tag_context import context, DB
+        return contract.prepare(observation(), expected_db_id=DB,
+                                tag_context=context(["people", "rust"]) if tags_context is None else tags_context,
+                                **kwargs)
+
+    def test_one_existing_proposal_schema_requires_ordinary_tags_and_freezes_policy(self):
+        prompt, context = self.prepared()
+        packet = json.loads(prompt.split("PAYLOAD:\n", 1)[1])
+        self.assertIn("tag_context", packet)
+        self.assertIn("future", contract.instructions_for(context))
+        for branch in contract.schema_for(context)["properties"]["proposal"]["anyOf"][1:]:
+            self.assertIn("tags", branch["required"])
+        answer = proposal(context, kind="lesson")
+        with self.assertRaisesRegex(ValueError, "invalid_proposal_shape"):
+            validate_proposal(answer, context)
+        answer["proposal"]["tags"] = ["rust", "new-supported-distinction"]
+        selected = validate_proposal(answer, context)
+        self.assertEqual(selected.tags, ("new-supported-distinction", "rust"))
+        self.assertEqual(selected.tag_context_json, context.tag_context_json)
+        self.assertEqual(json.loads(selected.tag_context_json)["vocabulary_partial"], False)
+
+    def test_special_duplicate_controls_and_byte_bounds_are_rejected(self):
+        from tag_context import PROTECTED_TAGS
+        _, context = self.prepared()
+        for tags in ([[tag] for tag in PROTECTED_TAGS]):
+            answer = proposal(context)
+            answer["proposal"]["tags"] = tags
+            with self.subTest(tags=tags), self.assertRaisesRegex(ValueError, "invalid_topic_tags"):
+                validate_proposal(answer, context)
+        for tags in (["rust", "rust"], [" é"], ["x\x85y"], ["é" * 129], "rust"):
+            answer = proposal(context)
+            answer["proposal"]["tags"] = tags
+            with self.subTest(tags=tags), self.assertRaisesRegex(ValueError, "invalid_topic_tags"):
+                validate_proposal(answer, context)
+
+    def test_unavailable_malformed_or_wrong_owner_context_disables_tags_not_recording(self):
+        from test_tag_context import context, DB, OTHER
+        from tag_context import disabled
+        for candidate in (disabled(DB, "guide_unavailable"), object(),
+                          __import__("dataclasses").replace(context(), db_id=OTHER)):
+            prompt, prepared = self.prepared(tags_context=candidate)
+            self.assertIsNotNone(prompt)
+            self.assertIsNone(prepared.tag_context_json)
+            self.assertNotIn("tag_context", json.loads(prompt.split("PAYLOAD:\n", 1)[1]))
+            self.assertIsNotNone(validate_proposal(proposal(prepared), prepared))
+
+    def test_optional_tag_context_does_not_evict_evidence_to_fit(self):
+        plain_prompt, plain = contract.prepare(observation())
+        # Existing selected source fits; extra optional classification context
+        # does not. Retain the exact source and historical proposal branch.
+        with patch.object(contract, "MAX_AUTHORED_BYTES", plain.authored_bytes):
+            prompt, tagged = self.prepared()
+        self.assertEqual(prompt, plain_prompt)
+        self.assertEqual(tagged.bindings, plain.bindings)
+        self.assertIsNone(tagged.tag_context_json)
+
+    def test_global_preference_cannot_export_topic_tags_or_guide(self):
+        _, context = self.prepared(global_preferences_enabled=True)
+        answer = proposal(context, kind="lesson")
+        answer["proposal"].update(destination="global_preference", tags=["rust"])
+        with self.assertRaisesRegex(ValueError, "global_preference_operation"):
+            validate_proposal(answer, context)
+
+    def test_possibility_reserves_room_for_its_host_category(self):
+        _, context = self.prepared()
+        answer = proposal(context, kind="possibility")
+        answer["proposal"]["tags"] = [f"topic-{i}" for i in range(32)]
+        with self.assertRaisesRegex(ValueError, "invalid_topic_tags"):
+            validate_proposal(answer, context)
+
+
 class PossibilityContractTests(unittest.TestCase):
     def test_proposal_is_bounded_sourced_and_has_no_extra_authority(self):
         from dataclasses import replace

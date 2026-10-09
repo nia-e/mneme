@@ -248,21 +248,27 @@ class WorkshopTargetTests(unittest.TestCase):
         self.assertEqual((data["attempts"], data["input_tokens"], data["output_tokens"]), (3, 11, 2))
         self.assertEqual(data["reservation"], {"paid": "identity"})
 
-    def test_legacy_session_cannot_gain_new_reader_or_recording_ledger(self):
+    def test_unsupported_session_cannot_gain_new_reader_or_recording_ledger(self):
+        # Known project/workshop v1 promotion and untouched paid ledgers are
+        # covered by test_hooks.LegacyHookStateUpgradeTests; unsupported state
+        # must still fail before this route can create fresh accounting.
         state = self.config["state_dir"]
         state.mkdir()
         path = hooks._state_path(state, "legacy")
-        path.write_text('{"schema":"mneme.codex-hooks.state.v1","turns":{}}')
-        before = path.read_bytes()
         event = {"session_id": "legacy", "hook_event_name": "SessionStart", "source": "resume",
                  "cwd": str(self.root)}
-        with patch("hooks._reader_worker") as reader, patch("hooks._recording_jobs") as recorder:
-            self.assertIn("systemMessage", hooks.handle_event(event, self.config))
-            self.assertEqual(hooks.handle_event(event, self.config, reader_background=True), {})
-            reader.assert_not_called(); recorder.assert_not_called()
-        self.assertEqual(path.read_bytes(), before)
-        self.assertFalse((state / "reader").exists())
-        self.assertFalse((state / "recording").exists())
+        for raw in ('{"schema":"mneme.codex-hooks.state.future","turns":{}}',
+                    '{"schema":"mneme.codex-hooks.state.v1","turns":{"broken":{"at":1}}}'):
+            with self.subTest(raw=raw):
+                path.write_text(raw)
+                before = path.read_bytes()
+                with patch("hooks._reader_worker") as reader, patch("hooks._recording_jobs") as recorder:
+                    self.assertIn("systemMessage", hooks.handle_event(event, self.config))
+                    self.assertEqual(hooks.handle_event(event, self.config, reader_background=True), {})
+                    reader.assert_not_called(); recorder.assert_not_called()
+                self.assertEqual(path.read_bytes(), before)
+                self.assertFalse((state / "reader").exists())
+                self.assertFalse((state / "recording").exists())
 
 
 if __name__ == "__main__":

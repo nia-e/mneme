@@ -306,6 +306,82 @@ fn retag_advertised(tool: &Value) -> bool {
         })
 }
 
+/// Strong retag guards are an opt-in extension, never inferred from a tool name
+/// or from a peer merely accepting unknown properties.
+fn retag_content_guards_advertised(tool: &Value) -> bool {
+    let schema = &tool["inputSchema"];
+    let props = &schema["properties"];
+    let fingerprint = |value: &Value| {
+        value["type"] == "string"
+            && value["minLength"] == 64
+            && value["maxLength"] == 64
+            && value["pattern"] == "^[0-9a-f]{64}$"
+    };
+    let guards = &props["guard_nodes"];
+    let item = &guards["items"];
+    retag_advertised(tool)
+        && fingerprint(&props["expected_content_fingerprint"])
+        && guards["type"] == "array"
+        && guards["maxItems"] == 1024
+        && item["type"] == "object"
+        && item["additionalProperties"] == false
+        && ["id", "content_fingerprint"]
+            .iter()
+            .all(|field| schema_requires(item, field))
+        && item["properties"]["id"]["type"] == "string"
+        && item["properties"]["id"]["minLength"] == 26
+        && item["properties"]["id"]["maxLength"] == 26
+        && fingerprint(&item["properties"]["content_fingerprint"])
+        && schema["dependentRequired"]["guard_nodes"]
+            .as_array()
+            .is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|field| field == "expected_content_fingerprint")
+            })
+}
+
+fn list_tags_advertised(tool: &Value) -> bool {
+    let schema = &tool["inputSchema"];
+    let matches = |branch: &Value| {
+        let props = &branch["properties"];
+        branch["type"] == "object"
+            && branch["additionalProperties"] == false
+            && schema_requires(branch, "kind")
+            && props["kind"]["const"] == "tags"
+            && props["db"]["type"] == "string"
+            && expected_db_id_schema_supported(branch)
+            && props["prefix"]["type"] == "string"
+            && props["prefix"]["maxLength"] == 256
+            && props["prefix"]
+                .get("minLength")
+                .is_none_or(|minimum| minimum == 0)
+            && props["status"]["type"] == "string"
+            && props["status"]["enum"].as_array().is_some_and(|statuses| {
+                statuses.len() == 3
+                    && ["active", "archived", "all"]
+                        .iter()
+                        .all(|status| statuses.iter().any(|value| value == status))
+            })
+            && props["status"]["default"] == "all"
+            && props["after"]["type"] == "string"
+            && props["after"]["minLength"] == 1
+            && props["after"]["maxLength"] == 4096
+            && props["limit"]["type"] == "integer"
+            && props["limit"]["minimum"] == 1
+            && props["limit"]["maximum"] == 64
+    };
+    matches(schema)
+        || (schema["type"] == "object"
+            && schema["additionalProperties"] == false
+            && schema["properties"]["kind"]["enum"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "tags"))
+            && schema["oneOf"]
+                .as_array()
+                .is_some_and(|branches| branches.iter().any(matches)))
+}
+
 /// Recognize the guarded body-only replacement contract, not a generic edit.
 fn edit_body_advertised(tool: &Value) -> bool {
     let schema = &tool["inputSchema"];
@@ -484,6 +560,18 @@ impl RemoteClient {
         self.catalog
             .iter()
             .any(|tool| tool["name"] == "retag" && retag_advertised(tool))
+    }
+
+    pub fn supports_retag_content_guards(&self) -> bool {
+        self.catalog
+            .iter()
+            .any(|tool| tool["name"] == "retag" && retag_content_guards_advertised(tool))
+    }
+
+    pub fn supports_list_tags(&self) -> bool {
+        self.catalog
+            .iter()
+            .any(|tool| tool["name"] == "list" && list_tags_advertised(tool))
     }
 
     /// Full guarded body-edit advertisement is required; unsupported peers never receive writes.
@@ -815,6 +903,13 @@ impl RemoteClient {
             if !self.supports_retag() {
                 return Err("remote MCP retag checked contract is not advertised; write was not sent, no legacy fallback".into());
             }
+            if ["expected_content_fingerprint", "guard_nodes"]
+                .iter()
+                .any(|field| args.get(field).is_some())
+                && !self.supports_retag_content_guards()
+            {
+                return Err("remote MCP retag content guards are not advertised; write was not sent, no unguarded fallback".into());
+            }
             if args
                 .get("db")
                 .and_then(Value::as_str)
@@ -829,6 +924,11 @@ impl RemoteClient {
                         .into(),
                 );
             }
+        }
+        if name == "list" && args["kind"] == "tags" && !self.supports_list_tags() {
+            return Err(
+                "remote MCP tag vocabulary is not advertised; no operation was sent".into(),
+            );
         }
         if name == "save" {
             let kind = match args.get("kind") {
@@ -1650,6 +1750,178 @@ mod tests {
                 "db":{"type":"string"},"id":{"type":"string","minLength":26,"maxLength":26},
                 "expected_db_id":{"type":"string","minLength":26,"maxLength":26,"pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"},
                 "expected_tags":tags,"tags":tags}}}])
+    }
+
+    fn strong_retag_catalog() -> Value {
+        let mut catalog = retag_catalog();
+        let schema = &mut catalog[0]["inputSchema"];
+        let fingerprint =
+            json!({"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"});
+        schema["properties"]["expected_content_fingerprint"] = fingerprint.clone();
+        schema["properties"]["guard_nodes"] = json!({"type":"array","maxItems":1024,"items":{"type":"object","additionalProperties":false,"required":["id","content_fingerprint"],"properties":{"id":{"type":"string","minLength":26,"maxLength":26},"content_fingerprint":fingerprint}}});
+        schema["dependentRequired"] = json!({"guard_nodes":["expected_content_fingerprint"]});
+        catalog
+    }
+
+    fn tag_vocabulary_catalog() -> Value {
+        let branch = json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{
+            "kind":{"type":"string","const":"tags"},"db":{"type":"string"},
+            "expected_db_id":{"type":"string","minLength":26,"maxLength":26,"pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"},
+            "prefix":{"type":"string","maxLength":256,"default":""},
+            "status":{"type":"string","enum":["active","archived","all"],"default":"all"},
+            "after":{"type":"string","minLength":1,"maxLength":4096},
+            "limit":{"type":"integer","minimum":1,"maximum":64,"default":50}
+        }});
+        let mut schema = branch.clone();
+        schema["properties"]["kind"] =
+            json!({"type":"string","enum":["nodes","touchstones","tags"]});
+        schema.as_object_mut().unwrap().remove("required");
+        schema["oneOf"] = json!([branch]);
+        json!([{"name":"list","inputSchema":schema}])
+    }
+
+    #[test]
+    fn strong_tag_extension_discovery_checks_shapes_not_field_presence() {
+        assert!(catalog_client(&strong_retag_catalog()).supports_retag_content_guards());
+        let legacy = catalog_client(&retag_catalog());
+        assert!(legacy.supports_retag());
+        assert!(!legacy.supports_retag_content_guards());
+        for (pointer, value) in [
+            (
+                "/0/inputSchema/properties/expected_content_fingerprint/pattern",
+                json!(".*"),
+            ),
+            ("/0/inputSchema/properties/guard_nodes/maxItems", json!(0)),
+            (
+                "/0/inputSchema/properties/guard_nodes/items/additionalProperties",
+                json!(true),
+            ),
+            (
+                "/0/inputSchema/properties/guard_nodes/items/required",
+                json!(["id"]),
+            ),
+            (
+                "/0/inputSchema/properties/guard_nodes/items/properties/content_fingerprint/type",
+                json!("number"),
+            ),
+            ("/0/inputSchema/dependentRequired/guard_nodes", json!([])),
+        ] {
+            let mut malformed = strong_retag_catalog();
+            *malformed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                !catalog_client(&malformed).supports_retag_content_guards(),
+                "{pointer}"
+            );
+        }
+        assert!(catalog_client(&tag_vocabulary_catalog()).supports_list_tags());
+        for (pointer, value) in [
+            (
+                "/0/inputSchema/properties/kind/enum",
+                json!(["nodes", "touchstones"]),
+            ),
+            (
+                "/0/inputSchema/oneOf/0/properties/prefix/type",
+                json!("number"),
+            ),
+            (
+                "/0/inputSchema/oneOf/0/properties/status/enum",
+                json!(["active", "archived"]),
+            ),
+            (
+                "/0/inputSchema/oneOf/0/properties/after/maxLength",
+                json!(0),
+            ),
+            ("/0/inputSchema/oneOf/0/properties/limit/maximum", json!(0)),
+            (
+                "/0/inputSchema/oneOf/0/properties/expected_db_id/pattern",
+                json!(".*"),
+            ),
+        ] {
+            let mut malformed = tag_vocabulary_catalog();
+            *malformed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                !catalog_client(&malformed).supports_list_tags(),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn strong_tag_extensions_refuse_legacy_before_any_submission() {
+        let mut catalog = retag_catalog();
+        catalog
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"list","inputSchema":{"type":"object","properties":{}}}));
+        let (options, server) = fixture_server_with_catalog("mneme-mcp", catalog, Some(vec![]));
+        let mut client = RemoteClient::connect_local(
+            &options,
+            ClientTimeouts {
+                connect: Duration::from_secs(2),
+                request: Duration::from_secs(2),
+            },
+            "mneme-mcp",
+        )
+        .await
+        .unwrap();
+        let base = json!({"db":"project","expected_db_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","expected_tags":[],"tags":[]});
+        let mut target = base.clone();
+        target["expected_content_fingerprint"] = json!("a".repeat(64));
+        let mut guides = base;
+        guides["guard_nodes"] = json!([]);
+        let before = client.next_id;
+        for (tool, args) in [
+            ("retag", target),
+            ("retag", guides),
+            ("list", json!({"db":"project","kind":"tags"})),
+        ] {
+            assert!(client.call_tool(tool, args.clone()).await.is_err());
+            assert!(
+                client
+                    .raw_rpc("tools/call", json!({"name":tool,"arguments":args}))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(client.next_id, before);
+            assert!(client.session.is_some());
+        }
+        client.close().await;
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn strong_tag_extensions_forward_exact_payload_once() {
+        let mut catalog = strong_retag_catalog();
+        catalog
+            .as_array_mut()
+            .unwrap()
+            .extend(tag_vocabulary_catalog().as_array().unwrap().clone());
+        let retag = json!({"db":"project","expected_db_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","expected_tags":[],"tags":["people"],"expected_content_fingerprint":"a".repeat(64),"guard_nodes":[{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","content_fingerprint":"b".repeat(64)}]});
+        let list = json!({"db":"project","kind":"tags","prefix":"People","status":"all","limit":1});
+        let (options, server) = fixture_server_with_catalog(
+            "mneme-mcp",
+            catalog,
+            Some(vec![("retag", retag.clone()), ("list", list.clone())]),
+        );
+        let mut client = RemoteClient::connect_local(
+            &options,
+            ClientTimeouts {
+                connect: Duration::from_secs(2),
+                request: Duration::from_secs(2),
+            },
+            "mneme-mcp",
+        )
+        .await
+        .unwrap();
+        assert!(client.supports_retag_content_guards());
+        assert!(client.supports_list_tags());
+        client
+            .raw_rpc("tools/call", json!({"name":"retag","arguments":retag}))
+            .await
+            .unwrap();
+        client.call_tool("list", list).await.unwrap();
+        client.close().await;
+        server.join().unwrap();
     }
 
     #[tokio::test]

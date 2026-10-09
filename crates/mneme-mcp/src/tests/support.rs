@@ -125,6 +125,14 @@ pub(crate) fn schema_accepts(schema: &Value, instance: &Value) -> bool {
         {
             return false;
         }
+        if schema.get("pattern").and_then(Value::as_str) == Some("^[0-9a-f]{64}$")
+            && !(text.len() == 64
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        {
+            return false;
+        }
     }
     if let Some(maximum) = schema.get("maxItems").and_then(Value::as_u64)
         && instance
@@ -149,6 +157,21 @@ pub(crate) fn schema_accepts(schema: &Value, instance: &Value) -> bool {
     let Some(object) = instance.as_object() else {
         return true;
     };
+    if let Some(dependencies) = schema.get("dependentRequired").and_then(Value::as_object) {
+        for (key, required) in dependencies {
+            if object.contains_key(key)
+                && required.as_array().is_none_or(|fields| {
+                    fields.iter().any(|field| {
+                        field
+                            .as_str()
+                            .is_none_or(|field| !object.contains_key(field))
+                    })
+                })
+            {
+                return false;
+            }
+        }
+    }
     if let Some(required) = schema.get("required").and_then(Value::as_array)
         && required
             .iter()

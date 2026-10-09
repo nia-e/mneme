@@ -85,6 +85,7 @@ class Smoke:
                     if not key.startswith(("MNEME_", "XDG_", "HF_", "HUGGINGFACE_"))}
         self.env.update({"HOME": str(root / "home"), "XDG_DATA_HOME": str(root / "data"),
                          "XDG_CONFIG_HOME": str(root / "config"), "XDG_CACHE_HOME": str(root / "cache"),
+                         "XDG_STATE_HOME": str(root / "state"),
                          "HF_HOME": str(root / "cache/hf"), "HF_HUB_OFFLINE": "1",
                          "TRANSFORMERS_OFFLINE": "1", "HF_ENDPOINT": "http://127.0.0.1:9", "MNEME_RERANK": "0",
                          "MNEME_CLIENT_BINARY": str(options.cli), "GIT_CEILING_DIRECTORIES": str(root),
@@ -438,6 +439,134 @@ class Smoke:
             self.cli(scope, *args, ok=False, label=f"{scope}.offline-{command}-refusal")
         return note_id
 
+    def run_tag_stewardship(self):
+        """Focused native/host workflow; the classifier is scripted, never a provider."""
+        import stewardship
+        import tag_context
+        from librarian_policy import LibrarianBudget
+        self.prepare_cache()
+        version, _ = self.command("artifact.cli-version", ["--version"], mode="text")
+        self.receipt["cli_version"] = version.strip()
+        self.bootstrap()
+        child, client = self.start_host(["project"], "tag-stewardship", feedback=False)
+        rows = self.tool(client, "databases", {})
+        self.ids["project"] = rows[0]["db_id"]
+        self.enroll("project", client.url)
+        db_id = self.ids["project"]
+        guide = self.tool(client, "save", {"db": "project", "summary":
+            "Use people when a person is a substantial subject; incidental mentions do not qualify. "
+            "Keep exact handles and independent topic tags. Tags do not establish current membership.",
+            "body": "Background only: deliberately not classification policy.", "tags": ["tag-guide"]})["id"]
+        person = self.tool(client, "save", {"db": "project", "summary":
+            "Mara is a Rust compiler contributor whose work concerns type-system invariants.",
+            "tags": ["rust", "mara-fixture"]})["id"]
+        incidental = self.tool(client, "save", {"db": "project", "summary":
+            "The API review mentioned Mara while comparing two iterator signatures.",
+            "tags": ["api-design"]})["id"]
+        args = {"db": "project", "expected_db_id": db_id}
+        before = self.tool(client, "get", {**args, "id": person, "body": True})
+        old_guide = self.tool(client, "get", {**args, "id": guide})
+        self.tool(client, "edit_summary", {**args, "id": guide,
+            "expected_snapshot_sha256": old_guide["summary_snapshot"]["expected_snapshot_sha256"],
+            "summary": old_guide["summary"] + " Preserve rare but supported cross-domain connections."})
+        self.tool(client, "retag", {**args, "id": person, "expected_tags": before["tags"],
+            "tags": sorted([*before["tags"], "people"]),
+            "expected_content_fingerprint": before["content_fingerprint"],
+            "guard_nodes": [{"id": guide, "content_fingerprint": old_guide["content_fingerprint"]}]},
+            ok=False, label="stewardship.stale-guide-refusal")
+        need(self.tool(client, "get", {**args, "id": person, "body": True}) == before,
+             "stale guide refusal changed canonical note")
+        service = self.root / "stewardship-service.json"
+        write_json(service, {"mode": "connect", "url": client.url, "database_name": "project",
+                             "database_path": str(self.db["project"])})
+        config = {"tag_stewardship": True, "tag_guide_id": guide, "recording_mode": "automatic",
+                  "memory_mode": "async", "reader_model": "gpt-6.1-sol", "librarian_effort": "low",
+                  "service_config": service, "project_root": self.project}
+        # Explicitly test real wire admission without the fake-owner unit seam.
+        for effort in ("low", "medium"):
+            config["librarian_effort"] = effort
+            budget = LibrarianBudget(effort=effort)
+            with stewardship.NativeOwner(config, budget) as owner:
+                owner.authorize()
+                target, _ = owner.target(person)
+                need(target is not None and target["id"] == person, "native target rejected a semantic note")
+                context = tag_context.collect(config, expected_db_id=db_id, timeout=self.remaining(),
+                    max_bytes=budget.recording_hint_bytes, cue=target["summary"], seed_tags=target["tags"])
+                need(context.enabled and context.guide["id"] == guide,
+                     f"{effort} real guide/vocabulary context was unavailable")
+                need(context.decoded_bytes <= budget.recording_hint_bytes, "tag lookup exceeded aggregate envelope")
+        config["librarian_effort"] = "medium"
+        class Classifier:
+            calls = 0
+            def steward(self, targets, context, **_):
+                self.calls += 1
+                return {"provider_attempt": True, "usage": {"input_tokens": 100, "output_tokens": 20},
+                        "decisions": [{"id": node["id"],
+                            "disposition": "retag" if node["id"] == person and "people" not in node["tags"] else "noop",
+                            "tags": sorted([*node["tags"], "people"]) if node["id"] == person and "people" not in node["tags"] else node["tags"]}
+                            for node in targets]}
+        model = Classifier()
+        reservations = set()
+        accounted = []
+        def reserve(key):
+            need(key not in reservations, "duplicate session reservation")
+            reservations.add(key)
+            return True
+        def account(key, result):
+            need(key in reservations, "usage settled without reservation")
+            reservations.remove(key)
+            accounted.append(result["usage"])
+            return True
+        need(stewardship.enqueue(config, db_id, [person, incidental]), "changed-node enqueue failed")
+        need(stewardship.step(config, "native-smoke", model, reserve, account),
+             "real NativeOwner stewardship step made no progress")
+        after = self.tool(client, "get", {**args, "id": person, "body": True})
+        need(set(after["tags"]) == {*before["tags"], "people"}, "native guarded retag did not apply")
+        for key in ("id", "summary", "body", "body_revision", "provenance", "created", "exposure_count", "grounded_use_count"):
+            need(after[key] == before[key], f"retag changed unrelated {key}")
+        got_incidental = self.tool(client, "get", {**args, "id": incidental})
+        need(got_incidental["tags"] == ["api-design"], "scripted incidental fixture changed unexpectedly")
+        vocab = self.cli("project", "list", "--tags", "--prefix", "pe", label="stewardship.vocabulary-cli")
+        need([row["name"] for row in vocab["items"]] == ["people"], "tag prefix list differs after retag")
+        native_vocab = self.tool(client, "list", {**args, "kind": "tags", "prefix": "pe"})
+        need(native_vocab["items"] == vocab["items"], "CLI/MCP vocabulary differs")
+        status = stewardship.inspect(db_id)
+        need(status["outcome"] == "available" and any(a["status"] == "applied" for a in status["actions"]),
+             "journal did not retain verified edit acknowledgement")
+        # A new process/session may revisit changed tags once; then same content
+        # is stable, rather than repeatedly spending a model call on a no-op.
+        for _ in range(2):
+            with stewardship.Journal(db_id) as journal:
+                journal.put("next_batch", 0)
+                journal.enqueue([person, incidental])
+            stewardship.step(config, "reopened-native-smoke", model, reserve, account)
+        need(model.calls == 2 and not reservations and len(accounted) == 2,
+             "unchanged examined content churned or accounting was lost")
+        self.receipt["checks"].extend(["real_native_owner_target_and_low_medium_context",
+            "stale_guide_atomic_refusal", "native_guarded_retag_preserves_content_and_learning",
+            "cli_mcp_tag_vocabulary_parity", "owner_journal_reopen_and_noop_stability"])
+        self.receipt["stewardship"] = {"provider_calls": 0, "scripted_classifications": model.calls,
+            "session_accounting": "injected reservation callbacks; separate worker component tests cover parent ledger",
+            "native_owner": "real copied CLI bridge and HTTP server", "journal": "disposable device-local SQLite"}
+        self.stop_host(child, client)
+        self.command("stewardship.offline-reopen", ["--json", "--db", str(self.db["project"]), "get", person])
+        if self.options.stdio:
+            for scope, cue in (("project", "Mneme tagged retrieval and F7 migration"),
+                               ("user", "user preferences and working style")):
+                self.command(f"offline.{scope}.stdio-cue-save", ["--json", "--db", str(self.db[scope]), "save", cue])
+            helper = Path(__file__).with_name("mcp_stdio_smoke.py").resolve()
+            self.receipt["artifacts"]["stdio_harness"] = artifact(helper)
+            result = self.command("artifact.stdio-smoke", [str(helper), "--binary", str(self.options.mcp),
+                "--user-db", str(self.db["user"]), "--project-db", str(self.db["project"]),
+                "--capability-profile", "operator", "--timeout", str(self.remaining())], executable=Path(sys.executable))
+            need("list" in result["advertised_tools"] and result["exit_code"] == 0,
+                 "stdio smoke lacks vocabulary operation or clean exit")
+            self.receipt["stdio"] = result
+            self.receipt["omissions"] = [item for item in self.receipt["omissions"] if item["surface"] != "MCP stdio"]
+            self.receipt["checks"].append("native_stdio_catalog_read_refusal_shutdown")
+            for scope, db in self.db.items():
+                self.command(f"offline.{scope}.reopen-after-stdio", ["--json", "--db", str(db), "get", self.sentinels[scope]])
+
     def run(self):
         self.prepare_cache()
         version, _ = self.command("artifact.cli-version", ["--version"], mode="text")
@@ -636,12 +765,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", required=True, type=Path)
     parser.add_argument("--mcp", required=True, type=Path)
+    parser.add_argument("--tag-stewardship", action="store_true", help="run the focused real native-owner/guarded-retag workflow with a scripted classifier; no provider calls")
+    parser.add_argument("--integration-root", type=Path, help="explicit copied integration lib directory; defaults to source for ordinary smoke")
     parser.add_argument("--stdio", action="store_true", help="also run the finite existing native stdio smoke after HTTP shutdown on these same disposable two stores")
     parser.add_argument("--embedding-cache", type=Path, help="optional populated BGE-base cache; only required assets are copied into the disposable fixture, no downloads")
     parser.add_argument("--build-description", default="not supplied; binary hashes are authoritative", help="caller-supplied build/features provenance, not inferred")
     parser.add_argument("--timeout", type=float, default=300, help="total operation deadline in seconds (max 900)")
     parser.add_argument("--output", type=Path, help="optional concise JSON receipt; stdout also receives receipt")
     options = parser.parse_args()
+    if options.integration_root:
+        import importlib
+        root = options.integration_root.resolve(strict=True)
+        need(root.is_dir() and (root / "mcp_client.py").is_file(), "invalid copied integration root")
+        sys.path.insert(0, str(root))
+        sys.modules.pop("mcp_client", None)
+        module = importlib.import_module("mcp_client")
+        need(Path(module.__file__).resolve().parent == root, "copied integration import selected wrong root")
+        globals().update({name: getattr(module, name) for name in ("McpClient", "McpError", "McpTransportError")})
     need(30 <= options.timeout <= 900, "--timeout must be 30..900 seconds")
     options.cli, options.mcp = options.cli.resolve(), options.mcp.resolve()
     if options.embedding_cache:
@@ -663,18 +803,22 @@ def main():
                       {"surface": "bootstrap-create", "reason": "reviewed greenfield approval workflow, not ordinary owner command"},
                       {"surface": "migrate/reembed/single-graph-upgrade publication", "reason": "structural absent-target refusals only; dedicated migration/rebuild suites validate publication"},
                       {"surface": "MCP stdio", "reason": "HTTP/native bridge tested here; tools/mcp_stdio_smoke.py covers stdio"}]}
+    if options.integration_root:
+        receipt["integration_artifacts"] = [artifact(path) for path in sorted(root.glob("*.py"))]
     start = time.monotonic()
     try:
         with tempfile.TemporaryDirectory(prefix="mneme-cli-owner-smoke-") as directory:
             smoke = Smoke(options, Path(directory), receipt)
             try:
-                smoke.run()
+                smoke.run_tag_stewardship() if options.tag_stewardship else smoke.run()
                 receipt["status"] = "passed"
             finally:
                 smoke.close()
                 receipt["cleanup"] = "all spawned native owner/client/CLI children exited; disposable tree removed on scope exit"
         for name in ("cli", "mcp"):
             need(artifact(getattr(options, name)) == receipt["artifacts"][name], f"{name} artifact changed during smoke")
+        for entry in receipt.get("integration_artifacts", []):
+            need(artifact(Path(entry["path"])) == entry, "copied integration changed during smoke")
     except Exception as error:
         receipt["status"] = "failed"
         receipt["error"] = str(error)

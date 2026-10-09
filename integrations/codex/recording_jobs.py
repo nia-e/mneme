@@ -176,7 +176,9 @@ def _config_digest(config):
                            "service_config": str(config["service_config"]),
                            "service_sha256": digest(raw), "hook_sha256": hook_sha,
                            "recording_mode": config.get("recording_mode"),
-                           "memory_scope": config.get("memory_scope", "project")}
+                           "memory_scope": config.get("memory_scope", "project"),
+                           "tag_stewardship": config.get("tag_stewardship", False),
+                           "tag_guide_id": config.get("tag_guide_id")}
     if (config.get("memory_scope", "project") == "project"
             and config.get("recording_mode") == "automatic"
             and config.get("memory_mode", config.get("recall_mode")) == "async"):
@@ -650,6 +652,9 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         summary["proposal"] = {"kind": job["proposal_kind"], "summary": job["payload"]["summary"],
                                "body": job.get("note_body", job["payload"]["body"])}
         summary["citations"] = job["citations"]
+        if "tag_context" in job:
+            summary["proposal"]["tags"] = job["payload"].get("tags", [])
+            summary["tag_context"] = job["tag_context"]
     if "save_outcome" in job:
         summary["save_outcome"] = {k:v for k,v in job["save_outcome"].items() if k != "native"}
     if "maintenance" in job:
@@ -904,8 +909,17 @@ def _native_write(config, job, timeout):
                 or job["payload"].get("links") or "action" in job["payload"]):
             raise ValueError("global_preference_operation")
     if job.get("proposal_kind") == "possibility":
+        from tag_context import ordinary_tags
+        possibility_tags = job["payload"].get("tags")
+        if not isinstance(possibility_tags, list) or "possibility" not in possibility_tags:
+            raise ValueError("possibility_operation")
+        try:
+            ordinary_tags([tag for tag in possibility_tags if tag != "possibility"], max_count=31)
+        except ValueError as error:
+            raise ValueError("possibility_operation") from error
         if (destination == "global_preference" or config.get("memory_scope", "project") not in ("project", "misc")
-                or job["payload"].get("tags") != ["possibility"]
+                or len(possibility_tags) > 32 or len(set(possibility_tags)) != len(possibility_tags)
+                or possibility_tags != ["possibility"] and "tag_context" not in job
                 or "action" in job["payload"] or job["payload"].get("links")
                 or job.get("routing") or job.get("association")):
             raise ValueError("possibility_operation")
@@ -1270,6 +1284,20 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
             native_seconds_left = native_left()
             native_work = overlap.get("native_work")
             aggregate_native_bytes = (native_work.get("decoded_bytes") if isinstance(native_work, dict) else None)
+            if config.get("tag_stewardship") is True:
+                from tag_context import collect
+                tag_room = (budget.native_read_bytes - aggregate_native_bytes
+                            if type(aggregate_native_bytes) is int else 0)
+                if native_left() > 0 and tag_room > 0:
+                    tags_context = collect(config, expected_db_id=db_id,
+                                           timeout=min(30, native_left() / 2),
+                                           max_bytes=min(tag_room // 2, budget.recording_hint_bytes),
+                                           cue=prompt)
+                    aggregate_native_bytes += tags_context.decoded_bytes
+                    if tags_context.enabled:
+                        scope_options["tag_context"] = tags_context
+                # Lookup errors are optional tag omissions, never failed capture.
+                native_seconds_left = native_left()
             prepared, _context = prepare(observation, overlap["cards"], budget=budget, **scope_options)
             if prepared is None:
                 diagnostic = sanitize_assessment_diagnostic({"runtime_reason": _context,
@@ -1390,6 +1418,11 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                     payload = {"source": {"namespace": "codex-acquisition.v1", "key": key,
                                "reference": f"codex://{session}/{job['turn_id']}", "session": session},
                                "summary": proposal.summary, "body": proposal.body}
+                    if proposal.tags:
+                        from tag_context import ordinary_tags
+                        payload["tags"] = list(ordinary_tags(list(proposal.tags), max_count=32))
+                    if proposal.tag_context_json is not None and destination == "project":
+                        frozen["tag_context"] = json.loads(proposal.tag_context_json)
                     if destination == "global_preference":
                         from target_policy import GLOBAL_PREFERENCE_NAMESPACE, GLOBAL_PREFERENCE_TAG
                         coordinate = {"session": session, "turn": job["turn_id"], "key": key,
@@ -1407,7 +1440,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                         origin = job["workspace_binding"]["workspace_origin"]
                         _misc_provenance(payload, origin)
                     if proposal.kind == "possibility":
-                        payload["tags"] = ["possibility"]
+                        payload["tags"] = sorted(set(payload.get("tags", [])) | {"possibility"})
                     if proposal.kind == "episode":
                         payload["action"] = "append"
                     association = None
@@ -1536,6 +1569,16 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                         small = {k:receipt[k] for k in ("db","db_id","id","episode_id","edition_id","revision","replayed","readback_status") if k in receipt}
                         outcome = ({"status":"verified","reason":"native_verified","native":small}
                                    if len(encoded(small)) <= 2048 else {"status":"unresolved","reason":"native_receipt_cap"})
+                        if (outcome["status"] == "verified" and config.get("tag_stewardship") is True
+                                and job.get("destination", "project") == "project"):
+                            # Native acceptance is already durable; a failed
+                            # optional queue handoff cannot make it unsuccessful.
+                            try:
+                                from stewardship import enqueue
+                                ids = [small[k] for k in ("id", "edition_id") if isinstance(small.get(k), str)]
+                                enqueue(config, job["db_id"], ids)
+                            except Exception:
+                                pass
                 except Exception as error:
                     outcome = {"status":"unresolved","reason":"native_write_ambiguous"}
                     details = getattr(error,"details",None)

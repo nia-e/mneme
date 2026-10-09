@@ -42,6 +42,7 @@ pub use cozo_store::{
 mod mem_episodes;
 mod mem_touchstones;
 mod routing_probe;
+mod tag_stewardship;
 #[cfg(test)]
 mod touchstone_tests;
 
@@ -3280,41 +3281,31 @@ impl GraphStore for MemStore {
         Ok(self.lock().nodes.values().cloned().collect())
     }
 
+    async fn tag_vocabulary_page(
+        &self,
+        request: &mneme_core::ports::TagVocabularyRequest,
+    ) -> Result<mneme_core::ports::TagVocabularyPage> {
+        self.read_tag_vocabulary(request)
+    }
+
     async fn compare_replace_node_tags(
         &self,
         id: NodeId,
         expected: &mneme_core::BoundedTagSet,
         tags: &mneme_core::BoundedTagSet,
     ) -> Result<Node> {
-        let mut g = self.lock();
-        g.require_semantic_ids(&[id])?;
-        let current = g.nodes.get(&id).ok_or(Error::NotFound)?;
-        current
-            .validate()
-            .map_err(|error| Error::InvalidInput(error.to_string()))?;
-        if current.tag_set() != expected {
-            return Err(Error::Conflict(
-                "node tags changed; inspect current tags before retrying".into(),
-            ));
-        }
-        let mut replacement = current.clone();
-        replacement.replace_tags(tags.clone());
-        if g.touchstones.contains_key(&id) {
-            validate_touchstone_owner_replacement(current, &replacement)?;
-        }
-        let sample = (stable_tag_sample_hash(id), id);
-        let projection_needs_repair = !g.tag_projection.indexes_node_exactly(current, sample);
-        let changed = current.tag_set() != tags || projection_needs_repair;
-        let next_epoch = g.preflight_epoch_advance(changed)?;
-        if changed {
-            if projection_needs_repair {
-                g.replace_node_repairing_projection(replacement.clone());
-            } else {
-                g.replace_node(replacement.clone());
-            }
-            g.finish_epoch_advance(next_epoch);
-        }
-        Ok(replacement)
+        self.replace_tags_checked(id, expected, tags, None)
+    }
+
+    async fn compare_replace_node_tags_guarded(
+        &self,
+        id: NodeId,
+        expected: &mneme_core::BoundedTagSet,
+        tags: &mneme_core::BoundedTagSet,
+        guards: &mneme_core::ports::RetagContentGuards,
+    ) -> Result<Node> {
+        guards.validate()?;
+        self.replace_tags_checked(id, expected, tags, Some(guards))
     }
 
     async fn set_status(&self, id: NodeId, status: NodeStatus) -> Result<()> {

@@ -947,10 +947,14 @@ async fn main() -> Result<(), AnyErr> {
             client.close().await;
             return Err("remote edit-summary requires a server advertising the checked edit_summary contract; no fallback attempted".into());
         }
-        if request.retag.is_some() {
+        if let Some(retag) = &request.retag {
             if !client.supports_retag() {
                 client.close().await;
                 return Err("remote retag requires a server advertising the complete checked retag contract; no fallback attempted".into());
+            }
+            if retag.request.requires_content_guards() && !client.supports_retag_content_guards() {
+                client.close().await;
+                return Err("remote retag content guards are unavailable on this owner; update the owner build. No unguarded fallback was attempted".into());
             }
         }
         if let Some(concern) = &request.concern {
@@ -976,6 +980,13 @@ async fn main() -> Result<(), AnyErr> {
         {
             client.close().await;
             return Err("this MCP owner does not support node inventory yet; update the owner build, not just mnemed. No local database fallback was attempted".into());
+        }
+        if request.tool == "list"
+            && request.arguments["kind"] == "tags"
+            && !client.supports_list_tags()
+        {
+            client.close().await;
+            return Err("this MCP owner does not support tag vocabulary; update the owner build. No local database fallback was attempted".into());
         }
         let guarded_edit_expected_db_id = request
             .arguments
@@ -3359,6 +3370,8 @@ fn node_json(n: &Node) -> Value {
     };
     json!({
         "id": n.id().0.to_string(),
+        "content_fingerprint": mneme_core::ports::routing_content_fingerprint(n),
+        "content_fingerprint_codec": mneme_core::ports::ROUTING_CONTENT_FINGERPRINT_CODEC,
         "summary": n.summary(),
         "status": state,
         "stability": n.stability(),
@@ -3477,6 +3490,14 @@ mod telemetry_render_tests {
     fn node_json_names_exposure_and_grounded_use_explicitly() {
         let mut node = node();
         let initial = node_json(&node);
+        assert_eq!(
+            initial["content_fingerprint"],
+            mneme_core::ports::routing_content_fingerprint(&node)
+        );
+        assert_eq!(
+            initial["content_fingerprint_codec"],
+            mneme_core::ports::ROUTING_CONTENT_FINGERPRINT_CODEC
+        );
         assert_eq!(initial["last_exposed"], Value::Null);
         assert_eq!(initial["exposure_count"], 0);
         assert_eq!(initial["last_grounded_use"], Value::Null);
@@ -3489,6 +3510,10 @@ mod telemetry_render_tests {
         node.record_exposure(2);
         node.record_grounded_use(3);
         let current = node_json(&node);
+        assert_eq!(
+            current["content_fingerprint"],
+            initial["content_fingerprint"]
+        );
         assert_eq!(current["last_exposed"], 2);
         assert_eq!(current["exposure_count"], 1);
         assert_eq!(current["last_grounded_use"], 3);

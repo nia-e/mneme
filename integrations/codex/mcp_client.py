@@ -187,6 +187,18 @@ class McpClient:
             self._connected = True
         return self
 
+    def owner_capabilities(self):
+        """Tiny native-validated discovery summary; never remote initialize data.
+
+        Unknown/old/malformed support fails closed without fetching another
+        catalog or trying an unguarded compatibility write.
+        """
+        self.connect()
+        value = self._native_capabilities.get("owner_capabilities")
+        value = value if isinstance(value, dict) else {}
+        return {name: value.get(name) is True for name in
+                ("retag_content_guards", "tag_vocabulary")}
+
     def call_tool(self, name, arguments):
         self.connect()
         return self._request("tools/call", name=name, arguments=arguments)
@@ -268,10 +280,10 @@ class McpClient:
                 process.wait()
 
     def close(self):
-        if self._process is not None:
-            try:
+        try:
+            if self._process is not None:
                 self._request("close")
-            except McpError:
-                pass
-            finally:
-                self._stop()
+        except McpError:
+            pass
+        finally:
+            self._stop()  # Capability cache never survives a logical close.

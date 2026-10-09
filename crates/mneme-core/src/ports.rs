@@ -23,6 +23,8 @@ pub use crate::concern::{
     ConcernCommitOutcome, ConcernPage, ConcernPageCursor, ConcernPageRequest, ConcernStore,
 };
 pub use crate::episode::EpisodeStore;
+pub use crate::retag::{NodeContentGuard, RetagContentGuards};
+pub use crate::tag_vocabulary::*;
 pub use crate::tagged::*;
 pub use crate::touchstone::TouchstoneStore;
 use crate::{
@@ -1177,6 +1179,16 @@ pub struct DensePruneChunkOutcome {
 /// engine can be different backends.
 #[async_trait]
 pub trait GraphStore: Send + Sync {
+    /// Indexed semantic-only observed vocabulary. Never fallback to node scans.
+    async fn tag_vocabulary_page(
+        &self,
+        request: &TagVocabularyRequest,
+    ) -> Result<TagVocabularyPage> {
+        request.validate()?;
+        Err(Error::InvalidInput(
+            "indexed tag vocabulary is unsupported by this graph store".into(),
+        ))
+    }
     /// Native authored meaning records; a tag alone never supplies this capability.
     fn touchstones(&self) -> Option<&dyn TouchstoneStore> {
         None
@@ -1312,6 +1324,22 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Node> {
         Err(Error::InvalidInput(
             "atomic tag replacement is unsupported by this graph store".into(),
+        ))
+    }
+
+    /// Same tag edit with target and guide meaning checked in the write snapshot.
+    /// This must not downgrade to the tag-only operation. Canonical content guards
+    /// bind pointers, not mutable external bytes; content ABA is not detected.
+    async fn compare_replace_node_tags_guarded(
+        &self,
+        _id: NodeId,
+        _expected: &crate::BoundedTagSet,
+        _replacement: &crate::BoundedTagSet,
+        guards: &RetagContentGuards,
+    ) -> Result<Node> {
+        guards.validate()?;
+        Err(Error::InvalidInput(
+            "content-guarded tag replacement is unsupported by this graph store".into(),
         ))
     }
 

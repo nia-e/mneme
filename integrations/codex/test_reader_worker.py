@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import reader_worker as reader
+from reader_test_support import PublicationHandoff
 
 CARD_A = {"id": "01K123456789ABCDEFGHJKMNPQ", "summary": "A surprising link",
           "status": "active", "source": "test", "fingerprint": "a"}
@@ -51,6 +52,39 @@ class ReaderStateTests(unittest.TestCase):
         FakeRuntime.result = {"selected_ids": [CARD_A["id"]], "reason": "selected",
                               "usage": {"input_tokens": 10, "output_tokens": 2},
                               "elapsed_ms": 4, "provider_attempt": True}
+
+    def test_stewardship_preserves_selector_room_and_pending_priority(self):
+        reader.notice(self.config,self.event(),True)
+        self.assertFalse(reader._stewardship_reserve(self.config,"s1","stewardship:first"))
+        reader._state(self.config,"s1",lambda data:(data.update(pending=None,inflight=None),True),create=False)
+        self.assertTrue(reader._stewardship_reserve(self.config,"s1","stewardship:second"))
+        self.assertTrue(reader._recording_account(self.config,"s1","stewardship:second",
+            {"provider_attempt":True,"usage":{"input_tokens":50,"output_tokens":5}}))
+        budget=reader.resolve(self.config)
+        reader._state(self.config,"s1",lambda data:(data.update(attempts=budget.attempts-1),True),create=False)
+        self.assertFalse(reader._stewardship_reserve(self.config,"s1","stewardship:third"))
+
+    def test_stewardship_snapshot_is_fenced_by_reset_and_trivial_prompt(self):
+        reader.notice(self.config,self.event(),True)
+        reader.close_turn(self.config,"s1","t1")
+        expected=reader._stewardship_snapshot(self.config,"s1")
+        self.assertIsNotNone(expected)
+        self.assertTrue(reader._stewardship_idle(self.config,"s1",expected))
+        reader.reset(self.config,"s1")
+        self.assertFalse(reader._stewardship_idle(self.config,"s1",expected))
+        self.assertFalse(reader._stewardship_reserve(self.config,"s1","old",expected))
+        expected=reader._stewardship_snapshot(self.config,"s1")
+        reader.notice(self.config,self.event(turn="t2",prompt="ok"),False)
+        self.assertFalse(reader._stewardship_idle(self.config,"s1",expected))
+        self.assertFalse(reader._stewardship_reserve(self.config,"s1","old",expected))
+
+    def test_recording_off_dominates_retained_stewardship_flag(self):
+        self.config.update(recording_mode="off",memory_mode="async",tag_stewardship=True)
+        reader.notice(self.config,self.event(),True)
+        reader.close_turn(self.config,"s1","t1")
+        with patch("stewardship.step") as step:
+            reader.serve(self.config,"s1",runtime_factory=FakeRuntime,idle_seconds=.01)
+        step.assert_not_called()
 
     def event(self, turn="t1", prompt="Design a useful thing"):
         return {"session_id": "s1", "turn_id": turn, "prompt": prompt}
@@ -311,19 +345,21 @@ class ReaderStateTests(unittest.TestCase):
         reader.notice(self.config, self.event(), True)
         native = {"outcome": "ok", "cards": [CARD_A, CARD_B], "observation": {"schema": 1},
                   "db_id": PROJECT_DB}
-        with patch("hook_recall.collect_reader", return_value=native):
+        with patch("hook_recall.collect_reader", return_value=native), PublicationHandoff(reader, "s1") as handoff:
             worker = threading.Thread(target=lambda: reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=0.5))
             worker.start()
-            deadline = time.monotonic() + 1
-            while self.state()["ready"] is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            consumed = reader.consume(self.config, self.event())
-            self.assertEqual(consumed["cards"], [CARD_A])
-            self.assertEqual(consumed["db_id"], PROJECT_DB)
-            self.assertNotIn("selection", consumed)
-            self.assertNotIn("last_selection", consumed)
-            self.assertEqual(self.state()["last_selection"]["selected_ids"], [CARD_A["id"]])
-            worker.join(2)
+            try:
+                handoff.wait()
+                consumed = reader.consume(self.config, self.event())
+                self.assertEqual(consumed["cards"], [CARD_A])
+                self.assertEqual(consumed["db_id"], PROJECT_DB)
+                self.assertNotIn("selection", consumed)
+                self.assertNotIn("last_selection", consumed)
+                self.assertEqual(self.state()["last_selection"]["selected_ids"], [CARD_A["id"]])
+            finally:
+                reader.end_session(self.config, "s1")
+                handoff.finish()
+                worker.join(2)
             self.assertFalse(worker.is_alive())
         self.assertEqual(self.state()["attempts"], 1)
         self.assertEqual(self.state()["input_tokens"], 10)
@@ -420,17 +456,20 @@ class ReaderStateTests(unittest.TestCase):
         event = self.event()
         reader.notice(self.config, event, True)
         with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": cards,
-                                                              "db_id": PROJECT_DB}):
+                                                              "db_id": PROJECT_DB}), \
+             PublicationHandoff(reader, "s1") as handoff:
             worker = threading.Thread(target=lambda: reader.serve(self.config, "s1", runtime_factory=FakeRuntime,
                                                                    idle_seconds=0.3))
             worker.start()
-            deadline = time.monotonic() + 1
-            while self.state()["ready"] is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertEqual(len(FakeRuntime.instances[0].calls), 1)
-            self.assertEqual(self.state()["ready"]["cards"], cards)
-            shown = reader.consume(self.config, event)
-            worker.join(2)
+            try:
+                handoff.wait()
+                self.assertEqual(len(FakeRuntime.instances[0].calls), 1)
+                self.assertEqual(self.state()["ready"]["cards"], cards)
+                shown = reader.consume(self.config, event)
+            finally:
+                reader.end_session(self.config, "s1")
+                handoff.finish()
+                worker.join(2)
             self.assertFalse(worker.is_alive())
         self.assertEqual(shown["cards"], cards)
         self.assertEqual(len(shown["displayed"]), 8)
@@ -720,18 +759,27 @@ class ReaderStateTests(unittest.TestCase):
         self.assertEqual(runtime.calls[-1][1][0]["fingerprint"], "changed")
 
     def test_reset_rotates_runtime_without_resetting_ledger(self):
-        reader.notice(self.config, self.event(), True)
-        with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}):
-            worker = threading.Thread(target=lambda: reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=0.5))
+        self.assertEqual(reader.notice(self.config, self.event(), True)["outcome"], "queued")
+        with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}), \
+             PublicationHandoff(reader, "s1") as handoff:
+            worker = threading.Thread(target=lambda: reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=5))
             worker.start()
-            deadline = time.monotonic() + 1
-            while self.state()["attempts"] < 1 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            reader.reset(self.config, "s1")
-            reader.notice(self.config, self.event("t2", "Another substantial task"), True)
-            while self.state()["attempts"] < 2 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            worker.join(2)
+            try:
+                first = handoff.wait()
+                before = self.state()
+                self.assertEqual((before["attempts"], before["input_tokens"], before["output_tokens"]), (1, 10, 2))
+                self.assertIsNotNone(before["ready"])
+                reader.reset(self.config, "s1")
+                self.assertEqual(self.state()["context_generation"], before["context_generation"] + 1)
+                self.assertEqual(reader.notice(self.config, self.event("t2", "Another substantial task"), True)["outcome"], "queued")
+                first.set()
+                handoff.wait()
+                self.assertEqual((self.state()["input_tokens"], self.state()["output_tokens"]), (20, 4))
+            finally:
+                reader.end_session(self.config, "s1")
+                handoff.finish()
+                worker.join(2)
+            self.assertFalse(worker.is_alive())
         self.assertEqual(self.state()["attempts"], 2)
         self.assertGreaterEqual(len(FakeRuntime.instances), 2)
         self.assertTrue(all(x.closed for x in FakeRuntime.instances))
@@ -1113,14 +1161,18 @@ class ReaderConcernTests(unittest.TestCase):
             return [{"shown_text": "Advice differs. Which scope?", "displayed_endpoint_ids": [CARD_A["id"], CARD_B["id"]],
                      "expected_row": row}]
         reader.notice(self.config, self.event(), True)
-        with patch("hook_recall.collect_reader", return_value=native), patch("hook_recall.register_reader_concerns", side_effect=register):
+        with patch("hook_recall.collect_reader", return_value=native), patch("hook_recall.register_reader_concerns", side_effect=register), \
+             PublicationHandoff(reader, "s1") as handoff:
             worker = threading.Thread(target=lambda: reader.serve(self.config, "s1", runtime_factory=Runtime, idle_seconds=.5))
             worker.start()
-            deadline = time.monotonic() + 2
-            while self.state().get("ready") is None and time.monotonic() < deadline:
-                time.sleep(.01)
-            result = reader.consume(self.config, self.event())
-            worker.join(2)
+            try:
+                handoff.wait()
+                result = reader.consume(self.config, self.event())
+            finally:
+                reader.end_session(self.config, "s1")
+                handoff.finish()
+                worker.join(2)
+            self.assertFalse(worker.is_alive())
         self.assertEqual(len(result["concerns"]), 1)
         self.assertIn("Advice differs. Which scope?", result["context"])
         self.assertEqual(self.state()["last_delivery"]["registered_concern_count"], 1)
@@ -1151,14 +1203,17 @@ class ReaderConcernTests(unittest.TestCase):
         self.config["recording_mode"] = "off"
         reader.notice(self.config, self.event(), True)
         with patch("hook_recall.collect_reader", return_value=native), patch("hook_recall.McpClient") as client, \
-             patch("hook_recall._project_config") as project_config:
+             patch("hook_recall._project_config") as project_config, PublicationHandoff(reader, "s1") as handoff:
             worker = threading.Thread(target=lambda: reader.serve(self.config, "s1", runtime_factory=Runtime, idle_seconds=.5))
             worker.start()
-            deadline = time.monotonic() + 2
-            while self.state().get("ready") is None and time.monotonic() < deadline:
-                time.sleep(.01)
-            result = reader.consume(self.config, self.event())
-            worker.join(2)
+            try:
+                handoff.wait()
+                result = reader.consume(self.config, self.event())
+            finally:
+                reader.end_session(self.config, "s1")
+                handoff.finish()
+                worker.join(2)
+            self.assertFalse(worker.is_alive())
         client.assert_not_called()
         project_config.assert_not_called()
         self.assertIn("Advice differs", result["context"])

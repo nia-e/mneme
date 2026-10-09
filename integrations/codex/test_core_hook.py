@@ -297,7 +297,7 @@ class CoreHookTests(unittest.TestCase):
         self.connect_global(remote)
         self.server("project", native([node(ID2, "Project identity", "This project is Mneme.")]))
         before = set(self.root.rglob("*"))
-        text, sections = self.context()
+        text, sections = self.context(timeout=core_hook.WALL_TIMEOUT)
         self.assertEqual([s["scope"] for s in sections], ["global", "project"])
         self.assertEqual([s["outcome"] for s in sections], ["ok", "ok"])
         self.assertLess(text.index(ID1), text.index(ID2))
@@ -354,12 +354,8 @@ class CoreHookTests(unittest.TestCase):
                                  ("project", "databases"), ("project", "core")])
 
     def test_connect_stalled_global_leaves_time_for_local_project_core(self):
-        remote = self.server("user", core_delay=2)
-        self.connect_global(remote)
-        self.server("project", native([node(ID2, "Local project", "Available despite remote outage.")]))
-        started = time.monotonic()
-        text, sections = self.context(timeout=1)
-        self.assertLess(time.monotonic() - started, 1.5)
+        text, sections, elapsed = self.scripted_deadline_context("stalled", timeout=1)
+        self.assertLess(elapsed, 1.5)
         self.assertEqual([s["outcome"] for s in sections], ["unavailable", "ok"])
         self.assertIn(ID2, text)
         self.assertIn("not evidence of absence", text)
@@ -367,17 +363,171 @@ class CoreHookTests(unittest.TestCase):
         self.assertFalse((self.root / "user-state").exists())
 
     def test_connect_unready_global_uses_only_its_fair_deadline(self):
-        remote = self.server("user", not_ready=1000)
-        self.connect_global(remote)
-        self.server("project", native([node(ID2)]))
-        started = time.monotonic()
-        _, sections = self.context(timeout=1)
-        self.assertLess(time.monotonic() - started, 1.5)
+        _, sections, elapsed = self.scripted_deadline_context("unready", timeout=1)
+        self.assertLess(elapsed, 1.5)
         self.assertEqual([s["outcome"] for s in sections], ["unavailable", "ok"])
         self.assertGreaterEqual(sum(db == "user" and method == "initialize"
                                     for db, method, _ in self.calls), 2)
         self.assertEqual([data["name"] for db, method, data in self.calls
                           if db == "user" and method == "tools/call"], [])
+
+    def scripted_deadline_context(self, global_mode, *, timeout):
+        """Exercise real scope scheduling without measuring native cold-start.
+
+        Short watchdog fixtures need deterministic transport timing. Separate
+        native tests exercise ordinary two-owner collection and the real parent
+        watchdog that kills a stalled HTTP collector.
+        """
+        targets = core_hook._targets(self.write_config(), str(self.cwd))
+        clock = [10.0]
+        lines = []
+        owner = self
+
+        class Client:
+            def __init__(inner, url, *, token, timeout):
+                inner.db = "user" if "18763" in url else "project"
+                inner.timeout = timeout
+
+            def connect(inner):
+                owner.calls.append((inner.db, "initialize", {}))
+                clock[0] += min(.01, inner.timeout)
+                if inner.db == "user" and global_mode == "unready":
+                    raise core_hook.McpTransportError("scripted not ready")
+
+            def call_tool(inner, name, arguments):
+                owner.calls.append((inner.db, "tools/call", {"name": name}))
+                if inner.db == "user" and name == "core" and global_mode == "stalled":
+                    clock[0] += inner.timeout
+                    raise core_hook.McpTransportError("scripted stalled core")
+                clock[0] += min(.01, inner.timeout)
+                if name == "databases":
+                    path = owner.global_path if inner.db == "user" else owner.project_path
+                    return [{"db": inner.db, "name": inner.db, "state": "open", "configured_path": str(path)}]
+                return native([node(ID1 if inner.db == "user" else ID2)])
+
+            def close(inner):
+                pass
+
+        request = core_hook._json({"targets": targets, "timeout": timeout}).encode()
+        with patch("core_hook.sys.stdin") as stdin, \
+             patch("builtins.print", side_effect=lambda line, **kwargs: lines.append(line)), \
+             patch("core_hook.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("core_hook.time.sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+             patch("core_hook.McpClient", Client):
+            stdin.buffer.read.return_value = request
+            self.assertEqual(core_hook._child_main(), 0)
+        sections = [json.loads(line) for line in lines]
+        text = core_hook._context(sections)["hookSpecificOutput"]["additionalContext"]
+        return text, sections, clock[0] - 10.0
+
+    def test_native_connect_over_250ms_uses_remaining_scope_deadline(self):
+        target = core_hook._targets(self.write_config(), str(self.cwd))[0]
+        clock = [10.0]
+        exchanges = []
+        catalog = [{"db": "user", "name": "user", "state": "open",
+                    "configured_path": str(self.global_path)}]
+
+        class Client:
+            def __init__(inner, _url, *, token, timeout):
+                inner.timeout = timeout
+
+            def advance(inner, operation, duration):
+                exchanges.append((operation, inner.timeout))
+                if duration > inner.timeout:
+                    clock[0] += inner.timeout
+                    raise core_hook.McpTransportError("fixture deadline")
+                clock[0] += duration
+
+            def connect(inner):
+                inner.advance("connect", .27)
+
+            def __enter__(inner):
+                inner.connect()
+                return inner
+
+            def __exit__(inner, *_):
+                inner.close()
+
+            def call_tool(inner, name, arguments):
+                inner.advance(name, .1)
+                return catalog if name == "databases" else native()
+
+            def close(inner):
+                inner.advance("close", .01)
+
+        with patch("core_hook.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("core_hook.time.sleep", side_effect=lambda duration: clock.__setitem__(0, clock[0] + duration)), \
+             patch("core_hook.McpClient", Client):
+            section = core_hook._collect_scope(target, 12.0)
+        self.assertEqual(section["outcome"], "ok")
+        self.assertEqual(section["cards"][0]["id"], ID1)
+        self.assertEqual([name for name, _ in exchanges], ["connect", "databases", "core", "close"])
+        for (_, actual), expected in zip(exchanges, (2.0, 1.73, 1.63, 1.53)):
+            self.assertAlmostEqual(actual, expected)
+        self.assertLess(clock[0], 12.0)
+
+    def test_catalog_exhaustion_does_not_mint_core_or_cleanup_allowance(self):
+        target = core_hook._targets(self.write_config(), str(self.cwd))[0]
+        clock = [10.0]
+        exchanges = []
+        catalog = [{"db": "user", "name": "user", "state": "open",
+                    "configured_path": str(self.global_path)}]
+
+        class Client:
+            def __init__(inner, _url, *, token, timeout):
+                inner.timeout = timeout
+
+            def connect(inner):
+                exchanges.append(("connect", inner.timeout))
+                clock[0] += .27
+
+            def __enter__(inner):
+                inner.connect()
+                return inner
+
+            def __exit__(inner, *_):
+                inner.close()
+
+            def call_tool(inner, name, arguments):
+                exchanges.append((name, inner.timeout))
+                self.assertEqual(name, "databases")
+                clock[0] += inner.timeout
+                return catalog
+
+            def close(inner):
+                exchanges.append(("close", inner.timeout))
+
+        with patch("core_hook.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("core_hook.McpClient", Client):
+            section = core_hook._collect_scope(target, 10.5)
+        self.assertEqual(section["outcome"], "unavailable")
+        self.assertEqual([name for name, _ in exchanges], ["connect", "databases", "close"])
+        self.assertAlmostEqual(exchanges[0][1], .5)
+        self.assertAlmostEqual(exchanges[1][1], .23)
+        self.assertEqual(exchanges[2][1], .001)
+        self.assertAlmostEqual(clock[0], 10.5)
+
+    def test_default_watchdog_gives_user_first_fair_native_startup_room(self):
+        targets = core_hook._targets(self.write_config(), str(self.cwd))
+        clock = [10.0]
+        calls = []
+
+        def collect(target, deadline):
+            calls.append((target["db"], deadline))
+            clock[0] += .27
+            return core_hook._pack(target, native())
+
+        request = core_hook._json({"targets": targets, "timeout": core_hook.WALL_TIMEOUT}).encode()
+        with patch("core_hook.sys.stdin") as stdin, patch("builtins.print") as output, \
+             patch("core_hook.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("core_hook._collect_scope", side_effect=collect):
+            stdin.buffer.read.return_value = request
+            self.assertEqual(core_hook._child_main(), 0)
+        self.assertEqual(core_hook.WALL_TIMEOUT, 12)
+        self.assertEqual([name for name, _ in calls], ["user", "project"])
+        self.assertAlmostEqual(calls[0][1], 16.0)
+        self.assertAlmostEqual(calls[1][1], 22.0)
+        self.assertEqual(output.call_count, 2)
 
     def test_legacy_project_service_config_still_accepted(self):
         self.service("project", self.project_path, 18764, legacy=True)
@@ -532,9 +682,27 @@ class CoreHookTests(unittest.TestCase):
         self.assertFalse((self.root / "user-state").exists())
 
     def test_good_global_survives_parent_timeout_during_project(self):
-        self.server("user")
-        self.server("project", core_delay=2)
-        text, sections = self.context(timeout=0.4)
+        targets = core_hook._targets(self.write_config(), str(self.cwd))
+        flushed = []
+
+        def collect(target, deadline):
+            if target["db"] == "project":
+                # The first complete section must be flushed before attempting
+                # project work; model the parent's kill at this boundary.
+                self.assertEqual(len(flushed), 1)
+                raise subprocess.TimeoutExpired("scripted collector", .4,
+                                                output=(flushed[0] + "\n").encode())
+            return core_hook._pack(target, native())
+
+        def child(*args, **kwargs):
+            with patch("core_hook.sys.stdin") as stdin, patch("core_hook._collect_scope", side_effect=collect), \
+                 patch("builtins.print", side_effect=lambda line, **kw: (self.assertTrue(kw.get("flush")), flushed.append(line))):
+                stdin.buffer.read.return_value = kwargs["input"]
+                core_hook._child_main()
+
+        with patch("core_hook.subprocess.run", side_effect=child):
+            sections = core_hook.collect_core(targets, timeout=.4)
+        text = core_hook._context(sections)["hookSpecificOutput"]["additionalContext"]
         self.assertEqual([section["outcome"] for section in sections], ["ok", "unavailable"])
         self.assertIn(ID1, text)
         self.assertIn("then core with db=project", text)
@@ -559,7 +727,7 @@ class CoreHookTests(unittest.TestCase):
             core_hook.handle_event(event, self.write_config())
         call = run.call_args
         self.assertEqual(call.args[0][-1], "--collect")
-        self.assertEqual(call.kwargs["timeout"], 4)
+        self.assertEqual(call.kwargs["timeout"], 12)
         payload = json.loads(call.kwargs["input"])
         self.assertEqual(set(payload), {"targets", "timeout"})
         self.assertNotIn("never-forward-this-prompt", core_hook._json(payload))
@@ -573,7 +741,7 @@ class CoreHookTests(unittest.TestCase):
         self.assertIn("unavailable", result.stdout.decode())
         self.assertNotIn("secret-config-error", result.stdout.decode())
         self.write_config()
-        for timeout in ("nan", "inf", "0", "-1", "5"):
+        for timeout in ("nan", "inf", "0", "-1", "13"):
             with self.subTest(timeout=timeout):
                 result = self.cli(self.event, "--timeout", timeout)
                 self.assertEqual(result.returncode, 0)

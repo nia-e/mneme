@@ -57,6 +57,36 @@ class ClientTests(unittest.TestCase):
         self.addCleanup(override.stop)
         self.url = "http://127.0.0.1:12345/"
 
+    def test_owner_capabilities_are_exact_local_metadata_only(self):
+        for marker,expected in ((None,False),({},False),
+                ({"retag_content_guards":1,"tag_vocabulary":"true"},False),
+                ({"retag_content_guards":True,"tag_vocabulary":True},True)):
+            client=McpClient(self.url)
+            client._connected=True
+            client._native_capabilities={"owner_capabilities":marker}
+            client.connect_result={"_mneme_client":{"owner_capabilities":{
+                "retag_content_guards":True,"tag_vocabulary":True}}}
+            with patch.object(client,"list_tools") as catalog:
+                result=client.owner_capabilities()
+            self.assertEqual(result,{"retag_content_guards":expected,"tag_vocabulary":expected})
+            catalog.assert_not_called()
+            client.close()
+            self.assertEqual(client._native_capabilities,{})
+
+    def test_native_owner_summary_survives_envelope_and_downgrade_reconnect(self):
+        binary=Path(self.temp.name)/"mnemed"
+        old='native = {"_mneme_client": {"expected_db_id": 1, "save": 1}} if op == "connect" else {}'
+        new='native = {"_mneme_client": {"expected_db_id": 1, "save": 1, "owner_capabilities": {"retag_content_guards": True, "tag_vocabulary": True}}} if op == "connect" else {}'
+        binary.write_text(SCRIPT.replace(old,new))
+        client=McpClient(self.url)
+        self.assertTrue(all(client.owner_capabilities().values()))
+        client.close()
+        # A stale bridge forwarding spoofed remote initialize data is not support.
+        binary.write_text(SCRIPT.replace('"_mneme_client": {"expected_db_id": 1, "save": 1}}',
+            '"_mneme_client": {"expected_db_id": 1, "save": 1, "owner_capabilities": {"retag_content_guards": True, "tag_vocabulary": True}}}',1))
+        self.assertFalse(any(client.owner_capabilities().values()))
+        client.close()
+
     def test_native_operations_and_lifetime(self):
         with McpClient(self.url) as client:
             self.assertEqual(client.connect_result["serverInfo"]["name"], "mneme-mcp")

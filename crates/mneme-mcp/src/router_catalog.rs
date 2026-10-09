@@ -46,6 +46,22 @@ pub(super) fn ordinary_catalog(
         if name == "retag" && !client.supports_retag() {
             continue;
         }
+        // Do not publish a stronger guard contract than the checked client can
+        // forward. A genuinely old tag-only retag remains available unchanged.
+        if name == "retag"
+            && ["expected_content_fingerprint", "guard_nodes"]
+                .iter()
+                .any(|field| native["inputSchema"]["properties"].get(field).is_some())
+            && !client.supports_retag_content_guards()
+        {
+            continue;
+        }
+        if name == "list"
+            && schema_mentions_kind(&native["inputSchema"], "tags")
+            && !client.supports_list_tags()
+        {
+            continue;
+        }
         let mut tool = native.clone();
         if name == "episode" && policy.profile == CapabilityProfile::ReadOnly {
             let allowed = &mneme_app::episode::EpisodeAction::READ_ONLY;
@@ -97,6 +113,20 @@ pub(super) fn ordinary_catalog(
     Ok(tools)
 }
 
+fn schema_mentions_kind(schema: &Value, kind: &str) -> bool {
+    schema["properties"]["kind"]["const"] == kind
+        || schema["properties"]["kind"]["enum"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|value| value == kind))
+        || ["oneOf", "anyOf", "allOf"].iter().any(|union| {
+            schema[union].as_array().is_some_and(|branches| {
+                branches
+                    .iter()
+                    .any(|branch| schema_mentions_kind(branch, kind))
+            })
+        })
+}
+
 pub(super) fn support(tools: &[Value]) -> Value {
     Value::Array(
         tools
@@ -107,7 +137,7 @@ pub(super) fn support(tools: &[Value]) -> Value {
                     item["actions"] = actions.clone();
                 }
                 if let Some(kinds) = tool.pointer("/inputSchema/properties/kind/enum") {
-                    if tool["name"] == "save" {
+                    if matches!(tool["name"].as_str(), Some("save" | "list")) {
                         item["kinds"] = kinds.clone();
                     }
                 }
@@ -189,7 +219,7 @@ pub(super) fn build(routes: &[RouteCatalog<'_>], default: &str) -> Result<Vec<Va
             json!({"type":"object","properties":{"db":{"type":"string","enum":aliases}},"oneOf":variants})
         };
         let native_description = if *name == "get" {
-            "Fetch one selected-database record and optional bounded body page. Hosted edges:true is refused; use neighbors for local edges. Replica body continuations require the returned snapshot."
+            "Fetch one selected-database record with its canonical summary (up to 16384 UTF-8 bytes on current owners; inspect summary_truncated on older owners) and optional bounded body page. Hosted edges:true is refused; use neighbors for local edges. Replica body continuations require the returned snapshot."
         } else if *name == "link" {
             "Assert a local edge from -> to in the selected database; optional kind, weight and paired byte-range anchor. Cross-database links are not exposed."
         } else {

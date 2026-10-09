@@ -21,6 +21,14 @@ fn node() -> Node {
 fn node_json_names_exposure_and_grounded_use_explicitly() {
     let mut node = node();
     let initial = node_json(&node);
+    assert_eq!(
+        initial["content_fingerprint"],
+        mneme_core::ports::routing_content_fingerprint(&node)
+    );
+    assert_eq!(
+        initial["content_fingerprint_codec"],
+        mneme_core::ports::ROUTING_CONTENT_FINGERPRINT_CODEC
+    );
     assert_eq!(initial["last_exposed"], Value::Null);
     assert_eq!(initial["exposure_count"], 0);
     assert_eq!(initial["last_grounded_use"], Value::Null);
@@ -32,6 +40,10 @@ fn node_json_names_exposure_and_grounded_use_explicitly() {
     node.record_exposure(2);
     node.record_grounded_use(3);
     let current = node_json(&node);
+    assert_eq!(
+        current["content_fingerprint"],
+        initial["content_fingerprint"]
+    );
     assert_eq!(current["last_exposed"], 2);
     assert_eq!(current["exposure_count"], 1);
     assert_eq!(current["last_grounded_use"], 3);
@@ -175,6 +187,78 @@ fn nested_walk_summaries_are_bounded() {
     );
     assert_eq!(value["edges"][1]["nested"]["summary"], "💩");
     assert_eq!(value["edges"][1]["nested"]["summary_truncated"], false);
+}
+
+#[cfg(not(feature = "fastembed"))]
+#[tokio::test]
+async fn get_returns_complete_native_summary_without_widening_core_query_or_list() {
+    let (root, server, _) = crate::concern::tests::fixture().await;
+    let summary = "é".repeat(mneme_core::MAX_NODE_SUMMARY_BYTES / 2);
+    let id = server
+        .registry
+        .checkout("project")
+        .unwrap()
+        .mem
+        .ingest(Ingest::new(
+            &summary,
+            b"",
+            &["core"],
+            Provenance::derived_empty(),
+        ))
+        .await
+        .unwrap();
+    let call = |name: &'static str, args: Value| {
+        let server = &server;
+        async move {
+            call_tool(
+                &server.registry,
+                &server.sessions,
+                &server.cold_work,
+                name,
+                &args,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let get = call("get", json!({"db":"project","id":id.0.to_string()})).await;
+    assert_eq!(get["summary"], summary);
+    assert_eq!(get["summary_truncated"], false);
+    let node = server
+        .registry
+        .checkout("project")
+        .unwrap()
+        .mem
+        .get_node(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        get["content_fingerprint"],
+        mneme_core::ports::routing_content_fingerprint(&node)
+    );
+    assert!(serde_json::to_vec(&get).unwrap().len() < response::MAX_JSONRPC_FRAME_BYTES);
+    let core = call("core", json!({"db":"project"})).await;
+    let core = &core["nodes"].as_array().unwrap()[0];
+    assert_eq!(core["id"], id.0.to_string());
+    assert_eq!(core["summary"].as_str().unwrap().len(), MAX_SUMMARY_BYTES);
+    assert_eq!(core["summary_truncated"], true);
+    let query = call("query",json!({"db":"project","text":"é","tags":["core"],"k":1,"max_nodes":1,"depth":0,"min_relevance":0.0})).await;
+    let hits = query["lanes"]["primary"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        hits[0]["summary"].as_str().unwrap().len(),
+        MAX_SUMMARY_BYTES
+    );
+    assert_eq!(hits[0]["summary_truncated"], true);
+    let list = call("list", json!({"db":"project","tag":"core"})).await;
+    assert_eq!(
+        list["items"][0]["summary"].as_str().unwrap().len(),
+        mneme_app::list::MAX_LIST_SUMMARY_BYTES
+    );
+    assert_eq!(list["items"][0]["summary_truncated"], true);
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(all(not(feature = "fastembed"), not(feature = "cozo")))]

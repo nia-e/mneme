@@ -40,7 +40,7 @@ pub(crate) fn tool_schema(profile: CapabilityProfile) -> Value {
             schema["properties"][field]["items"]["not"] = json!({"const":"core"});
         }
     }
-    json!({"name":"retag","description":"Replace a semantic node's complete tag set only if its current tags equal expected_tags. Requires curator, explicit db and expected_db_id; operator if either set contains core. Empty sets are valid. Preserves authored content and other node state. Stale tags refuse; inspect before forming new intent. No automatic retry, content edit, or revision-history promise.","inputSchema":schema})
+    json!({"name":"retag","description":"Replace a semantic node's complete tag set only if its current tags equal expected_tags. Optional expected_content_fingerprint (from get) and guard_nodes check target and semantic guide content in the same write snapshot; guard_nodes requires the target fingerprint. Fingerprints bind content pointers, not mutable external body bytes. Requires curator, explicit db and expected_db_id; operator if either tag set contains core. Empty sets are valid. Preserves authored content and other node state. Stale guards refuse; inspect before forming new intent. No automatic retry, content edit, or revision-history promise.","inputSchema":schema})
 }
 #[cfg(test)]
 mod tests {
@@ -65,8 +65,12 @@ mod tests {
                 .find(|tool| tool["name"] == "retag")
                 .map(|_| tool_input_schema(&schemas, "retag"));
             let _held = server.cold_work.admit("held lane").unwrap();
-            for core in [false, true] {
-                let arguments = raw(core);
+            for (core, guards) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut arguments = raw(core);
+                if guards {
+                    arguments["expected_content_fingerprint"] = json!("a".repeat(64));
+                    arguments["guard_nodes"] = json!([{"id":ulid::Ulid::from(3).to_string(),"content_fingerprint":"b".repeat(64)}]);
+                }
                 let class = if core {
                     CapabilityClass::Operator
                 } else {
@@ -101,6 +105,19 @@ mod tests {
         r = raw(false);
         r["extra"] = json!(1);
         assert!(ValidatedToolArguments::parse("retag", &r).is_err());
+        let schema = tool_schema(CapabilityProfile::Curator)["inputSchema"].clone();
+        for fields in [
+            json!({"expected_content_fingerprint":"A".repeat(64)}),
+            json!({"guard_nodes":[]}),
+            json!({"expected_content_fingerprint":"a".repeat(64),"guard_nodes":[{"id":ulid::Ulid::from(3).to_string(),"content_fingerprint":null}]}),
+        ] {
+            let mut r = raw(false);
+            r.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            assert!(!schema_accepts(&schema, &r), "{r}");
+            assert!(ValidatedToolArguments::parse("retag", &r).is_err());
+        }
     }
 }
 
@@ -126,7 +143,13 @@ async fn retag_native_cas_preserves_content_identity_and_refuses_stale_guard() {
             .await
         }
     };
-    let reply = call(raw.clone()).await.unwrap();
+    let mut strong = raw.clone();
+    strong["expected_content_fingerprint"] = json!("0".repeat(64));
+    assert!(call(strong.clone()).await.is_err());
+    strong["expected_content_fingerprint"] =
+        json!(mneme_core::ports::routing_content_fingerprint(&original));
+    // The target guard is opt-in; legacy callers retain their old tag-only CAS.
+    let reply = call(strong).await.unwrap();
     assert_eq!(
         reply,
         json!({"id":original.id().0.to_string(),"tags":["closed","possibility"],"changed":true,"db":"project","db_id":db_id.to_string()})

@@ -25,6 +25,8 @@ async fn indexed_list_profiles_schema_and_raw_transport_agree_before_checkout() 
             json!({}),
             json!({"db":"missing"}),
             json!({"db":"missing","kind":"nodes","limit":64,"status":"all","tag":"rare"}),
+            json!({"db":"missing","kind":"tags","limit":64,"status":"all","prefix":""}),
+            json!({"db":"missing","kind":"tags","status":"archived","prefix":"People"}),
         ] {
             assert!(schema_accepts(schema, &nodes), "{nodes}");
             assert!(ValidatedToolArguments::parse("list", &nodes).is_ok());
@@ -55,6 +57,10 @@ async fn indexed_list_profiles_schema_and_raw_transport_agree_before_checkout() 
             json!({"db":"missing","kind":"nodes","limit":65}),
             json!({"db":"missing","kind":"nodes","status":"candidate"}),
             json!({"db":"missing","kind":"nodes","tag":null}),
+            json!({"db":"missing","kind":"tags","limit":65}),
+            json!({"db":"missing","kind":"tags","prefix":null}),
+            json!({"db":"missing","kind":"tags","tag":"people"}),
+            json!({"db":"missing","kind":"tags","status":"candidate"}),
             json!({"db":"missing","kind":"touchstones","limit":0}),
             json!({"db":"missing","kind":"touchstones","limit":33}),
             json!({"db":"missing","kind":"touchstones","limit":null}),
@@ -104,6 +110,62 @@ fn touchstone_capture_save_are_note_only_strict_and_preserve_existing_authority(
     assert!(ValidatedToolArguments::parse("save", &episode).is_ok());
     episode["touchstone"] = Value::Null;
     assert!(ValidatedToolArguments::parse("save", &episode).is_err());
+}
+
+#[cfg(not(feature = "fastembed"))]
+#[tokio::test]
+async fn tag_vocabulary_is_an_observer_read_with_bounded_counts_and_canonical_examples() {
+    let (root, mut server, nodes) = crate::concern::tests::fixture().await;
+    server.capability = CapabilityPolicy::new(CapabilityProfile::ReadOnly, false);
+    let db_id = server.registry.checkout("project").unwrap().db_id;
+    let args = json!({"db":"project","expected_db_id":db_id.to_string(),"kind":"tags","prefix":"fa","status":"all","limit":1});
+    let result = call_tool_authorized(
+        &server.registry,
+        &server.sessions,
+        &server.cold_work,
+        server.capability,
+        "list",
+        &args,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["kind"], "tags");
+    assert_eq!(result["db_id"], db_id.to_string());
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["name"], "fact");
+    assert_eq!(
+        result["items"][0]["count"],
+        json!({"status":"exact","value":3})
+    );
+    let mut examples = result["items"][0]["examples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    examples.sort();
+    assert_eq!(
+        examples,
+        nodes
+            .iter()
+            .map(|node| node.id().0.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result["coverage"]["semantic_only"], true);
+    assert_eq!(result["coverage"]["snapshot"], false);
+    let node = server
+        .registry
+        .checkout("project")
+        .unwrap()
+        .mem
+        .get_node(nodes[0].id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(node.exposure_count(), nodes[0].exposure_count());
+    assert_eq!(node.grounded_use_count(), nodes[0].grounded_use_count());
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(not(feature = "fastembed"))]

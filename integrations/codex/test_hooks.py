@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
+import fcntl
+import hashlib
 import io
 import json
 from pathlib import Path
 import shlex
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
@@ -667,6 +671,29 @@ class HookTests(unittest.TestCase):
             self.assertIn("--outcome none", json.dumps(hooks.handle_event(prompt, config)))
         self.assertEqual(calls, ["background", "notice"])
 
+    def test_async_incompatible_or_unreadable_ledger_warns_only_at_session_entry(self):
+        config = self.async_config()
+        self.state.mkdir()
+        path = hooks._state_path(self.state, "session_1")
+        for raw in (json.dumps({"schema": "mneme.codex-hooks.state.future", "turns": {}}), "{broken"):
+            path.write_text(raw)
+            with patch.object(hooks, "_reader_worker") as worker, \
+                    patch.object(hooks, "_recording_jobs") as recorder:
+                for source in ("startup", "resume", "compact", "clear"):
+                    start = self.event("SessionStart", source=source)
+                    warning = hooks.handle_event(start, config)
+                    self.assertEqual(warning, {"systemMessage": "Automatic memory temporarily disabled."})
+                    self.assertEqual(hooks.handle_event(start, config, reader_background=True), {})
+                for event in (self.event("UserPromptSubmit", prompt="Review the source"),
+                              self.event("PostToolUse"), self.event("Stop"),
+                              self.event("Interrupt"), self.event("SessionEnd")):
+                    for background in (False, True):
+                        self.assertEqual(hooks.handle_event(event, config, reader_background=background), {})
+                worker.assert_not_called()
+                recorder.assert_not_called()
+            self.assertEqual(path.read_text(), raw)
+            self.assertEqual(list(self.state.iterdir()), [path])
+
     def test_async_delivery_only_valid_whole_cards_and_source_identity(self):
         config = self.async_config()
         card = {"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "summary": "Source-backed note",
@@ -960,6 +987,54 @@ class HookInputTests(unittest.TestCase):
             self.assertEqual(hooks.main(args), 0)
         return json.loads(output.getvalue()), errors.getvalue(), config, handler
 
+    def test_config_failure_warns_at_session_entry_not_every_tool_or_closure(self):
+        for name, fields in (("SessionStart", {"source": "resume"}),
+                             ("UserPromptSubmit", {"prompt": "Review source"}),
+                             ("PostToolUse", {}), ("Stop", {}), ("Interrupt", {}),
+                             ("SessionEnd", {})):
+            for background in (False, True):
+                output, errors = io.StringIO(), io.StringIO()
+                event = self.event(name, **fields)
+                args = ["--config", "/not-opened.json"] + (["--reader-background"] if background else [])
+                with patch.object(hooks.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(self.encoded(event)))), \
+                        patch.object(hooks, "_config", side_effect=hooks.HookError("private exception text")), \
+                        patch.object(hooks, "handle_event") as handler, \
+                        redirect_stdout(output), redirect_stderr(errors):
+                    self.assertEqual(hooks.main(args), 0)
+                result = json.loads(output.getvalue())
+                if name == "SessionStart" and not background:
+                    self.assertEqual(result, {"systemMessage": "Automatic memory temporarily disabled."})
+                else:
+                    self.assertEqual(result, {})
+                self.assertNotIn("private exception text", output.getvalue())
+                self.assertEqual(errors.getvalue(), "")
+                handler.assert_not_called()
+
+    def test_explicit_checkpoint_failure_remains_nonzero_and_visible(self):
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(hooks, "_config", side_effect=hooks.HookError("invalid hook config schema")), \
+                redirect_stdout(output), redirect_stderr(errors):
+            status = hooks.main(["checkpoint", "--config", "/not-opened.json",
+                                 "--session-id", "session", "--turn-id", "turn", "--outcome", "none"])
+        self.assertEqual(status, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("Mneme checkpoint failed: invalid hook config schema", errors.getvalue())
+
+    def test_popup_diagnostics_are_tiny_and_reason_codes_do_not_echo_input(self):
+        self.assertEqual(hooks._warning(), {"systemMessage": "Automatic memory temporarily disabled."})
+        self.assertEqual(hooks._input_warning("wire_limit"),
+                         {"systemMessage": "Memory event skipped (wire_limit)."})
+        self.assertEqual(hooks._input_warning("private exception text"),
+                         {"systemMessage": "Memory event skipped (invalid_event)."})
+        output, errors = io.StringIO(), io.StringIO()
+        event = self.event("SessionStart", source="resume")
+        with patch.object(hooks.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(self.encoded(event)))), \
+                patch.object(hooks, "_config", side_effect=hooks.ProjectFocusError("private details")), \
+                redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(hooks.main(["--config", "/not-opened.json"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), hooks._warning())
+        self.assertEqual(errors.getvalue(), "Memory policy invalid: check .mneme/hippocampus.md.\n")
+
     def test_large_root_tool_body_projects_metadata_and_reaches_delivery(self):
         for size in (70_000, 4_640_000):
             event = self.event(tool_response={"private_tool_result": "x" * size},
@@ -1032,7 +1107,7 @@ class HookInputTests(unittest.TestCase):
         for raw, reason in cases:
             with self.subTest(reason=reason, size=len(raw)):
                 result, errors, config, handler = self.run_main(raw)
-                self.assertIn(f"omitted ({reason})", result["systemMessage"])
+                self.assertIn(f"skipped ({reason})", result["systemMessage"])
                 self.assertNotIn("unavailable", result["systemMessage"])
                 self.assertNotIn("private_secret", result["systemMessage"])
                 self.assertEqual(errors, "")
@@ -1051,9 +1126,9 @@ class HookInputTests(unittest.TestCase):
             result, errors, config, handler = self.run_main(at_limit + b" ", background=background)
             if background:
                 self.assertEqual(result, {})
-                self.assertIn("omitted (wire_limit)", errors)
+                self.assertIn("skipped (wire_limit)", errors)
             else:
-                self.assertIn("omitted (wire_limit)", result["systemMessage"])
+                self.assertIn("skipped (wire_limit)", result["systemMessage"])
             config.assert_not_called()
             handler.assert_not_called()
 
@@ -1198,3 +1273,208 @@ class ConditionalDisplayTests(unittest.TestCase):
         self.assertEqual(packed["context"], baseline["context"])
         self.assertEqual([c["id"] for c in packed["cards"]], [c["id"] for c in baseline["cards"]])
         self.assertTrue(all("conditional_binding" not in row for row in packed["displayed"]))
+
+
+class LegacyHookStateUpgradeTests(unittest.TestCase):
+    """Named installed v1 checkpoint shape, not a reader/recording-ledger reset.
+
+    Reference: episodic-checkpoint-20260928-fda5cbd4395e/lib/hooks.py,
+    SHA256 fda5cbd4395eb4417bdeaeb5615723a4d5e6d1e4b851b0cfa6d65519916e1c85.
+    The retained fixture uses that writer's field sets, including older entries
+    without recall metadata. The actual installed writer was separately checked
+    against a disposable promoted copy of the current 92-turn session ledger.
+    """
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name)
+        self.config = {"state_dir": self.state, "memory_scope": "project"}
+        self.session = "session_legacy"
+        self.path = hooks._state_path(self.state, self.session)
+        now = time.time()
+        turns = {}
+        for index in range(92):
+            outcome = "captured" if index < 49 else "none" if index < 77 else "deferred" if index < 79 else None
+            turns[f"turn_{index}"] = {
+                "at": 1 if index == 0 else now + 86400 if index == 1 else now,
+                "prompt_sha256": hashlib.sha256(str(index).encode()).hexdigest(),
+                "prompt_bytes": index + 1,
+                "checkpoint": None if outcome is None else {"outcome": outcome,
+                    "ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"] if outcome == "captured" else []},
+                "continued": index % 2 == 0,
+                **({"continuation_token": "c" * 32} if index % 2 == 0 else {}),
+                **({"recall": {"outcome": "skipped", "elapsed_ms": None,
+                    "card_ids": [], "fingerprints": []}} if index < 78 else {})}
+        self.legacy = {"schema": hooks.LEGACY_STATE_SCHEMA, "turns": turns,
+                       "context_epoch": 7, "seen_ids": ["old-note"], "seen_fingerprints": ["old-fingerprint"]}
+        # _finalize_recall in the named installed v1 writes this optional field.
+        self.legacy["turns"]["turn_2"]["recall"].update(outcome="ok", elapsed_ms=1.5, overflow_dropped=0)
+        self.raw = (json.dumps(self.legacy, indent=2) + "\n").encode()
+        self.path.write_bytes(self.raw)
+
+    def backups(self):
+        directory = self.path.with_suffix(".v1-preimage")
+        return list(directory.iterdir()) if directory.exists() else []
+
+    def admit(self, scope="project"):
+        hooks._admit_async_state({**self.config, "memory_scope": scope}, self.session)
+
+    def test_project_and_workshop_schema_only_exact_backup_and_idempotence(self):
+        for scope in ("project", "workshop"):
+            with self.subTest(scope=scope):
+                self.path.write_bytes(self.raw)
+                self.admit(scope)
+                promoted = json.loads(self.path.read_bytes())
+                self.assertEqual(promoted, {**self.legacy, "schema": hooks.STATE_SCHEMA})
+                backup, = self.backups()
+                self.assertEqual(backup.name, hashlib.sha256(self.raw).hexdigest() + ".json")
+                self.assertEqual(backup.read_bytes(), self.raw)
+                before, backup_stat = self.path.read_bytes(), backup.stat().st_mtime_ns
+                with patch.object(hooks, "_atomic_write_raw", side_effect=AssertionError("repeat write")):
+                    self.admit(scope)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(backup.stat().st_mtime_ns, backup_stat)
+
+    def test_first_nonreset_boundary_preserves_old_turns_and_other_ledgers(self):
+        untouched = []
+        for name in ("reader", "recording"):
+            directory = self.state / name
+            directory.mkdir()
+            ledger = directory / self.path.name
+            ledger.write_bytes(b'{"usage_unknown":true,"write_intent":"retain-verbatim"}')
+            untouched.append((ledger, ledger.read_bytes()))
+        worker = SimpleNamespace(consume=lambda *_: {"outcome": "empty", "cards": []})
+        event = {"hook_event_name": "PostToolUse", "session_id": self.session, "turn_id": "turn_current"}
+        with patch.object(hooks, "_reader_worker", return_value=worker), patch.object(hooks, "_recording_jobs") as recorder:
+            self.assertEqual(hooks._handle_async(event, self.config), {})
+            recorder.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_bytes()), {**self.legacy, "schema": hooks.STATE_SCHEMA})
+        for path, before in untouched:
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_absent_current_and_misc_do_not_infer_or_replace_anything(self):
+        before = list(self.state.iterdir())
+        with self.assertRaises(hooks.HookError):
+            self.admit("misc")
+        self.assertEqual(self.path.read_bytes(), self.raw)
+        self.assertEqual(list(self.state.iterdir()), before)
+        current = {**self.legacy, "schema": hooks.STATE_SCHEMA}
+        self.path.write_text(json.dumps(current))
+        raw = self.path.read_bytes()
+        self.admit("misc")
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.path.unlink()
+        self.admit()
+        self.assertEqual(list(self.state.iterdir()), [])
+
+    def test_unknown_malformed_and_ambiguous_json_refuse_before_sidecars_or_calls(self):
+        cases = [b'{broken', b'[]', b'{"schema":"future","turns":{}}',
+                 b'{"schema":"mneme.codex-hooks.state.v1","turns":{},"turns":{}}']
+        for field, value in (("at", float("nan")), ("at", True), ("at", float("inf")),
+                             ("checkpoint", {"outcome": "captured", "ids": []}), ("continued", 1)):
+            legacy = copy.deepcopy(self.legacy)
+            legacy["turns"]["turn_0"][field] = value
+            cases.append(json.dumps(legacy).encode())
+        legacy = copy.deepcopy(self.legacy); legacy["workspace_binding"] = "do-not-infer"
+        cases.append(json.dumps(legacy).encode())
+        legacy = copy.deepcopy(self.legacy); legacy["seen_ids"] = ["\ud800"]
+        cases.append(json.dumps(legacy).encode())
+        for raw in cases:
+            with self.subTest(raw=raw[:70]):
+                self.path.write_bytes(raw)
+                with patch.object(hooks, "_reader_worker") as worker, patch.object(hooks, "_recording_jobs") as recorder:
+                    result = hooks._handle_async({"hook_event_name": "SessionStart", "source": "resume",
+                        "session_id": self.session}, self.config)
+                    self.assertEqual(result, {"systemMessage": "Automatic memory temporarily disabled."})
+                    worker.assert_not_called(); recorder.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), raw)
+                self.assertEqual(list(self.state.iterdir()), [self.path])
+
+    def test_shared_lock_busy_then_latest_legacy_preimage_and_old_writer_refusal(self):
+        lock = self.path.with_suffix(".lock")
+        with lock.open("a+b") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(hooks.HookError, "busy"):
+                self.admit()
+            self.assertEqual(self.path.read_bytes(), self.raw)
+            self.assertEqual(self.backups(), [])
+            # Genuine old writer ordering: lock, read/check v1, mutate, replace.
+            latest = json.loads(self.path.read_bytes())
+            self.assertEqual(latest["schema"], hooks.LEGACY_STATE_SCHEMA)
+            latest["turns"]["turn_91"]["checkpoint"] = {"outcome": "deferred", "ids": []}
+            hooks._atomic_write(self.path, latest)
+        latest_raw = self.path.read_bytes()
+        self.admit()
+        self.assertEqual(self.backups()[0].read_bytes(), latest_raw)
+        promoted = self.path.read_bytes()
+        with lock.open("a+b") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            # Exact installed v1 reader/writer guard (reference hash above).
+            data = hooks._bounded_json(self.path, hooks.MAX_STATE)
+            with self.assertRaises(hooks.HookError):
+                if not isinstance(data, dict) or data.get("schema") != hooks.LEGACY_STATE_SCHEMA or not isinstance(data.get("turns"), dict):
+                    raise hooks.HookError("invalid hook state schema")
+        self.assertEqual(self.path.read_bytes(), promoted)
+        hooks._with_state(self.state, self.session, lambda data, _: (None, False))
+        self.assertEqual(self.path.read_bytes(), promoted)
+
+    def test_backup_and_publication_failure_are_recoverable_without_replay(self):
+        with patch.object(hooks, "_atomic_write_raw", side_effect=OSError("backup unavailable")):
+            with self.assertRaises(OSError):
+                self.admit()
+        self.assertEqual(self.path.read_bytes(), self.raw)
+        self.assertEqual(self.backups(), [])
+        with patch.object(hooks, "_atomic_write", side_effect=OSError("publication unavailable")):
+            with self.assertRaises(OSError):
+                self.admit()
+        self.assertEqual(self.path.read_bytes(), self.raw)
+        self.assertEqual(self.backups()[0].read_bytes(), self.raw)
+        # Retry reuses the exact preimage rather than overwriting its history.
+        self.admit()
+        self.assertEqual(len(self.backups()), 1)
+        self.assertEqual(json.loads(self.path.read_bytes()), {**self.legacy, "schema": hooks.STATE_SCHEMA})
+
+    def test_conflicting_or_linked_preimage_refuses_without_overwrite(self):
+        directory = self.path.with_suffix(".v1-preimage")
+        directory.mkdir()
+        foreign = directory / ("f" * 64 + ".json")
+        foreign.write_bytes(b'preserve')
+        with self.assertRaisesRegex(hooks.HookError, "conflicting"):
+            self.admit()
+        self.assertEqual(foreign.read_bytes(), b'preserve')
+        self.assertEqual(self.path.read_bytes(), self.raw)
+        foreign.unlink()
+        expected = directory / (hashlib.sha256(self.raw).hexdigest() + ".json")
+        expected.symlink_to(self.path)
+        with self.assertRaises(hooks.HookError):
+            self.admit()
+        self.assertEqual(self.path.read_bytes(), self.raw)
+        expected.unlink(); directory.rmdir()
+        directory.symlink_to(self.state, target_is_directory=True)
+        with self.assertRaises(hooks.HookError):
+            self.admit()
+        self.assertEqual(self.path.read_bytes(), self.raw)
+
+    def test_retry_finishes_backup_durability_after_replace_before_fsync_failure(self):
+        real_fsync = hooks.os.fsync
+        calls = []
+        def fail_backup_directory(descriptor):
+            calls.append(descriptor)
+            if len(calls) == 2:  # raw file fsync succeeded; backup-dir fsync failed.
+                raise OSError("backup directory durability unavailable")
+            real_fsync(descriptor)
+        with patch.object(hooks.os, "fsync", side_effect=fail_backup_directory):
+            with self.assertRaises(OSError):
+                self.admit()
+        self.assertEqual(self.path.read_bytes(), self.raw)
+        backup, = self.backups()
+        self.assertEqual(backup.read_bytes(), self.raw)
+        synced = []
+        def observe_fsync(descriptor):
+            synced.append(hooks.os.fstat(descriptor).st_ino)
+            real_fsync(descriptor)
+        with patch.object(hooks.os, "fsync", side_effect=observe_fsync):
+            self.admit()
+        self.assertIn(backup.stat().st_ino, synced)
+        self.assertIn(backup.parent.stat().st_ino, synced)
+        self.assertEqual(json.loads(self.path.read_bytes()), {**self.legacy, "schema": hooks.STATE_SCHEMA})

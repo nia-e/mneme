@@ -48,6 +48,13 @@ fn run_with_timeout(frames: &[Value], endpoint: &str, timeout: &str) -> (Vec<Val
 
 fn protocol_fixture(
     catalog: Value,
+    call: impl FnMut(&Value, &Value) -> Option<Value> + Send + 'static,
+) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+    protocol_fixture_sessions(vec![catalog], call)
+}
+
+fn protocol_fixture_sessions(
+    catalogs: Vec<Value>,
     mut call: impl FnMut(&Value, &Value) -> Option<Value> + Send + 'static,
 ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
     use std::{
@@ -64,6 +71,7 @@ fn protocol_fixture(
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut calls = Vec::new();
+        let mut session = 0;
         loop {
             assert!(Instant::now() < deadline, "episode fixture was not closed");
             let mut stream = match listener.accept() {
@@ -113,9 +121,10 @@ fn protocol_fixture(
             let result = match method {
                 "initialize" => json!({
                     "protocolVersion":"2025-11-25", "serverInfo":{"name":"mneme-mcp"},
-                    "_mneme_client":{"expected_db_id":999},
+                    "_mneme_client":{"expected_db_id":999,"owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true}},
+                    "owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true},
                 }),
-                "tools/list" => catalog.clone(),
+                "tools/list" => catalogs[session].clone(),
                 "tools/call" => {
                     let arguments = &request["params"]["arguments"];
                     calls.push(arguments.clone());
@@ -138,12 +147,129 @@ fn protocol_fixture(
             };
             stream.write_all(response.as_bytes()).unwrap();
             if close {
-                break;
+                session += 1;
+                if session == catalogs.len() {
+                    break;
+                }
             }
         }
         calls
     });
     (endpoint, server)
+}
+
+fn tag_capability_catalog(strong: bool) -> Value {
+    let mut retag = mneme_app::retag::input_schema();
+    retag["properties"]["db"] = json!({"type":"string"});
+    retag["properties"]["expected_db_id"] = guard_schema();
+    retag["required"] = json!(["db", "expected_db_id", "id", "expected_tags", "tags"]);
+    let mut list = mneme_app::list::list_input_schema();
+    list["properties"]["db"] = json!({"type":"string"});
+    list["properties"]["expected_db_id"] = guard_schema();
+    for branch in list["oneOf"].as_array_mut().unwrap() {
+        branch["properties"]["db"] = json!({"type":"string"});
+        branch["properties"]["expected_db_id"] = guard_schema();
+    }
+    if !strong {
+        for field in ["expected_content_fingerprint", "guard_nodes"] {
+            retag["properties"].as_object_mut().unwrap().remove(field);
+        }
+        retag.as_object_mut().unwrap().remove("dependentRequired");
+        list["properties"]["kind"]["enum"] = json!(["nodes", "touchstones"]);
+        list["properties"].as_object_mut().unwrap().remove("prefix");
+        list["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|branch| branch["properties"]["kind"]["const"] != "tags");
+    }
+    json!({"tools":[{"name":"retag","inputSchema":retag},{"name":"list","inputSchema":list},{"name":"status","inputSchema":{"type":"object","properties":{}}}]})
+}
+
+#[test]
+fn owner_capabilities_are_local_checked_catalog_facts_not_initialize_claims() {
+    let mut malformed = tag_capability_catalog(true);
+    malformed["tools"][0]["inputSchema"]["properties"]["guard_nodes"]["maxItems"] = json!(0);
+    malformed["tools"][1]["inputSchema"]["oneOf"][2]["properties"]["limit"]["maximum"] = json!(0);
+    let mut retag_only = tag_capability_catalog(true);
+    retag_only["tools"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tool| tool["name"] != "list");
+    let mut tags_only = tag_capability_catalog(true);
+    tags_only["tools"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tool| tool["name"] != "retag");
+    for (catalog, retag, tags) in [
+        (json!({"tools":[]}), false, false),
+        (tag_capability_catalog(false), false, false),
+        (malformed, false, false),
+        (retag_only, true, false),
+        (tags_only, false, true),
+        (tag_capability_catalog(true), true, true),
+    ] {
+        let (endpoint, server) = protocol_fixture(catalog, |_, _| {
+            panic!("connect metadata must not call tools")
+        });
+        let (responses, stderr) = run_with_timeout(
+            &[json!({"id":1,"op":"connect"}), json!({"id":2,"op":"close"})],
+            &endpoint,
+            "1000",
+        );
+        assert!(stderr.is_empty());
+        assert_eq!(responses[0]["ok"], true, "{}", responses[0]);
+        assert_eq!(
+            responses[0]["_mneme_client"],
+            json!({"expected_db_id":1,"save":1,"concern":1,"owner_capabilities":{"retag_content_guards":retag,"tag_vocabulary":tags}})
+        );
+        assert_eq!(
+            responses[0]["result"]["_mneme_client"]["owner_capabilities"],
+            json!({"retag_content_guards":true,"tag_vocabulary":true})
+        );
+        assert!(responses[1].get("_mneme_client").is_none());
+        assert!(server.join().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn owner_capabilities_are_refreshed_after_disconnection_and_reconnect() {
+    for initially_supported in [false, true] {
+        let (endpoint, server) = protocol_fixture_sessions(
+            vec![
+                tag_capability_catalog(initially_supported),
+                tag_capability_catalog(!initially_supported),
+            ],
+            |name, _| {
+                assert_eq!(name, "status");
+                None // Lost read response closes the first session, never retries it.
+            },
+        );
+        let (responses, _) = run_with_timeout(
+            &[
+                json!({"id":1,"op":"connect"}),
+                json!({"id":2,"op":"tools/call","name":"status","arguments":{}}),
+                json!({"id":3,"op":"connect"}),
+                json!({"id":4,"op":"close"}),
+            ],
+            &endpoint,
+            "1000",
+        );
+        assert_eq!(responses[0]["ok"], true);
+        assert_eq!(responses[1]["ok"], false);
+        assert!(responses[1].get("_mneme_client").is_none());
+        assert_eq!(responses[2]["ok"], true, "{}", responses[2]);
+        for field in ["retag_content_guards", "tag_vocabulary"] {
+            assert_eq!(
+                responses[0]["_mneme_client"]["owner_capabilities"][field],
+                initially_supported
+            );
+            assert_eq!(
+                responses[2]["_mneme_client"]["owner_capabilities"][field],
+                !initially_supported
+            );
+        }
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
 }
 
 #[test]

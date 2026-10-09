@@ -11,6 +11,7 @@ import tomllib
 from unittest.mock import patch
 
 import install
+from install_test_support import InstallFixture
 
 
 class InstallTests(unittest.TestCase):
@@ -27,6 +28,8 @@ class InstallTests(unittest.TestCase):
         current = self.plan()
         old = copy.deepcopy(current)
         old["config_revision"] = 19
+        old.pop("tag_stewardship", None)
+        old.pop("tag_guide_id", None)
         old["files"] = old["files"][:len(install.V19_DESTINATIONS)]
         old["plan_sha256"] = install.plan_hash(old)
         install.validate_plan(old)
@@ -35,20 +38,15 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(install.config_outputs(old, before), install.config_outputs(current, before))
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        fixture = InstallFixture()
+        self.temp = fixture.temp
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name).resolve()
-        self.project = self.base / 'project space'
-        self.project.mkdir()
-        self.prefix = self.base / 'runtime'
-        self.sources = self.base / 'sources'
-        self.sources.mkdir()
-        for name in ['mnemed', 'mneme-mcp', *install.PROGRAMS]:
-            p = self.sources / name
-            p.write_text('# fixture, never executed\n')
-            p.chmod(0o700)
+        for name in ("base", "project", "prefix", "sources"):
+            setattr(self, name, getattr(fixture, name))
 
     def historic(self, plan):
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         plan.pop('librarian_effort', None)
         plan['files'] = plan['files'][:len(install.V13_DESTINATIONS)]
         if plan.get('recall_mode') == 'async':
@@ -88,7 +86,7 @@ class InstallTests(unittest.TestCase):
         original_state = state_path.read_bytes()
         with patch("service._probe") as probe, patch("service.subprocess.Popen") as spawn:
             plan = self.existing_plan(path)
-            self.assertEqual(plan["config_revision"], 21)
+            self.assertEqual(plan["config_revision"], install.EXISTING_SERVICE_REVISION)
             self.assertEqual(plan["existing_service_config"]["config"], owner)
             install.apply(plan)
             probe.assert_not_called()
@@ -127,7 +125,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["status"], "prepared")
         prepared = json.loads(output.read_text())
         install.validate_plan(prepared)
-        self.assertEqual(prepared["config_revision"], 21)
+        self.assertEqual(prepared["config_revision"], install.EXISTING_SERVICE_REVISION)
         self.assertFalse(self.prefix.exists())
         self.assertFalse((self.project / ".codex").exists())
 
@@ -202,6 +200,11 @@ class InstallTests(unittest.TestCase):
 
     def test_revision20_receipt_outputs_and_uninstall_remain_unchanged(self):
         plan = self.plan()
+        plan["config_revision"] = 20
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
+        plan["files"] = plan["files"][:len(install.V20_DESTINATIONS)]
+        plan["plan_sha256"] = install.plan_hash(plan)
         self.assertEqual(plan["config_revision"], 20)
         self.assertNotIn("existing_service_config", plan)
         originals = {"config.toml": None, "hooks.json": None}
@@ -234,7 +237,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(list(self.project.iterdir()), [])
         self.assertFalse(self.prefix.exists())
         self.assertEqual(plan['project_db'], str(self.project / '.mneme/codex-memory.db'))
-        self.assertEqual(plan['config_revision'], 20)
+        self.assertEqual(plan['config_revision'], install.CONFIG_REVISION)
         self.assertEqual(plan['recording_mode'], 'off')
         self.assertEqual(plan['recall_mode'], 'reminder')
         self.assertIsNone(plan['shadow_model'])
@@ -280,6 +283,8 @@ class InstallTests(unittest.TestCase):
     def test_rev5_receipt_shape_remains_known_but_old_plan_cannot_apply(self):
         plan = self.plan()
         plan['config_revision'] = 5
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['files'] = plan['files'][:9]  # No library wrapper, shadow, or async helpers.
         plan.pop('shadow_model')
@@ -295,6 +300,8 @@ class InstallTests(unittest.TestCase):
     def test_rev6_output_retains_exact_legacy_tools_and_cannot_apply(self):
         plan = self.plan()
         plan['config_revision'] = 6
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['files'] = plan['files'][:10]
         plan.pop('shadow_model')
@@ -316,6 +323,8 @@ class InstallTests(unittest.TestCase):
         plan = self.plan()
         result = install.apply(plan)
         plan['config_revision'] = 6
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['files'] = plan['files'][:10]
         plan.pop('shadow_model')
@@ -339,6 +348,8 @@ class InstallTests(unittest.TestCase):
         result = install.apply(current)
         old = copy.deepcopy(current)
         old['config_revision'] = 7
+        old.pop("tag_stewardship", None)
+        old.pop("tag_guide_id", None)
         self.historic(old)
         old['files'] = old['files'][:10]
         old.pop('shadow_model')
@@ -363,6 +374,8 @@ class InstallTests(unittest.TestCase):
         result = install.apply(current)
         old = copy.deepcopy(current)
         old['config_revision'] = 8
+        old.pop("tag_stewardship", None)
+        old.pop("tag_guide_id", None)
         self.historic(old)
         old['files'] = old['files'][:11]
         old.pop('reader_model')
@@ -385,6 +398,8 @@ class InstallTests(unittest.TestCase):
     def test_rev8_pending_recovers_original_shadow_output(self):
         old = self.shadow_plan()
         old['config_revision'] = 8
+        old.pop("tag_stewardship", None)
+        old.pop("tag_guide_id", None)
         self.historic(old)
         old['files'] = old['files'][:11]
         old.pop('reader_model')
@@ -431,6 +446,8 @@ class InstallTests(unittest.TestCase):
                     self.historic(old)
                 else:
                     old['config_revision'] = revision
+                    old.pop("tag_stewardship", None)
+                    old.pop("tag_guide_id", None)
                     self.historic(old)
                 old['plan_sha256'] = install.plan_hash(old)
                 install.validate_plan(old)
@@ -512,7 +529,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(plan['librarian_effort'], 'medium')
         self.assertEqual(plan['reader_model'], 'gpt-6.1-sol')
         self.assertIn('lib/target_policy.py', [row['destination'] for row in plan['files']])
-        self.assertEqual(plan['files'][-1]['destination'], 'lib/hook_launcher.py')
+        self.assertEqual(plan['files'][-1]['destination'], 'lib/stewardship_contract.py')
         for effort in ('low', 'medium', 'high'):
             altered = copy.deepcopy(plan); altered['librarian_effort'] = effort
             altered['plan_sha256'] = install.plan_hash(altered)
@@ -535,6 +552,8 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         old = copy.deepcopy(plan)
         old['config_revision'] = 14
+        old.pop("tag_stewardship", None)
+        old.pop("tag_guide_id", None)
         old['files'] = old['files'][:len(install.V14_DESTINATIONS)]
         old['plan_sha256'] = install.plan_hash(old)
         install.validate_plan(old)
@@ -596,6 +615,7 @@ class InstallTests(unittest.TestCase):
             'memory_mode': 'async',
             'reader_model': 'gpt-6.1-sol',
             'librarian_effort': 'medium', 'recording_mode': 'off',
+            'tag_stewardship': False, 'tag_guide_id': None,
             'reader_codex': str((self.sources / 'codex').resolve()),
             'reader_codex_sha256': plan['reader_codex']['sha256'],
         })
@@ -645,6 +665,8 @@ class InstallTests(unittest.TestCase):
         end.append({'hooks': [{'type': 'command', 'command': command + ' --reader-background',
                                'timeout': 5, 'async': True}]})
         plan['config_revision'] = 17
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         plan['files'] = plan['files'][:len(install.V19_DESTINATIONS)]
         plan['plan_sha256'] = install.plan_hash(plan)
         prior = install.config_outputs(plan, original)
@@ -663,7 +685,8 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(plan['recording_mode'], 'automatic')
         names = ('turn_observer.py', 'rollout_primitives.py',
                  'recording_contract.py', 'recording_jobs.py', 'routing_memory.py', 'routing_contract.py', 'librarian_policy.py', 'touchstone_contract.py', 'target_policy.py',
-                 'misc_binding.py', 'misc_config.py', 'hook_launcher.py')
+                 'misc_binding.py', 'misc_config.py', 'hook_launcher.py', 'tag_config.py',
+                 'tag_context.py', 'stewardship.py', 'stewardship_contract.py')
         self.assertEqual([row['destination'] for row in plan['files'][-len(names):]],
                          ['lib/' + name for name in names])
         result = install.apply(plan)
@@ -728,6 +751,8 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         result = install.apply(plan)
         plan['config_revision'] = 9
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['files'] = plan['files'][:len(install.V9_DESTINATIONS)]
         plan['plan_sha256'] = install.plan_hash(plan)
@@ -756,6 +781,8 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         result = install.apply(plan)
         plan['config_revision'] = 10
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['files'] = plan['files'][:len(install.V10_DESTINATIONS)]
         plan['plan_sha256'] = install.plan_hash(plan)
@@ -776,6 +803,8 @@ class InstallTests(unittest.TestCase):
     def test_revision9_pending_recovers_original_async_output(self):
         plan = self.async_plan()
         plan['config_revision'] = 9
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['files'] = plan['files'][:len(install.V9_DESTINATIONS)]
         plan.pop('recording_mode')
@@ -797,6 +826,8 @@ class InstallTests(unittest.TestCase):
         current = install.config_outputs({**plan, 'config_revision':17}, before)
         old = copy.deepcopy(plan)
         old['config_revision'] = 11
+        old.pop("tag_stewardship", None)
+        old.pop("tag_guide_id", None)
         self.historic(old)
         old['plan_sha256'] = install.plan_hash(old)
         output = install.config_outputs(old, before)
@@ -819,6 +850,8 @@ class InstallTests(unittest.TestCase):
         current = install.config_outputs({**plan, 'config_revision':17}, before)
         old = copy.deepcopy(plan)
         old['config_revision'] = 12
+        old.pop("tag_stewardship", None)
+        old.pop("tag_guide_id", None)
         self.historic(old)
         old['plan_sha256'] = install.plan_hash(old)
         output = install.config_outputs(old, before)
@@ -839,6 +872,8 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         result = install.apply(plan)
         plan['config_revision'] = 11
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['plan_sha256'] = install.plan_hash(plan)
         output = install.config_outputs(plan, {'config.toml': None, 'hooks.json': None})
@@ -856,6 +891,8 @@ class InstallTests(unittest.TestCase):
     def test_revision11_pending_recovers_original_bytes_without_save(self):
         plan = self.async_plan(recording_mode='automatic')
         plan['config_revision'] = 11
+        plan.pop("tag_stewardship", None)
+        plan.pop("tag_guide_id", None)
         self.historic(plan)
         plan['plan_sha256'] = install.plan_hash(plan)
         output = install.config_outputs(plan, {'config.toml': None, 'hooks.json': None})
@@ -944,6 +981,8 @@ class InstallTests(unittest.TestCase):
             self.historic(old_plan)
         else:
             old_plan['config_revision'] = revision
+            old_plan.pop("tag_stewardship", None)
+            old_plan.pop("tag_guide_id", None)
             self.historic(old_plan)
         old_plan['plan_sha256'] = install.plan_hash(old_plan)
         legacy = install.config_outputs(old_plan, originals)
@@ -961,6 +1000,8 @@ class InstallTests(unittest.TestCase):
         result = install.apply(original)
         old_plan = copy.deepcopy(original)
         old_plan['config_revision'] = 3
+        old_plan.pop("tag_stewardship", None)
+        old_plan.pop("tag_guide_id", None)
         self.historic(old_plan)
         old_plan.pop('recall_mode')
         old_plan['files'] = old_plan['files'][:7]
@@ -1003,6 +1044,8 @@ class InstallTests(unittest.TestCase):
         result = install.apply(plan)
         old_plan = copy.deepcopy(plan)
         old_plan['config_revision'] = 2
+        old_plan.pop("tag_stewardship", None)
+        old_plan.pop("tag_guide_id", None)
         self.historic(old_plan)
         old_plan['files'] = old_plan['files'][:6]
         old_plan.pop('shadow_model')
@@ -1028,6 +1071,8 @@ class InstallTests(unittest.TestCase):
         result = install.apply(plan)
         old_plan = copy.deepcopy(plan)
         old_plan['config_revision'] = 3
+        old_plan.pop("tag_stewardship", None)
+        old_plan.pop("tag_guide_id", None)
         self.historic(old_plan)
         old_plan['files'] = old_plan['files'][:7]
         old_plan.pop('shadow_model')
@@ -1055,6 +1100,8 @@ class InstallTests(unittest.TestCase):
                     plan.pop('config_revision')
                 else:
                     plan['config_revision'] = revision
+                    plan.pop("tag_stewardship", None)
+                    plan.pop("tag_guide_id", None)
                     self.historic(plan)
                 plan['files'] = plan['files'][:7]
                 plan.pop('shadow_model')

@@ -29,7 +29,7 @@ MAX_PROJECTS = 64
 MAX_SCOPE_BYTES = 8192
 MAX_CONTEXT_BYTES = 18 * 1024
 MAX_CHILD_OUTPUT = 2 * (MAX_SCOPE_BYTES + 1)
-WALL_TIMEOUT = 4.0
+WALL_TIMEOUT = 12.0
 SOURCES = {"startup", "resume", "clear", "compact"}
 
 
@@ -183,15 +183,32 @@ def _collect_scope(target, deadline):
         raise ValueError("configured token unavailable")
     while time.monotonic() < deadline:
         try:
-            # Five exchanges: initialize, initialized, catalog, core, DELETE.
-            # The parent is the authoritative aggregate wall-clock deadline.
-            timeout = min(0.25, max(0.001, (deadline - time.monotonic()) / 5))
-            with McpClient(config.url, token=token, timeout=timeout) as client:
+            # Native connect groups process startup and MCP initialization/
+            # catalog discovery. Give it the remaining scope deadline, not an
+            # obsolete per-HTTP-exchange slice. Later requests share that same
+            # deadline; the parent still bounds the entire collector process.
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                break
+            client = McpClient(config.url, token=token, timeout=timeout)
+            try:
+                client.connect()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                client.timeout = remaining
                 if not _expected_catalog(config, client.call_tool("databases", {})):
                     raise ValueError("unexpected single-store catalog")
-                if time.monotonic() >= deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
+                client.timeout = remaining
                 return _pack(target, core(client, db=target["db"], max_body_bytes=8192))
+            finally:
+                # Close sends a native cleanup request too. It must not reuse
+                # connect's allowance after the scope has spent that time.
+                client.timeout = max(0.001, deadline - time.monotonic())
+                client.close()
         except McpTransportError:
             # A parallel MCP launcher may not have reached readiness yet. Never
             # turn an unavailable passive read into authority to start a host.
@@ -256,7 +273,7 @@ def _read_sections(raw, targets):
 def collect_core(targets, timeout=WALL_TIMEOUT):
     """Collect only configured stores, with a killable, no-host-spawn reader."""
     if not _valid_timeout(timeout):
-        raise ValueError("timeout must be finite and in (0, 4]")
+        raise ValueError("timeout must be finite and in (0, %g]" % WALL_TIMEOUT)
     payload = _json({"targets": targets, "timeout": timeout}).encode("utf-8")
     raw = b""
     try:

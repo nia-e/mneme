@@ -30,7 +30,7 @@ pub(crate) fn list_tool_schema() -> Value {
     }
     json!({
         "name":"list",
-        "description":"Browse bounded indexed canonical node inventory (default kind nodes, status all), or native touchstone notes (kind touchstones). Pass opaque next_cursor back as after, keeping status/tag unchanged; empty filtered pages may still continue. Nodes are canonical-ID ascending, include exact historical episode editions, and report summary truncation, work and partial coverage. db selects one database; an omitted db uses the unambiguous configured read default, never a private global fallback. Use get for complete records. No body reads, learning or model calls.",
+        "description":"Browse bounded indexed nodes (default kind nodes), semantic tag vocabulary (kind tags), or native touchstone notes (kind touchstones). Nodes/tags default to status all. Tags accept an exact optional prefix, return bounded examples and exact/lower_bound/unavailable count status, and exclude episodes. Pass opaque next_cursor back as after without changing kind/status/tag/prefix; empty filtered pages may still continue. Pages are not transaction snapshots and report work and partial coverage. Nodes are canonical-ID ascending and include exact historical episode editions. db selects one database; an omitted db uses the configured read default, never a private global fallback. Use get for complete records. No body reads, learning or model calls.",
         "inputSchema":schema,
     })
 }

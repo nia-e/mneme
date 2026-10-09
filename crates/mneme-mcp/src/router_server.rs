@@ -158,27 +158,31 @@ struct Route {
     binding: Binding,
     policy: CapabilityPolicy,
     tools: Vec<Value>,
-    save_support: SaveSupport,
+    request_support: RequestSupport,
     session: Mutex<Option<Session>>,
     timeouts: ClientTimeouts,
 }
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
-struct SaveSupport {
+struct RequestSupport {
     note: bool,
     episode: bool,
     note_links: bool,
     episode_links: bool,
+    retag_content_guards: bool,
+    list_tags: bool,
 }
-impl SaveSupport {
+impl RequestSupport {
     fn from_client(client: &RemoteClient) -> Self {
         Self {
             note: client.supports_save_kind("note"),
             episode: client.supports_save_kind("episode"),
             note_links: client.supports_save_links("note"),
             episode_links: client.supports_save_links("episode"),
+            retag_content_guards: client.supports_retag_content_guards(),
+            list_tags: client.supports_list_tags(),
         }
     }
-    fn admits(self, args: &Value) -> bool {
+    fn admits_save(self, args: &Value) -> bool {
         let kind = args.get("kind").and_then(Value::as_str).unwrap_or("note");
         match kind {
             "note" => self.note && (args.get("links").is_none() || self.note_links),
@@ -248,7 +252,7 @@ impl Route {
     async fn connect(
         &self,
         options: &ConnectionOptions,
-    ) -> Result<(Session, Vec<Value>, CapabilityPolicy, SaveSupport), AnyErr> {
+    ) -> Result<(Session, Vec<Value>, CapabilityPolicy, RequestSupport), AnyErr> {
         let mut flight = InFlight(Some(Session {
             url: options.url.clone(),
             token_env: options.token_env.clone(),
@@ -279,12 +283,12 @@ impl Route {
             false,
         );
         let tools = catalog::ordinary_catalog(client, policy)?;
-        let save_support = SaveSupport::from_client(client);
+        let request_support = RequestSupport::from_client(client);
         Ok((
             flight.0.take().expect("checked session"),
             tools,
             policy,
-            save_support,
+            request_support,
         ))
     }
     async fn verify(
@@ -364,10 +368,26 @@ impl Route {
             return Err("mutations require explicit db; no operation was sent".into());
         }
         self.policy.authorize(prepared.kind()).map_err(|_|"this database does not authorize the requested operation/action; no operation was sent")?;
-        if name == "save" && !self.save_support.admits(&args) {
+        if name == "save" && !self.request_support.admits_save(&args) {
             return Err(
                 "save kind/links are not advertised for this database; no operation was sent"
                     .into(),
+            );
+        }
+        if prepared
+            .prepared_retag
+            .as_ref()
+            .is_some_and(|request| request.inner.requires_content_guards())
+            && !self.request_support.retag_content_guards
+        {
+            return Err(
+                "retag content guards are not advertised for this database; no operation was sent"
+                    .into(),
+            );
+        }
+        if name == "list" && args["kind"] == "tags" && !self.request_support.list_tags {
+            return Err(
+                "tag vocabulary is not advertised for this database; no operation was sent".into(),
             );
         }
         if !catalog::advertises_action(&self.tools, name, &args) {
@@ -434,8 +454,8 @@ impl Route {
             }
         }
         if guard.is_none() {
-            let (mut session, tools, policy, save_support) = self.connect(&options).await?;
-            if tools != self.tools || policy != self.policy || save_support != self.save_support {
+            let (mut session, tools, policy, request_support) = self.connect(&options).await?;
+            if tools != self.tools || policy != self.policy || request_support != self.request_support {
                 session.client.close().await;
                 return Err(
                     "upstream tool/profile contract changed; restart router to review it".into(),
@@ -585,14 +605,14 @@ impl RouterServer {
                 binding,
                 policy: CapabilityPolicy::new(CapabilityProfile::ReadOnly, false),
                 tools: Vec::new(),
-                save_support: SaveSupport::default(),
+                request_support: RequestSupport::default(),
                 session: Mutex::new(None),
                 timeouts,
             };
             let initialized = tokio::time::timeout_at(deadline, async {
                 let replica = route.resolve(None)?;
                 let options = route.options(replica.as_ref());
-                let (session, tools, policy, save_support) = route.connect(&options).await?;
+                let (session, tools, policy, request_support) = route.connect(&options).await?;
                 let mut flight = InFlight(Some(session));
                 route
                     .verify(
@@ -602,7 +622,7 @@ impl RouterServer {
                     .await?;
                 route.tools = tools;
                 route.policy = policy;
-                route.save_support = save_support;
+                route.request_support = request_support;
                 *route.session.get_mut() = flight.0.take();
                 Ok::<(), AnyErr>(())
             })

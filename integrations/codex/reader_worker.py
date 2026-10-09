@@ -966,6 +966,45 @@ def _recording_account(config, session_id, key, result):
     return bool(ok and settled)
 
 
+def _stewardship_matches(config, session_id, data, expected=None):
+    current = (data["generation"], data["context_generation"], data["epoch"], data["fence"])
+    return (expected is None or current == expected) and _fence(config, session_id) == data["fence"]
+
+
+def _stewardship_snapshot(config, session_id):
+    def snapshot(data):
+        if (data.get("pending") is not None or data.get("inflight") is not None
+                or data.get("reservation") is not None or data["unknown_usage"]
+                or not _stewardship_matches(config, session_id, data)):
+            return None, False
+        return (data["generation"], data["context_generation"], data["epoch"], data["fence"]), False
+    ok, value = _state(config, session_id, snapshot, create=False)
+    return value if ok else None
+
+
+def _stewardship_idle(config, session_id, expected=None):
+    """Foreground notice, reset and interrupt fence a prior maintenance batch."""
+    current = _stewardship_snapshot(config, session_id)
+    return current is not None and (expected is None or current == expected)
+
+
+def _stewardship_reserve(config, session_id, key, expected=None):
+    def reserve(data):
+        budget = resolve(config)
+        if (data.get("pending") is not None or data.get("inflight") is not None
+                or data.get("reservation") is not None or data["unknown_usage"]
+                or not _stewardship_matches(config, session_id, data, expected)
+                or data["attempts"] + 2 > budget.attempts
+                or data["input_tokens"] + budget.stewardship_prompt_bytes > budget.input_tokens - budget.selector_room_input_tokens
+                or data["output_tokens"] + budget.stewardship_answer_bytes > budget.output_tokens - budget.selector_room_output_tokens):
+            return False, False
+        data["attempts"] += 1
+        data["reservation"] = {"recording": key}
+        return True, True
+    ok, admitted = _state(config, session_id, reserve, create=False)
+    return bool(ok and admitted)
+
+
 def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle_seconds: float = IDLE_SECONDS) -> None:
     """Worker loop. Tests inject a fake runtime; production imports it lazily."""
     if not isinstance(session_id, str) or not ID.fullmatch(session_id):
@@ -995,6 +1034,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
         last_activity = time.monotonic()
         generation = None
         runtime_context = None
+        next_stewardship = 0.0
         while time.monotonic() - last_activity < idle_seconds:
             def take(data):
                 nonlocal generation
@@ -1062,6 +1102,20 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                         if job == "end" and recording_jobs.has_work(config, session_id):
                             time.sleep(.05)
                             continue
+                if time.monotonic() >= next_stewardship and config.get("tag_stewardship") is True:
+                    import stewardship
+                    next_stewardship = time.monotonic() + resolve(config).native_seconds
+                    maintenance_fence = _stewardship_snapshot(config, session_id)
+                    if stewardship.enabled(config) and maintenance_fence is not None:
+                        if runtime is None:
+                            scratch = _directory(config) / ("scratch-" + hashlib.sha256(session_id.encode()).hexdigest()[:16])
+                            runtime = runtime_factory(config, scratch)
+                        # Opportunistic existing lifecycle only; no daemon and
+                        # maintenance does not extend the worker's idle lifetime.
+                        stewardship.step(config, session_id, runtime,
+                            lambda key: _stewardship_reserve(config, session_id, key, maintenance_fence),
+                            lambda key, result: _recording_account(config, session_id, key, result),
+                            allowed=lambda: _stewardship_idle(config, session_id, maintenance_fence))
                 if job == "end":
                     break
             if job is None:

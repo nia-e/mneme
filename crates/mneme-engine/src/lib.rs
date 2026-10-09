@@ -3645,6 +3645,27 @@ impl Memory {
             .await
     }
 
+    /// Read the owner's indexed observed semantic tag vocabulary without inference.
+    pub async fn tag_vocabulary_page(
+        &self,
+        request: &mneme_core::ports::TagVocabularyRequest,
+    ) -> Result<mneme_core::ports::TagVocabularyPage> {
+        self.graph.tag_vocabulary_page(request).await
+    }
+
+    /// Atomically fence classifier decisions against target and guide content.
+    pub async fn compare_replace_node_tags_guarded(
+        &self,
+        id: NodeId,
+        expected: &mneme_core::BoundedTagSet,
+        replacement: &mneme_core::BoundedTagSet,
+        guards: &mneme_core::ports::RetagContentGuards,
+    ) -> Result<Node> {
+        self.graph
+            .compare_replace_node_tags_guarded(id, expected, replacement, guards)
+            .await
+    }
+
     pub async fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
         self.graph.get_node(id).await
     }

@@ -39,6 +39,8 @@ class LibrarianBudget:
     recording_hint_bytes = property(lambda self: self.selector_prompt_bytes)
     routing_prompt_bytes = property(lambda self: min(self.selector_prompt_bytes, 12 * 1024))
     routing_answer_bytes = property(lambda self: min(self.selector_answer_bytes, 4096))
+    stewardship_prompt_bytes = property(lambda self: self.selector_prompt_bytes)
+    stewardship_answer_bytes = property(lambda self: self.selector_answer_bytes)
     native_seconds = property(lambda self: self._value(2))
     native_read_bytes = property(lambda self: self._value(3))
     attempts = property(lambda self: self._value(4))

@@ -36,6 +36,7 @@ mnemed list --tag rust --limit 64
 | Read one memory | `get ID`; `body ID` for body pages |
 | Record an event | `save --kind episode "scene"` |
 | Browse stored nodes | `list`; `neighbors ID` for links |
+| Browse observed tag names | `list --tags` |
 | Browse visually | `tui` |
 | Review pending work | `status`, then `reconcile` or `merges` |
 
@@ -118,7 +119,16 @@ servers or opening stores. An entry is configuration, not proof of reachability.
 `--user`, `--remote URL` and `stores --config PATH` restrict that inventory.
 It does not support `--db`/`MNEME_DB`.
 
-`list [--status active|archived] [--tag TAG] [--limit N] [--after CURSOR]`
+`mnemed --json get ID` and MCP `get` inspect one exact record. Current owners
+return the complete canonical summary, up to 16 KiB of UTF-8; MCP reports
+`summary_truncated: false`. JSON results also include `content_fingerprint` and
+`content_fingerprint_codec` for [guarded tag edits](#guard-content-used-to-choose-tags).
+Older owners may still truncate summaries: inspect `summary_truncated` before
+treating a response as complete. This does not widen presentation cards: MCP
+`core` and `query` summaries remain capped at 2 KiB, node inventory at 1 KiB, and
+recall-context output at its own budget. Body ranges remain separate and bounded.
+
+`list [--status active|archived|all] [--tag TAG] [--limit N] [--after CURSOR]`
 returns nodes in canonical ID order, not relevance or newest-first order.
 It defaults to all statuses and 50 cards, with a maximum of 64. Historical episode
 editions are included. Follow `next_cursor` with unchanged filters, even when a
@@ -263,6 +273,44 @@ For people, use `people`, an established exact handle/name when they are a
 substantial subject, and useful role/team filters. Dates and qualified membership
 claims belong in prose. There is no special person node or mandatory tag taxonomy.
 
+### Browse observed vocabulary
+
+`list --tags` browses distinct indexed tag names, not nodes with a matching tag.
+MCP uses `list` with `kind: "tags"`. It covers semantic notes only, excluding
+episode tags; the result is observed vocabulary, not a canonical taxonomy.
+
+```sh
+mnemed --json list --tags --prefix rust --status active --limit 32
+```
+
+```text
+list {db:"project", expected_db_id:"<verified database ID>",
+      kind:"tags", prefix:"rust", status:"active", limit:32}
+```
+
+The prefix is optional, exact and case-sensitive; an empty prefix selects all
+names. Status is `active`, `archived` or `all` (the default). Pages contain up to
+50 names by default, with a maximum of 64, in ascending tag order. Each item has
+`name`, `count` and `examples` (up to three node IDs). Examples are bounded samples,
+not ranked representatives. Interpret `count.status` explicitly:
+
+- `exact`: `value` is the observed membership count for the selected status.
+- `lower_bound`: `value` is a known minimum, not a total.
+- `unavailable`: no count is supplied; this does not mean zero.
+
+Pass `next_cursor` unchanged as CLI `--after` or MCP `after`, keeping the same
+database, prefix and status. Continue until the cursor is null, even when a
+filtered page is empty. Cursors bind that selection and database identity, not a
+snapshot; concurrent changes may require a fresh pass.
+
+`has_more` describes continuation. `partial` is also true when any returned count
+is not exact, so it can remain true with no next cursor. `coverage.counts_complete`
+says whether all counts on this page are exact. Each call permits at most
+256 indexed name/status seeks and 4,096 membership rows, with a 128 KiB response allowance;
+`coverage` reports the work and stopping reason. No full-node scan, body loading,
+inference or learning is performed. `--tags` cannot be combined with the node
+filter `--tag` or with `--touchstones`.
+
 ### Open possibilities are ordinary notes
 
 Use `possibility` for an open idea or question. State the question in the summary,
@@ -309,7 +357,46 @@ Configured owners supply the database guard; explicit `--remote` needs
 `--expected-db-id`. Stale tags refuse: read again before deciding on a new edit.
 This checks current values, not monotonic history; a change away and back can make
 an old expected set match again. Lost acknowledgements are ambiguous, not permission
-to replay blindly. Old owners and read-only copies refuse without fallback.
+to replay blindly. Owners lacking checked retag and read-only copies refuse without
+fallback.
+
+### Guard content used to choose tags
+
+If a tag decision depends on a note's meaning or a policy guide, keep the
+`content_fingerprint` from each full GET and add the optional content guards:
+
+```sh
+mnemed --json get NODE_ID
+mnemed --json get GUIDE_ID
+mnemed retag NODE_ID --expected-tags rust --tags rust,concurrency \
+  --expected-content-fingerprint TARGET_FINGERPRINT \
+  --guard-node GUIDE_ID=GUIDE_FINGERPRINT
+```
+
+```text
+retag {db:"project", expected_db_id:"<verified database ID>",
+       id:"<node ID>", expected_tags:["rust"], tags:["rust","concurrency"],
+       expected_content_fingerprint:"<target content_fingerprint>",
+       guard_nodes:[{id:"<guide ID>", content_fingerprint:"<guide content_fingerprint>"}]}
+```
+
+The backend checks expected tags, target fingerprint and all guard nodes in the
+same write snapshot. Stale fingerprints or missing guard nodes refuse even a
+no-op; a separate GET preflight does not replace this atomic check. Guard nodes must be
+distinct semantic notes in the same database, with a maximum of 1,024; archived
+notes are allowed. Repeat `--guard-node` for additional guards. `guard_nodes`
+requires `expected_content_fingerprint`, but the target guard can be used alone.
+
+Fingerprints are opaque lowercase SHA-256 values with a reported codec. They bind
+canonical content, including tags and the body reference, not mutable external
+body bytes, lifecycle status or learning counters. Use the complete canonical
+summary as guide text, not body bytes. These are current-content guards, not a
+monotonic edit history or proof that an ambiguously acknowledged write committed.
+
+Omitting the new fields retains tag-only compare-and-replace. Native clients check
+the owner's advertised support before sending strong guards; an older owner may
+support tag-only edits but cannot silently receive an unguarded substitute. Profile
+requirements and the successful reply shape are unchanged.
 
 ## Edit a note body in place
 

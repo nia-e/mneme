@@ -18,8 +18,10 @@ pub mod episode;
 pub use episode::*;
 pub mod managed;
 pub mod ports;
+pub mod retag;
 pub mod touchstone;
 pub use touchstone::*;
+pub mod tag_vocabulary;
 pub mod tagged;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

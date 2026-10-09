@@ -58,6 +58,30 @@ class HookLauncherTests(unittest.TestCase):
         self.assertEqual(list((self.base / "state").glob("*.json")),
                          [hooks._state_path(self.base / "state", "session")])
 
+    def test_misc_old_ledger_binding_failure_warns_only_at_session_entry(self):
+        state = self.base / "state"
+        state.mkdir()
+        path = hooks._state_path(state, "session")
+        raw = json.dumps({"schema": "mneme.codex-hooks.state.v1", "turns": {}})
+        path.write_text(raw)
+        with patch("hooks._handle_async") as lifecycle, \
+                patch("hooks._reader_worker") as worker, patch("hooks._recording_jobs") as recorder:
+            for name, fields in (("SessionStart", {"source": "resume"}),
+                                 ("UserPromptSubmit", {}), ("PostToolUse", {}),
+                                 ("Stop", {}), ("Interrupt", {}), ("SessionEnd", {})):
+                for background in (False, True):
+                    result = hook_launcher.handle_event({**self.event, "hook_event_name": name, **fields},
+                                                        self.path, reader_background=background)
+                    if name == "SessionStart" and not background:
+                        self.assertEqual(result, {"systemMessage": "Automatic memory temporarily disabled."})
+                    else:
+                        self.assertEqual(result, {})
+            lifecycle.assert_not_called()
+            worker.assert_not_called()
+            recorder.assert_not_called()
+        self.assertEqual(path.read_text(), raw)
+        self.assertEqual(list(state.glob("*.json")), [path])
+
     def test_main_uses_shared_wire_projection_before_misc_owner_selection(self):
         event = {**self.event, "hook_event_name": "PostToolUse", "transcript_path": None,
                  "tool_response": {"private_tool_result": "x" * 4_640_000}}
@@ -69,6 +93,27 @@ class HookLauncherTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), {"delivery": "metadata"})
         projected = handler.call_args.args[0]
         self.assertEqual(projected, {key: value for key, value in event.items() if key in hooks.LIFECYCLE_FIELDS})
+
+    def test_main_owner_failure_uses_session_entry_only_recovery_warning(self):
+        for name, fields in (("SessionStart", {"source": "resume"}),
+                             ("UserPromptSubmit", {"prompt": "Review source"}),
+                             ("PostToolUse", {}), ("Stop", {}),
+                             ("SessionEnd", {})):
+            for background in (False, True):
+                output, errors = io.StringIO(), io.StringIO()
+                raw = json.dumps({**self.event, "hook_event_name": name, **fields}).encode()
+                args = ["--config", str(self.path)] + (["--reader-background"] if background else [])
+                with patch.object(hook_launcher.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw))), \
+                        patch.object(hook_launcher, "handle_event", side_effect=ValueError("private exception")), \
+                        redirect_stdout(output), redirect_stderr(errors):
+                    self.assertEqual(hook_launcher.main(args), 0)
+                result = json.loads(output.getvalue())
+                if name == "SessionStart" and not background:
+                    self.assertEqual(result, {"systemMessage": "Automatic memory temporarily disabled."})
+                else:
+                    self.assertEqual(result, {})
+                self.assertNotIn("private exception", output.getvalue())
+                self.assertEqual(errors.getvalue(), "")
 
     def test_main_ignored_child_and_denied_wire_do_not_select_or_load_owner(self):
         for raw, reason in ((json.dumps({**self.event, "agent_id": "child", "tool_response": "x" * 70_000}).encode(), None),
@@ -87,7 +132,7 @@ class HookLauncherTests(unittest.TestCase):
                 if reason is None or background:
                     self.assertEqual(result, {})
                 else:
-                    self.assertIn(f"omitted ({reason})", result["systemMessage"])
+                    self.assertIn(f"skipped ({reason})", result["systemMessage"])
                     self.assertNotIn("unavailable", result["systemMessage"])
                 handler.assert_not_called()
                 choose.assert_not_called()
@@ -120,7 +165,7 @@ class HookLauncherTests(unittest.TestCase):
                 if reason is None:
                     self.assertEqual(output, {})
                 else:
-                    self.assertIn(f"omitted ({reason})", output["systemMessage"])
+                    self.assertIn(f"skipped ({reason})", output["systemMessage"])
                     self.assertNotIn("unavailable", output["systemMessage"])
                 self.assertEqual(result.stderr, b"")
 
@@ -186,7 +231,7 @@ class HookLauncherTests(unittest.TestCase):
             hook_launcher.handle_event(self.event, self.path)
             result = hook_launcher.handle_event({**self.event, "cwd": str(other)}, self.path)
         self.assertEqual(lifecycle.call_count, 1)
-        self.assertIn("unavailable", result["systemMessage"])
+        self.assertEqual(result, {})
 
     def test_recording_off_keeps_misc_reader_and_never_calls_recorder(self):
         self.static["recording_mode"] = "off"

@@ -984,7 +984,16 @@ pub(crate) async fn run(args: ClientArgs) -> Result<(), AnyErr> {
             // Local NDJSON envelope, deliberately outside the remote result.
             // An old bridge cannot acquire this capability by forwarding a
             // server-supplied field with the same name during initialize.
-            reply["_mneme_client"] = json!({"expected_db_id": 1, "save": 1, "concern": 1});
+            let remote = client
+                .as_ref()
+                .expect("successful connect retains its owner");
+            reply["_mneme_client"] = json!({
+                "expected_db_id": 1, "save": 1, "concern": 1,
+                "owner_capabilities": {
+                    "retag_content_guards": remote.supports_retag_content_guards(),
+                    "tag_vocabulary": remote.supports_list_tags(),
+                }
+            });
         }
         let mut encoded = serde_json::to_vec(&reply)?;
         if encoded.len() > MAX_RESPONSE {

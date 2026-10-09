@@ -799,6 +799,154 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn tag_vocabulary_and_content_guards_stay_bound_to_the_selected_owner() {
+        let mut legacy_tools = crate::tool_schemas(CapabilityPolicy::operator());
+        let retag = legacy_tools
+            .iter_mut()
+            .find(|tool| tool["name"] == "retag")
+            .unwrap();
+        for field in ["expected_content_fingerprint", "guard_nodes"] {
+            retag["inputSchema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+        }
+        retag["inputSchema"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dependentRequired");
+        let list = legacy_tools
+            .iter_mut()
+            .find(|tool| tool["name"] == "list")
+            .unwrap();
+        list["inputSchema"]["properties"]["kind"]["enum"] = json!(["nodes", "touchstones"]);
+        list["inputSchema"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("prefix");
+        list["inputSchema"]["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|branch| branch["properties"]["kind"]["const"] != "tags");
+        let legacy = Mock::with_catalog(ID, CapabilityProfile::Operator, legacy_tools).await;
+        let current = Mock::new(ID, CapabilityProfile::Operator).await;
+        let router = server(
+            config(
+                vec![
+                    owner("legacy", legacy.port, ID),
+                    owner("current", current.port, ID),
+                ],
+                "legacy",
+            ),
+            Path::new("."),
+        )
+        .await;
+        let catalog = router.dispatch("tools/list", json!({})).await.unwrap();
+        let schema = |name| {
+            catalog["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap()["inputSchema"]
+                .clone()
+        };
+        let mut guarded = json!({"db":"legacy","expected_db_id":ID,"id":ID,"expected_tags":[],"tags":["people"],"expected_content_fingerprint":"a".repeat(64),"guard_nodes":[{"id":OTHER_ID,"content_fingerprint":"b".repeat(64)}]});
+        let tags = json!({"db":"legacy","kind":"tags","prefix":"People","status":"all","limit":1});
+        assert!(!crate::tests::schema_accepts(&schema("retag"), &guarded));
+        assert!(!crate::tests::schema_accepts(&schema("list"), &tags));
+        let before = legacy.wire_count();
+        assert_eq!(
+            call(&router, "retag", guarded.clone()).await["isError"],
+            true
+        );
+        assert_eq!(call(&router, "list", tags.clone()).await["isError"], true);
+        assert_eq!(
+            legacy.wire_count(),
+            before,
+            "legacy refusals must precede identity probes and tool submission"
+        );
+        // Existing tag-only callers remain supported on the old owner.
+        let weak = json!({"db":"legacy","expected_db_id":ID,"id":ID,"expected_tags":[],"tags":[]});
+        assert!(crate::tests::schema_accepts(&schema("retag"), &weak));
+        assert_ne!(call(&router, "retag", weak).await["isError"], true);
+        guarded["db"] = json!("current");
+        assert!(crate::tests::schema_accepts(&schema("retag"), &guarded));
+        assert_ne!(
+            call(&router, "retag", guarded.clone()).await["isError"],
+            true
+        );
+        let mut tags = tags;
+        tags["db"] = json!("current");
+        assert!(crate::tests::schema_accepts(&schema("list"), &tags));
+        assert_ne!(call(&router, "list", tags.clone()).await["isError"], true);
+        let forwarded = current.state.calls.lock().unwrap();
+        assert_eq!(forwarded.len(), 2);
+        assert_eq!(
+            forwarded[0].0["arguments"]["expected_content_fingerprint"],
+            guarded["expected_content_fingerprint"]
+        );
+        assert_eq!(
+            forwarded[0].0["arguments"]["guard_nodes"],
+            guarded["guard_nodes"]
+        );
+        assert_eq!(forwarded[1].0["arguments"]["kind"], "tags");
+        assert_eq!(forwarded[1].0["arguments"]["prefix"], "People");
+        drop(forwarded);
+        router.close().await;
+    }
+
+    #[tokio::test]
+    async fn malformed_strong_or_branch_only_tag_catalog_is_not_published() {
+        let mut tools = crate::tool_schemas(CapabilityPolicy::operator());
+        let retag = tools
+            .iter_mut()
+            .find(|tool| tool["name"] == "retag")
+            .unwrap();
+        retag["inputSchema"]["properties"]["guard_nodes"]["maxItems"] = json!(0);
+        let list = tools
+            .iter_mut()
+            .find(|tool| tool["name"] == "list")
+            .unwrap();
+        // A tags branch is still an advertisement even without its root enum.
+        list["inputSchema"]["properties"]["kind"]
+            .as_object_mut()
+            .unwrap()
+            .remove("enum");
+        list["inputSchema"]["oneOf"][2]["properties"]["limit"]["maximum"] = json!(0);
+        let mock = Mock::with_catalog(ID, CapabilityProfile::Operator, tools).await;
+        let router = server(
+            config(vec![owner("memory", mock.port, ID)], "memory"),
+            Path::new("."),
+        )
+        .await;
+        let catalog = router.dispatch("tools/list", json!({})).await.unwrap();
+        assert!(
+            !catalog["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "retag" || tool["name"] == "list")
+        );
+        let before = mock.wire_count();
+        assert_eq!(
+            call(&router, "list", json!({"db":"memory","kind":"tags"})).await["isError"],
+            true
+        );
+        assert_eq!(
+            call(
+                &router,
+                "retag",
+                json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_tags":[],"tags":[]})
+            )
+            .await["isError"],
+            true
+        );
+        assert_eq!(mock.wire_count(), before);
+        router.close().await;
+    }
+
+    #[tokio::test]
     async fn older_save_contract_is_denied_from_cached_discovery_before_any_wire() {
         let mut tools =
             crate::tool_schemas(CapabilityPolicy::new(CapabilityProfile::Operator, false));

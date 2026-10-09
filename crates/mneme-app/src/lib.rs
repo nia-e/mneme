@@ -12,6 +12,7 @@ pub mod graph_view;
 pub mod list;
 pub mod neighbors;
 pub mod save;
+mod tag_vocabulary;
 pub mod touchstone;
 pub use context::{
     ContextObservation, ContextWindow, ObservedContext, prepare_context_window, recall_context,

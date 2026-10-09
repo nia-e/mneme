@@ -1,6 +1,7 @@
 //! Shared bounded canonical inventory. This is not ranked semantic retrieval:
 //! exact historical episode editions are included, with no head substitution.
 //! Cursors bind the database, selection and upper key, not a transaction snapshot.
+use crate::tag_vocabulary::PreparedTagList;
 use crate::touchstone::PreparedTouchstoneList;
 use mneme_core::{Node, NodeId, NodeStatus};
 use mneme_engine::Memory;
@@ -61,6 +62,7 @@ fn default_limit() -> usize {
 pub enum PreparedList {
     Nodes(PreparedNodeList),
     Touchstones(PreparedTouchstoneList),
+    Tags(PreparedTagList),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -98,6 +100,9 @@ impl PreparedList {
         if object.get("kind").and_then(Value::as_str) == Some("touchstones") {
             return Ok(Self::Touchstones(PreparedTouchstoneList::parse(raw)?));
         }
+        if object.get("kind").and_then(Value::as_str) == Some("tags") {
+            return Ok(Self::Tags(PreparedTagList::parse(raw)?));
+        }
         for name in ["kind", "status", "tag", "after", "limit"] {
             if object.get(name).is_some_and(Value::is_null) {
                 return Err(format!("list {name} must not be null").into());
@@ -105,7 +110,7 @@ impl PreparedList {
         }
         let input: PreparedNodeList = serde_json::from_value(raw.clone())?;
         if input.kind != "nodes" {
-            return Err("list kind must be nodes or touchstones".into());
+            return Err("list kind must be nodes, touchstones or tags".into());
         }
         if !(1..=MAX_LIST_LIMIT).contains(&input.limit) {
             return Err(format!("nodes list limit must be 1..={MAX_LIST_LIMIT}").into());
@@ -131,6 +136,7 @@ impl PreparedList {
     pub fn into_json(self) -> Value {
         match self {
             Self::Touchstones(input) => input.into_json(),
+            Self::Tags(input) => input.into_json(),
             Self::Nodes(input) => {
                 let mut value = json!({"kind":"nodes","status":input.status,"limit":input.limit});
                 if let Some(tag) = input.tag {
@@ -148,6 +154,7 @@ impl PreparedList {
         match self {
             Self::Touchstones(input) => input.run(mem, db_id).await,
             Self::Nodes(input) => input.run(mem, db_id).await,
+            Self::Tags(input) => input.run(mem, db_id).await,
         }
     }
 }
@@ -283,14 +290,16 @@ pub fn list_input_schema() -> Value {
             "tag":{"type":"string","minLength":1,"maxLength":mneme_core::MAX_TAG_BYTES},
             "after":{"type":"string","minLength":1,"maxLength":MAX_CURSOR_BYTES},
             "limit":{"type":"integer","minimum":1,"maximum":MAX_LIST_LIMIT,"default":DEFAULT_LIST_LIMIT}
-        }}, touchstones
+        }}, touchstones, crate::tag_vocabulary::input_schema()
     ]});
     // Keep the closed root property catalog for clients which discover fields
     // without traversing oneOf; branch closure still rejects node-only filters
     // on touchstone requests.
     schema["properties"] = schema["oneOf"][0]["properties"].clone();
     schema["properties"]["kind"] =
-        json!({"type":"string","enum":["nodes","touchstones"],"default":"nodes"});
+        json!({"type":"string","enum":["nodes","touchstones","tags"],"default":"nodes"});
+    schema["properties"]["prefix"] = schema["oneOf"][2]["properties"]["prefix"].clone();
+    schema["properties"]["after"] = schema["oneOf"][2]["properties"]["after"].clone();
     schema
 }
 

@@ -21,6 +21,7 @@ import reader_worker
 from reader_contract import PROMPT_PREFIX
 from reader_runtime import ReaderRuntime
 from librarian_policy import resolve
+from reader_test_support import PublicationHandoff
 from test_hook_recall import FakeClient, ID1, ID2, ID3, ID4, ID5, ID6, ID7, discovery_metadata, reference_origin
 
 
@@ -126,15 +127,14 @@ class EpisodeReaderFlowTests(unittest.TestCase):
                     with (patch("hook_recall.McpClient", return_value=client),
                           patch.object(ReaderRuntime, "_start", start),
                           patch.object(ReaderRuntime, "_request", request),
-                          patch.object(ReaderRuntime, "_next", lambda *_: notifications.pop(0))):
+                          patch.object(ReaderRuntime, "_next", lambda *_: notifications.pop(0)),
+                          PublicationHandoff(reader_worker, event["session_id"]) as handoff):
                         worker = threading.Thread(target=lambda: reader_worker.serve(
                             config, event["session_id"], runtime_factory=ReaderRuntime, idle_seconds=10))
                         worker.start()
                         try:
                             state_path, _ = reader_worker._paths(config, event["session_id"])
-                            deadline = time.monotonic() + 5
-                            while json.loads(state_path.read_text())["ready"] is None and time.monotonic() < deadline:
-                                time.sleep(.01)
+                            handoff.wait()
                             self.assertEqual(len(requests), 1)
                             self.assertEqual(notifications, [])
                             self.assertEqual([name for name, _ in client.calls],
@@ -170,6 +170,7 @@ class EpisodeReaderFlowTests(unittest.TestCase):
                             self.assertEqual(state["emitted"], [[wanted["id"], ready[0]["fingerprint"]]])
                         finally:
                             reader_worker.end_session(config, event["session_id"])
+                            handoff.finish()
                             worker.join(3)
                             self.assertFalse(worker.is_alive())
 

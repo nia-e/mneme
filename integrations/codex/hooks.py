@@ -12,15 +12,18 @@ binding. No hook registration or trust change is performed here.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
 import secrets
 import shlex
+import stat
 import sys
 import tempfile
 import time
@@ -42,6 +45,7 @@ CONFIG_SCHEMA_V9 = "mneme.codex-hooks.config.v9"
 CONFIG_SCHEMA_V10 = "mneme.codex-hooks.config.v10"
 CONFIG_SCHEMA_V11 = "mneme.codex-hooks.config.v11"
 STATE_SCHEMA = "mneme.codex-hooks.state.v2"
+LEGACY_STATE_SCHEMA = "mneme.codex-hooks.state.v1"
 MAX_STDIN = 64_000
 # Wire transport is not a prompt/model allowance. Tool results can be several
 # MiB; only the small lifecycle projection below survives admission. The stdlib
@@ -183,7 +187,9 @@ def _read_event(stream) -> dict[str, Any] | None:
 
 def _input_warning(reason: str) -> dict[str, str]:
     # All reasons are fixed local codes, never payload or parser exception text.
-    return {"systemMessage": f"Mneme lifecycle event omitted ({reason}); automatic memory delivery/recording for this event was not attempted. This does not establish store availability or an empty store. Continue normally; use explicit scoped recall if needed delivery cannot wait."}
+    if reason not in ("wire_depth", "wire_limit", "invalid_json", "invalid_event", "retained_limit"):
+        reason = "invalid_event"
+    return {"systemMessage": f"Memory event skipped ({reason})."}
 
 
 def _bounded_json(path: Path, limit: int, *, with_raw=False) -> Any:
@@ -252,6 +258,12 @@ def _config(path: Path, *, workspace_binding=None) -> dict[str, Any]:
             expected |= {"global_preferences"}
         if data["schema"] == CONFIG_SCHEMA_V11:
             expected |= {"memory_scope", "store_target", "excluded_roots", "workspace_binding"}
+        from tag_config import FIELDS as tag_fields, validate as validate_tag_config
+        expected |= set(data) & tag_fields
+        try:
+            validate_tag_config(data)
+        except ValueError as error:
+            raise HookError(str(error)) from error
         if data.get("recording_mode") not in ("off", "automatic"):
             raise HookError("invalid recording_mode")
         if data.get("memory_mode") != "async":
@@ -379,6 +391,10 @@ def _state_path(state_dir: Path, session_id: str) -> Path:
 
 def _atomic_write(path: Path, data: Any) -> None:
     raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode()
+    _atomic_write_raw(path, raw)
+
+
+def _atomic_write_raw(path: Path, raw: bytes) -> None:
     if len(raw) > MAX_STATE:
         raise HookError("hook state exceeds size limit")
     fd, name = tempfile.mkstemp(prefix=".mneme-hook-", dir=path.parent)
@@ -400,15 +416,28 @@ def _atomic_write(path: Path, data: Any) -> None:
             pass
 
 
-def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = True):
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+@contextmanager
+def _locked_state(state_dir: Path, session_id: str, *, blocking: bool = True, create: bool = True):
+    if create:
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = _state_path(state_dir, session_id)
     lock = path.with_suffix(".lock")
-    with lock.open("a+b") as file:
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+b") as file:
+        metadata = os.fstat(file.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise HookError("invalid hook state lock")
         try:
             fcntl.flock(file, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         except BlockingIOError as exc:
             raise HookError("hook state busy") from exc
+        if path.is_symlink() or path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
+            raise HookError("invalid hook state path")
+        yield path
+
+
+def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = True):
+    with _locked_state(state_dir, session_id, blocking=blocking) as path:
         if path.exists():
             data = _bounded_json(path, MAX_STATE)
             if not isinstance(data, dict) or data.get("schema") != STATE_SCHEMA or not isinstance(data.get("turns"), dict):
@@ -440,6 +469,128 @@ def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = Tr
         return result
 
 
+def _legacy_hook_state(raw: bytes) -> dict[str, Any]:
+    """Recognize the installed checkpoint/reminder v1 format without repairing it."""
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise HookError("duplicate legacy hook field")
+            value[key] = item
+        return value
+    def constant(_):
+        raise HookError("nonfinite legacy hook field")
+    try:
+        data = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise HookError("invalid legacy hook state") from error
+    def strings(value):
+        return (isinstance(value, list) and len(value) <= MAX_SEEN
+                and all(isinstance(item, str) and len(item) <= 160 for item in value))
+    def number(value):
+        try:
+            return type(value) in (int, float) and math.isfinite(value) and value >= 0
+        except OverflowError:
+            return False
+    if (not isinstance(data, dict) or data.get("schema") != LEGACY_STATE_SCHEMA
+            or set(data) - {"schema", "turns", "context_epoch", "seen_ids", "seen_fingerprints"}
+            or not isinstance(data.get("turns"), dict) or len(data["turns"]) > MAX_TURNS
+            or type(data.get("context_epoch", 0)) is not int or data.get("context_epoch", 0) < 0
+            or not strings(data.get("seen_ids", [])) or not strings(data.get("seen_fingerprints", []))
+            or len(data.get("seen_ids", [])) != len(data.get("seen_fingerprints", []))):
+        raise HookError("unsupported legacy hook state")
+    required = {"at", "prompt_sha256", "prompt_bytes", "checkpoint", "continued"}
+    for identifier, turn in data["turns"].items():
+        if (not _valid_id(identifier) or not isinstance(turn, dict)
+                or not required <= set(turn) or set(turn) - required - {"recall", "continuation_token"}
+                or not number(turn["at"]) or type(turn["prompt_bytes"]) is not int or turn["prompt_bytes"] < 0
+                or not isinstance(turn["prompt_sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", turn["prompt_sha256"]) is None
+                or type(turn["continued"]) is not bool
+                or "continuation_token" in turn and (not isinstance(turn["continuation_token"], str)
+                    or re.fullmatch(r"[0-9a-f]{32}", turn["continuation_token"]) is None)):
+            raise HookError("invalid legacy hook turn")
+        checkpoint = turn["checkpoint"]
+        if checkpoint is not None:
+            if (not isinstance(checkpoint, dict) or set(checkpoint) != {"outcome", "ids"}
+                    or checkpoint["outcome"] not in ("captured", "none", "deferred")
+                    or not isinstance(checkpoint["ids"], list) or len(checkpoint["ids"]) > 8
+                    or any(not isinstance(value, str) or ULID_RE.fullmatch(value) is None for value in checkpoint["ids"])
+                    or len(set(checkpoint["ids"])) != len(checkpoint["ids"])
+                    or bool(checkpoint["ids"]) != (checkpoint["outcome"] == "captured")):
+                raise HookError("invalid legacy checkpoint")
+        if "recall" in turn:
+            recall = turn["recall"]
+            fields = {"outcome", "elapsed_ms", "card_ids", "fingerprints"}
+            if (not isinstance(recall, dict) or not fields <= set(recall)
+                    or set(recall) - fields - {"overflow_dropped"}
+                    or not isinstance(recall["outcome"], str) or len(recall["outcome"]) > 160
+                    or recall["elapsed_ms"] is not None and not number(recall["elapsed_ms"])
+                    or "overflow_dropped" in recall and (type(recall["overflow_dropped"]) is not int or recall["overflow_dropped"] < 0)
+                    or not strings(recall["card_ids"]) or not strings(recall["fingerprints"])
+                    or len(recall["card_ids"]) != len(recall["fingerprints"])):
+                raise HookError("invalid legacy recall")
+    try:
+        promoted = json.dumps({**data, "schema": STATE_SCHEMA}, separators=(",", ":"),
+                              ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(promoted) > MAX_STATE:
+            raise HookError("promoted hook state exceeds size limit")
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise HookError("invalid legacy hook encoding") from error
+    return data
+
+
+def _legacy_preimage(path: Path, raw: bytes) -> None:
+    # One directory/one bounded raw preimage per session, not a recurring log.
+    # The filename binds the exact bytes; the directory binds the session path.
+    directory = path.with_suffix(".v1-preimage")
+    if directory.is_symlink():
+        raise HookError("invalid legacy backup path")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    backup = directory / (hashlib.sha256(raw).hexdigest() + ".json")
+    with os.scandir(directory) as entries:
+        first, second = next(entries, None), next(entries, None)
+    if second is not None or first is not None and first.name != backup.name:
+        raise HookError("conflicting legacy backup")
+    if first is not None:
+        if (backup.is_symlink() or not backup.is_file() or backup.stat().st_nlink != 1
+                or _bounded_json(backup, MAX_STATE, with_raw=True)[1] != raw):
+            raise HookError("invalid legacy backup")
+    else:
+        _atomic_write_raw(backup, raw)
+    # A prior attempt may have stopped after replace but before directory fsync.
+    # Reusing matching bytes must finish durability, not just check existence.
+    for durable in (backup, directory, path.parent):
+        descriptor = os.open(durable, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _admit_async_state(config: dict[str, Any], session_id: str) -> None:
+    path = _state_path(config["state_dir"], session_id)
+    if path.is_symlink() or path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
+        raise HookError("invalid prior hook state")
+    if not path.exists():
+        return  # A compatibility check alone never creates a session ledger.
+    data, raw = _bounded_json(path, MAX_STATE, with_raw=True)
+    if isinstance(data, dict) and data.get("schema") == STATE_SCHEMA:
+        return
+    if config.get("memory_scope") not in ("project", "workshop"):
+        raise HookError("unsupported legacy hook scope")
+    _legacy_hook_state(raw)  # Refuse unknown/torn state before creating sidecars.
+    with _locked_state(config["state_dir"], session_id, blocking=False, create=False) as path:
+        data, raw = _bounded_json(path, MAX_STATE, with_raw=True)
+        if isinstance(data, dict) and data.get("schema") == STATE_SCHEMA:
+            return
+        data = _legacy_hook_state(raw)
+        _legacy_preimage(path, raw)
+        # Deliberately separate from _with_state's ordinary TTL pruning/defaults.
+        # No context reset, paid allowance or old recording intent is replayed.
+        data["schema"] = STATE_SCHEMA
+        _atomic_write(path, data)
+
+
 def _context(event_name: str, message: str) -> dict[str, Any]:
     if len(message.encode("utf-8")) > MAX_CONTEXT_BYTES:
         raise HookError("hook context exceeds size limit")
@@ -447,7 +598,15 @@ def _context(event_name: str, message: str) -> dict[str, Any]:
 
 
 def _warning() -> dict[str, str]:
-    return {"systemMessage": "Mneme hook unavailable; memory was not checked or recorded. Continue normally and mention the gap if relevant."}
+    return {"systemMessage": "Automatic memory temporarily disabled."}
+
+
+def _lifecycle_failure(event: dict[str, Any] | None, *, background: bool = False) -> dict[str, str]:
+    # Report at session entry (including resume/compact), not every tool boundary.
+    # A second notification ledger would depend on the state that just failed.
+    if background or event is None or event.get("hook_event_name") != "SessionStart":
+        return {}
+    return _warning()
 
 
 def _memory_choice(config: dict[str, Any]) -> str:
@@ -991,16 +1150,12 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
     session_id = event.get("session_id")
     if not _valid_id(session_id):
         return {}
-    # A new async config does not authorize replacing a legacy session ledger
-    # or creating a new reader allowance for that same opaque session identity.
-    prior_path = _state_path(config["state_dir"], session_id)
+    # Only the known checkpoint ledger can be promoted. Paid reader/recording
+    # ledgers keep their existing identities, totals and ambiguous intents.
     try:
-        if prior_path.is_symlink():
-            raise HookError("invalid prior hook state")
-        if prior_path.exists() and _bounded_json(prior_path, MAX_STATE).get("schema") != STATE_SCHEMA:
-            return {} if background else _warning()
-    except (HookError, OSError, ValueError, AttributeError, TypeError):
-        return {} if background else _warning()
+        _admit_async_state(config, session_id)
+    except (HookError, OSError, ValueError, AttributeError, TypeError, RecursionError, OverflowError):
+        return _lifecycle_failure(event, background=background)
     if background:
         recording = config.get("recording_mode") == "automatic"
         if recording and name in ("Stop", "SessionEnd"):
@@ -1160,7 +1315,7 @@ def handle_event(event: Any, config: dict[str, Any], *, reader_background: bool 
                 return None, previous is None
             _with_state(config["state_dir"], event["session_id"], bind, blocking=False)
         except (ValueError, OSError, TypeError, HookError):
-            return {} if reader_background else _warning()
+            return _lifecycle_failure(event, background=reader_background)
     if config.get("schema") == CONFIG_SCHEMA_V9:
         from target_policy import workshop_policy
         try:
@@ -1308,6 +1463,7 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--workspace-binding", dest="checkpoint_workspace_binding",
                     help="internal checked misc workspace binding")
     args = parser.parse_args(argv)
+    event = None
     try:
         if (args.workspace_binding is not None and getattr(args, "checkpoint_workspace_binding", None) is not None
                 and args.workspace_binding != args.checkpoint_workspace_binding):
@@ -1343,12 +1499,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "checkpoint":
             print(f"Mneme checkpoint failed: {exc}", file=sys.stderr)
             return 1
-        if isinstance(exc, ProjectFocusError):
-            from recording_contract import MAX_PROJECT_FOCUS_BYTES
-            print("Mneme project capture policy refused: check the enrolled project's "
-                  f".mneme/hippocampus.md (regular UTF-8 text, at most {MAX_PROJECT_FOCUS_BYTES} bytes; "
-                  "no control characters or symlinks). Fix or remove the file, then reload.", file=sys.stderr)
-        print(json.dumps({} if args.reader_background else _warning()))
+        if (isinstance(exc, ProjectFocusError) and not args.reader_background
+                and event is not None and event.get("hook_event_name") == "SessionStart"):
+            print("Memory policy invalid: check .mneme/hippocampus.md.", file=sys.stderr)
+        print(json.dumps(_lifecycle_failure(event, background=args.reader_background)))
         return 0
 
 

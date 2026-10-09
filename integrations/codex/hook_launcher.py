@@ -35,6 +35,7 @@ def main(argv=None):
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--reader-background", action="store_true")
     args = parser.parse_args(argv)
+    event = None
     try:
         event = hooks._read_event(sys.stdin.buffer)
         result = ({} if event is None else
@@ -45,7 +46,7 @@ def main(argv=None):
             print(warning["systemMessage"], file=sys.stderr)
         result = {} if args.reader_background else warning
     except (hooks.HookError, OSError, ValueError, TypeError, RecursionError):
-        result = {} if args.reader_background else hooks._warning()
+        result = hooks._lifecycle_failure(event, background=args.reader_background)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

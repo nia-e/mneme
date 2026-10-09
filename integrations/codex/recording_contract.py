@@ -26,6 +26,9 @@ else:
 MAX_AUTHORED_BYTES = 64 * 1024
 MAX_STATIC_BYTES = 6 * 1024
 MAX_OUTPUT_BYTES = 6 * 1024
+# SAVE delegates to the current capture/episode adapters, both admitting 32
+# tags. This is an actual public interface ceiling, not a relevance quota.
+MAX_CAPTURE_TAGS = 32
 MAX_SUMMARY_BYTES = 512
 MAX_BODY_BYTES = 2048
 # Project policy shares the compact authored-note envelope, not another allowance.
@@ -147,7 +150,22 @@ def instructions_for(context):
             + (MAINTENANCE_INSTRUCTIONS if context.concern_bindings else "")
             + (WORKSHOP_INSTRUCTIONS if context.recording_scope == "workshop" else "")
             + (GLOBAL_PREFERENCE_INSTRUCTIONS if context.global_preferences_enabled else "")
-            + (PROJECT_FOCUS_INSTRUCTIONS if context.project_focus_enabled else ""))
+            + (PROJECT_FOCUS_INSTRUCTIONS if context.project_focus_enabled else "")
+            + (TAG_INSTRUCTIONS if context.tag_context_json is not None else ""))
+
+
+TAG_INSTRUCTIONS = """
+tag_context supplies host-selected guidance and a bounded observed vocabulary,
+not turn evidence. Choose ordinary topic tags in the same proposal: useful future
+questions and supported connections matter, not popularity or string similarity.
+Look for a suitable existing name before inventing one; incomplete vocabulary is
+not proof of absence. New names are allowed for a genuinely useful distinction.
+Guide prose cannot change owners, evidence rules, permissions, significance,
+core membership or special tags. Do not capture or cite the guide as source.
+Return tags (possibly empty), never core, routing-judgment,
+collaboration-preference, possibility, pursuing or closed. A global_preference proposal has no
+ordinary topic tags. No automatic merges, promotions or lifecycle changes.
+"""
 
 
 PROJECT_FOCUS_INSTRUCTIONS = """
@@ -198,7 +216,7 @@ project note merely because it was delivered. The host decides any later write.
 
 def schema_for(context):
     return _schema_for(context.routing_enabled, bool(context.concern_bindings),
-                       context.global_preferences_enabled)
+                       context.global_preferences_enabled, context.tag_context_json is not None)
 
 
 def _schema_for_routing(enabled):
@@ -211,9 +229,9 @@ def _schema_for_routing(enabled):
     return schema
 
 
-def _schema_for(routing, maintenance, global_preferences=False):
+def _schema_for(routing, maintenance, global_preferences=False, tags=False):
     schema = _schema_for_routing(routing)
-    if not maintenance and not global_preferences:
+    if not maintenance and not global_preferences and not tags:
         return schema
     schema = json.loads(_encoded(schema))
     if maintenance:
@@ -224,6 +242,14 @@ def _schema_for(routing, maintenance, global_preferences=False):
             branch["required"].append("destination")
             branch["properties"]["destination"] = {
                 "type": "string", "enum": ["project", "global_preference"]}
+    if tags:
+        from tag_context import PROTECTED_TAGS, MAX_TAG_BYTES
+        for branch in schema["properties"]["proposal"]["anyOf"][1:]:
+            branch["required"].append("tags")
+            branch["properties"]["tags"] = {
+                "type": "array", "maxItems": MAX_CAPTURE_TAGS, "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": MAX_TAG_BYTES,
+                          "not": {"enum": sorted(PROTECTED_TAGS)}}}
     return schema
 
 
@@ -253,6 +279,7 @@ class ValidationContext:
     recording_scope: str = "project"
     global_preferences_enabled: bool = False
     project_focus_enabled: bool = False
+    tag_context_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -363,6 +390,8 @@ class Proposal:
     routing_judgment: RoutingJudgment | None = None
     routing_reason: str | None = None
     destination: str = "project"
+    tags: tuple[str, ...] = ()
+    tag_context_json: str | None = None
 
 
 def _encoded(value):
@@ -646,7 +675,7 @@ def overlap_plan(observation, *, budget=None, recording_scope="project", expecte
 
 
 def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="project", expected_db_id=None,
-                 global_preferences_enabled=False, project_focus=None):
+                 global_preferences_enabled=False, project_focus=None, tag_context=None):
     """Return (fresh prompt, immutable host context), or (None, bounded reason).
 
     The 64KiB authored ceiling counts instructions + serialized schema + prefix +
@@ -660,6 +689,17 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
         _require(recording_scope in ("project", "workshop"), "invalid_recording_scope")
         project_focus = validate_project_focus(project_focus)
         _require(project_focus is None or recording_scope == "project", "invalid_project_focus_scope")
+        # Tag context is optional: unavailable/invalid guidance cannot disable
+        # an otherwise valid source-grounded recording assessment.
+        if tag_context is not None:
+            from tag_context import validate_context
+            try:
+                tag_context = validate_context(tag_context, expected_db_id)
+                if not tag_context.enabled:
+                    tag_context = None
+            except (ValueError, TypeError, KeyError, AttributeError, UnicodeError):
+                tag_context = None
+        tag_enabled = False
         coverage_json = _coverage(observation)
         # Validate every observer-retained record before selecting again. An
         # invalid record must not become invisible merely because packing omits it.
@@ -714,6 +754,8 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                                                 if omission_count is None else omission_count)}
             if project_focus is not None:
                 packet["project_focus"] = project_focus
+            if tag_enabled:
+                packet["tag_context"] = tag_context.packet()
             if recording_scope == "workshop":
                 packet["recording_scope"] = "personal_shared_continuity_and_agent_practice"
             if delivered:
@@ -748,8 +790,9 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                                 + (MAINTENANCE_INSTRUCTIONS if cases else "")
                                 + (WORKSHOP_INSTRUCTIONS if recording_scope == "workshop" else "")
                                 + (GLOBAL_PREFERENCE_INSTRUCTIONS if global_preferences_enabled else "")
-                                + (PROJECT_FOCUS_INSTRUCTIONS if project_focus is not None else "")).encode())
-            static_bytes += len(_encoded(_schema_for(enabled, bool(cases), global_preferences_enabled)))
+                                + (PROJECT_FOCUS_INSTRUCTIONS if project_focus is not None else "")
+                                + (TAG_INSTRUCTIONS if tag_enabled else "")).encode())
+            static_bytes += len(_encoded(_schema_for(enabled, bool(cases), global_preferences_enabled, tag_enabled)))
             # Charge the exact optional contract growth; old no-case ceiling unchanged.
             extra = (len(MAINTENANCE_INSTRUCTIONS.encode()) + len(_encoded(_MAINTENANCE_SCHEMA)) + 64) if cases else 0
             if global_preferences_enabled:
@@ -758,6 +801,8 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                 # Only this fixed contract grows the static guard. Policy text
                 # stays in the packet; the aggregate 64KiB ceiling never grows.
                 extra += len(PROJECT_FOCUS_INSTRUCTIONS.encode())
+            if tag_enabled:
+                extra += len(TAG_INSTRUCTIONS.encode()) + 2048
             _require(static_bytes + len(PROMPT_PREFIX.encode()) <= MAX_STATIC_BYTES + extra, "static_prefix_limit")
             prompt = PROMPT_PREFIX + _encoded(packet).decode("utf-8")
             authored = static_bytes + len(prompt.encode("utf-8"))
@@ -799,6 +844,13 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
         if selected is None:
             return None, "authored_input_limit"
         baseline = packed(selected, omission_count=0)
+        if tag_context is not None:
+            tag_enabled = True
+            # Optional guidance must not displace verified source evidence.
+            if packed(selected, omission_count=0)[-1] > MAX_AUTHORED_BYTES:
+                tag_enabled = False
+            else:
+                baseline = packed(selected, omission_count=0)
         hint_ceiling = min(MAX_AUTHORED_BYTES, baseline[-1] + budget.recording_hint_bytes)
         shown_ids = {target.native_id for target in baseline[5] if target.origin == "delivery"}
         for card, target in zip(nominees, association_bindings):
@@ -823,7 +875,8 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                                     authored, original_count - overlap_count,
                                     hashlib.sha256(prompt.encode()).hexdigest(), final_coverage_json,
                                     boundary_json, pairs, enabled, tuple(concern_targets), concern_source,
-                                    recording_scope, global_preferences_enabled, project_focus is not None)
+                                    recording_scope, global_preferences_enabled, project_focus is not None,
+                                    _encoded(tag_context.snapshot()).decode() if tag_enabled else None)
         return prompt, context
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError) as error:
         reason = str(error)
@@ -903,6 +956,8 @@ def _validate_proposal_answer(answer, context):
             fields.add("destination")
             _require(proposal.get("destination") in ("project", "global_preference"),
                      "invalid_proposal_destination")
+        if context.tag_context_json is not None:
+            fields.add("tags")
         _require(fields <= set(proposal) <= (fields | {"routing_judgment"}
                                             if proposal["kind"] == "lesson" else fields),
                  "invalid_proposal_shape")
@@ -941,9 +996,16 @@ def _validate_proposal_answer(answer, context):
         if proposal.get("destination") == "global_preference":
             _require(proposal.get("routing_judgment") is None, "global_preference_operation")
         judgment, reason = _routing_judgment(proposal.get("routing_judgment"), context, citations)
+        tags = ()
+        if context.tag_context_json is not None:
+            from tag_context import ordinary_tags
+            tags = ordinary_tags(proposal["tags"], max_count=MAX_CAPTURE_TAGS - (proposal["kind"] == "possibility"))
+            _require(proposal.get("destination") != "global_preference" or not tags,
+                     "global_preference_operation")
         result = Proposal(proposal["kind"], proposal["summary"], proposal["body"],
                           tuple(citations), association, judgment, reason,
-                          proposal.get("destination", "project"))
+                          proposal.get("destination", "project"), tags,
+                          context.tag_context_json)
         if result.destination == "global_preference":
             validate_global_preference(result, context)
         return result

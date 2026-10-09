@@ -3961,6 +3961,7 @@ mod opening;
 mod overlay;
 mod runtime;
 mod single_graph;
+mod tag_vocabulary;
 mod touchstones;
 mod traversal;
 mod vector;

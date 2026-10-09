@@ -317,7 +317,10 @@ Use `projects: []` for global-only context. Register the pinned
 `core_hook.py --config /absolute/private/core.json` as a `SessionStart` command
 for those four sources, and review it through Codex hook trust. The global path
 must match its service; project services must select that root's
-`.mneme/codex-memory.db`. Loading is bounded to four seconds and 18 KiB overall.
+`.mneme/codex-memory.db`. Loading has a twelve-second outer watchdog and an
+18 KiB output bound. Give the Codex hook at least fifteen seconds so its own
+timeout does not preempt collection and cleanup. Native startup and reads share
+the remaining scope allowance; they are not cut into subsecond exchange budgets.
 This is separate from init's project hooks and project allowlist.
 
 ## Advanced installation
@@ -380,6 +383,22 @@ work, a background assessor may save one scoped lesson, open possibility or
 episode—or nothing. It uses selected session messages and tool results, not a transcript archive.
 Uncertain writes remain unresolved rather than being replayed automatically.
 Recording does not automatically merge memories, forget nodes or edit core.
+
+#### Shared tags and background upkeep
+
+Fresh preparations with automatic recording also enable `tag_stewardship`.
+The existing assessor can propose ordinary topic tags using bounded native
+vocabulary context. Idle work revisits changed and older notes, applying only
+content-guarded tag edits. It shares session accounting and a device-local owner
+allowance; it does not run inference on reads.
+
+Use `--no-tag-stewardship` to leave this off, or `--tag-guide-id ID` to select a
+same-owner guide whose complete canonical summary is at most 2 KiB. A guide body
+is background, not classifier policy. Existing configurations without the new
+field remain off; recording off also disables this work. Update through the
+reviewed installer rather than replacing individual live files or resetting
+usage ledgers. See [hippocampus stewardship](../../docs/tag-stewardship.md) for
+vocabulary browsing, unknown outcomes, limits and read-only journal inspection.
 
 #### Per-project capture and association guidance
 
@@ -482,15 +501,68 @@ malformed settings and excluded roots. Keep exclusions aligned with the
 
 ### Updating an advanced runtime
 
-Use immutable prepared bundles. Quiesce old sessions, hooks and workers before
-switching configuration; preserve usage ledgers and unsettled paid work. Start a
-fresh session afterward. A copied source update is not a hot-update protocol,
-and older hook state must not be reset to gain a fresh spending allowance.
+Use immutable prepared destination bundles. Pause hook and reader activity before
+switching configuration; retain the sessions, usage ledgers and unsettled paid work.
+Existing sessions can retain their cached hook commands, so changing the selected
+configuration alone does not update them. For reused sessions, back up each known
+old entry point and prepare a reviewed [forwarder mapping](hook_forwarder.py) to the
+qualified runtime and the same owner's configuration. Only these inventoried
+entry-point files are replaced; the destination bundle remains immutable.
+Mappings pin the old configuration and new script/configuration bytes; configuration
+changes require regenerating the mapping. An unmatched or changed mapping refuses
+instead of falling back to another owner. Misc commands must retain their
+`hook_launcher.py` workspace-binding entry point.
+
+From `integrations/codex`, generate a candidate from a reviewed JSON object with
+`source_script` and `routes` (the mapping fields are documented in the generator):
+
+```python
+import json
+from pathlib import Path
+from hook_forwarder import render_forwarder, validate_forwarder
+
+spec = json.loads(Path("/absolute/reviewed-map.json").read_text())
+candidate = render_forwarder(spec["source_script"], spec["routes"])
+validate_forwarder(candidate, spec["source_script"], spec["routes"])
+with Path("/absolute/prepared-forwarder.py").open("xb") as output:
+    output.write(candidate)
+```
+
+The generator does not install it. Publish only after checking the original
+entry point still matches its backed-up hash, then verify its cached command
+reaches the prepared runtime. Review newly selected definitions through native
+Codex `hooks/list` and trust only the reviewed commands; preserve disabled and
+unrelated hooks. Resume normal session activity after those checks.
+
+Long-lived MCP connections are separate from cached hooks. After changing a
+managed owner's runtime, an old relay can retain its previous service configuration
+and correctly refuse the new service state. Reload MCP configuration in the
+**running host**, rather than starting a separate app-server: Codex's
+[`config/mcpServer/reload`](https://learn.chatgpt.com/docs/app-server) queues a
+refresh for loaded threads without creating a new conversation. Verify recovery
+with an identity-checked read. Do not bypass the owner check or automatically replay
+a failed write; a lost acknowledgement can still mean the write committed.
+
+The new runtime upgrades the recognized project/workshop v1 checkpoint ledger
+under its existing lock. It saves the exact preimage beside the ledger and changes
+only the schema: checkpoint outcomes, deferred work and session identity survive.
+Reader/recording usage ledgers are not reset or replayed. Ordinary event handling
+still applies its normal retention and context-reset rules afterward. Unknown,
+malformed or legacy misc state requires inspection; it is not silently replaced.
 Store upgrades are separate offline operations with paired database/body backups.
 
 ### Hook input omissions are not owner failures
 
-An `event omitted` diagnostic means hook input was malformed or exceeded its
+Configuration/session-ledger failures show “Automatic memory temporarily disabled.”
+at `SessionStart` (including resume/compaction), not after every prompt or tool call.
+An incompatible or unreadable session ledger disables automatic memory. Preserve
+it and inspect the runtime/configuration and supported upgrade path above rather
+than deleting it or resetting its allowances.
+This does not establish that the memory owner is offline or empty. Explicit
+checkpoint failures still return an error; input omissions retain their own
+diagnostic below.
+
+“Memory event skipped” means hook input was malformed or exceeded its
 input bounds. It does not mean the owner failed or the store is empty. Inspect
 reader/recording outcomes before changing worker capacity.
 

@@ -8,6 +8,7 @@ import re
 import shlex
 import sys
 
+from tag_config import FIELDS as TAG_FIELDS, prepared_fields, validate as validate_tag_config
 from librarian_policy import resolve
 from misc_binding import canonical_path, validate_excluded_roots
 from service import load_config, server_database_path
@@ -21,10 +22,11 @@ MAX_STATIC_CONFIG_BYTES = 8000  # hooks.MAX_CONFIG; no larger authoring envelope
 
 def validate_config(value):
     """Validate the static device contract, without binding or contacting a workspace."""
-    if (not isinstance(value, dict) or set(value) not in (FIELDS, FIELDS | {"reader_auth"})
+    if (not isinstance(value, dict) or set(value) - TAG_FIELDS not in (FIELDS, FIELDS | {"reader_auth"})
             or value.get("schema") != MISC_SCHEMA or value.get("memory_scope") != "misc"
             or value.get("memory_mode") != "async" or value.get("recording_mode") not in ("off", "automatic")):
         raise ValueError("misc requires static v11 async configuration without project_root")
+    validate_tag_config(value)
     resolve(value)
     for field in ("state_dir", "service_config", "reader_codex", "reader_auth"):
         if field in value:
@@ -50,7 +52,7 @@ def validate_config(value):
 
 def prepare(*, state_dir, service_config, database_path, db_id, reader_codex,
             hooks_program, hook_config_path, excluded_roots=(), python=sys.executable,
-            librarian_effort="medium", recording_mode="automatic", reader_auth=None):
+            librarian_effort="medium", recording_mode="automatic", reader_auth=None, tag_stewardship=None, tag_guide_id=None):
     service = canonical_path(service_config)
     reader = canonical_path(Path(reader_codex).resolve(strict=True))
     program = canonical_path(Path(hooks_program).resolve(strict=True))
@@ -68,7 +70,8 @@ def prepare(*, state_dir, service_config, database_path, db_id, reader_codex,
               "librarian_effort": librarian_effort, "recording_mode": recording_mode,
               "reader_codex": str(reader), "reader_codex_sha256": hashlib.sha256(reader.read_bytes()).hexdigest(),
               "store_target": {"db_alias": "project", "database_path": database_path, "db_id": db_id},
-              "excluded_roots": list(excluded_roots)}
+              "excluded_roots": list(excluded_roots),
+              **prepared_fields(recording_mode, tag_stewardship, tag_guide_id)}
     if reader_auth is not None:
         config["reader_auth"] = str(canonical_path(reader_auth))
     validate_config(config)
@@ -97,6 +100,8 @@ def main():
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--librarian-effort", choices=("low", "medium", "high"), default="medium")
     parser.add_argument("--recording-mode", choices=("off", "automatic"), default="automatic")
+    parser.add_argument("--tag-stewardship", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--tag-guide-id")
     parser.add_argument("--reader-auth")
     print(json.dumps(prepare(**vars(parser.parse_args())), ensure_ascii=False, indent=2))
 

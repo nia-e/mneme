@@ -2483,5 +2483,80 @@ class MiscRecordingJobsTests(unittest.TestCase, RecordingFixture):
             client.close.assert_called_once()
 
 
+class TopicRecordingJobsTests(unittest.TestCase, RecordingFixture):
+    def setUp(self):
+        RecordingFixture.__init__(self, self)
+        self.config["tag_stewardship"] = True
+        self.overlap.return_value = {"outcome": "empty", "cards": [], "db_id": DB_ID,
+                                     "native_work": {"decoded_bytes": 100}}
+
+    def tagged_context(self):
+        from test_tag_context import context, guide
+        from dataclasses import replace
+        return replace(context(["people", "rust"], guide=guide()), db_id=DB_ID)
+
+    def runtime(self, kind="lesson"):
+        class TaggedRuntime(FakeRuntime):
+            def assess(inner, observation, overlap, *, timeout, **options):
+                result = super().assess(observation, overlap, timeout=timeout)
+                _, context = contract.prepare(observation, overlap, **options)
+                if context.tag_context_json is not None:
+                    value = {"kind": kind, "summary": "A person and Rust mechanism.",
+                             "body": "The source names the person and mechanism.",
+                             "evidence_ids": [context.bindings[0].evidence_id], "tags": ["people", "rust"]}
+                    if kind == "lesson":
+                        value["associate_with"] = None
+                    result["proposal"] = contract.validate_answer({"proposal": value}, context)["proposal"]
+                return result
+        return TaggedRuntime(self, kind=kind)
+
+    def test_capture_uses_one_assessor_freezes_topics_and_policy_and_enqueues_dirty_node(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        enqueue = Mock(return_value=True)
+        self.closed()
+        context = self.tagged_context()
+        with patch("tag_context.collect", return_value=context) as collect, \
+                patch.dict(sys.modules, {"stewardship": SimpleNamespace(enqueue=enqueue)}):
+            runtime = self.runtime()
+            self.step(runtime)
+        self.assertEqual((len(runtime.calls), len(self.reservations), len(self.accounts), len(self.writes)),
+                         (1, 1, 1, 1))
+        self.assertEqual(collect.call_args.kwargs["cue"], PROMPT)
+        frozen = self.writes[0][1]
+        self.assertEqual(frozen["payload"]["tags"], ["people", "rust"])
+        self.assertEqual(frozen["tag_context"], context.snapshot())
+        receipt = self.state()["receipts"][-1]
+        self.assertEqual(receipt["tag_context"], context.snapshot())
+        self.assertEqual(receipt["proposal"]["tags"], ["people", "rust"])
+        self.assertNotIn(context.guide["text"], jobs.encoded(receipt).decode())
+        enqueue.assert_called_once_with(self.config, DB_ID, [OTHER_DB])
+
+    def test_invalid_guide_context_does_not_disable_otherwise_valid_recording(self):
+        from tag_context import disabled
+        self.closed()
+        with patch("tag_context.collect", return_value=disabled(DB_ID, "guide_unavailable")):
+            runtime = self.runtime()
+            self.step(runtime)
+        self.assertEqual((len(runtime.calls), len(self.writes)), (1, 1))
+        self.assertNotIn("tags", self.writes[0][1]["payload"])
+        self.assertNotIn("tag_context", self.state()["receipts"][-1])
+
+    def test_possibility_preserves_host_category_without_other_special_tags(self):
+        self.closed()
+        with patch("tag_context.collect", return_value=self.tagged_context()):
+            self.step(self.runtime("possibility"))
+        self.assertEqual(self.writes[0][1]["payload"]["tags"], ["people", "possibility", "rust"])
+
+    def test_no_context_read_when_existing_native_envelope_has_no_room(self):
+        self.overlap.return_value["native_work"]["decoded_bytes"] = 65536
+        self.closed()
+        with patch("tag_context.collect", side_effect=AssertionError("must not borrow another allowance")):
+            runtime = self.runtime()
+            self.step(runtime)
+        self.assertEqual((len(runtime.calls), len(self.writes)), (1, 1))
+        self.assertNotIn("tags", self.writes[0][1]["payload"])
+
+
 if __name__ == "__main__":
     unittest.main()

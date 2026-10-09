@@ -12,6 +12,8 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(tuple(getattr(budget,key) for key in ("selector_prompt_bytes","selector_answer_bytes","native_seconds","native_read_bytes","attempts","input_tokens","output_tokens")),values)
             self.assertEqual(budget.routing_prompt_bytes,min(values[0],12288))
             self.assertEqual(budget.routing_answer_bytes,min(values[1],4096))
+            self.assertEqual(budget.stewardship_prompt_bytes,values[0])
+            self.assertEqual(budget.stewardship_answer_bytes,values[1])
             self.assertEqual(budget.model,MODEL);self.assertEqual(budget.effort,effort)
             self.assertEqual(resolve(SimpleNamespace(reader_model=MODEL,librarian_effort=effort)),budget)
         self.assertEqual(LibrarianBudget(),resolve({"reader_model":MODEL,"librarian_effort":"medium"}))
