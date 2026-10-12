@@ -272,11 +272,23 @@ pub(crate) fn owner_config_path(origin: OwnerOrigin) -> Result<PathBuf, AnyErr> 
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
+            #[cfg(windows)]
+            {
+                std::env::var_os("APPDATA")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::var_os("USERPROFILE")
+                        .filter(|value| !value.is_empty())
+                        .map(|home| PathBuf::from(home).join("AppData").join("Roaming")))
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|home| PathBuf::from(home).join(".config"))
+            }
         })
-        .ok_or("cannot locate CLI owner configuration; set XDG_CONFIG_HOME or HOME, or select --remote URL explicitly")?;
+        .ok_or("cannot locate CLI owner configuration; set XDG_CONFIG_HOME, APPDATA/USERPROFILE on Windows, or HOME on Unix, or select --remote URL explicitly")?;
     Ok(root.join("mneme").join(filename))
 }
 

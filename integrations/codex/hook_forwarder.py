@@ -23,10 +23,14 @@ _FIELDS = frozenset(("old_config_sha256", "target_script", "target_script_sha256
 
 def _path(value):
     if (not isinstance(value, str) or not os.path.isabs(value)
-            or value.startswith("//") or os.path.normpath(value) != value
+            or value.startswith(("//", "\\\\")) or os.path.normpath(value) != value
             or len(value.encode("utf-8")) > 4096
             or any(ord(char) < 32 or ord(char) == 127 for char in value)):
         raise ValueError("forwarder paths must be bounded normalized absolute paths")
+    if os.name == "nt":
+        drive, tail = os.path.splitdrive(value)
+        if re.fullmatch(r"[A-Za-z]:", drive) is None or ":" in tail:
+            raise ValueError("forwarder paths must name local drive files, not streams or devices")
     return value
 
 
@@ -62,15 +66,80 @@ import stat
 import sys
 
 
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+
+    class _FileInfo(ctypes.Structure):
+        _fields_ = [("attributes", ctypes.c_uint32), ("creation", ctypes.c_uint32 * 2),
+                    ("access", ctypes.c_uint32 * 2), ("write", ctypes.c_uint32 * 2),
+                    ("volume", ctypes.c_uint32), ("size_high", ctypes.c_uint32),
+                    ("size_low", ctypes.c_uint32), ("links", ctypes.c_uint32),
+                    ("index_high", ctypes.c_uint32), ("index_low", ctypes.c_uint32)]
+
+    _kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                   ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                   ctypes.c_void_p]
+    _kernel.CreateFileW.restype = ctypes.c_void_p
+    _kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    _kernel.CloseHandle.restype = ctypes.c_int
+    _kernel.GetFileType.argtypes = [ctypes.c_void_p]
+    _kernel.GetFileType.restype = ctypes.c_uint32
+    _kernel.GetFileInformationByHandle.argtypes = [ctypes.c_void_p, ctypes.POINTER(_FileInfo)]
+    _kernel.GetFileInformationByHandle.restype = ctypes.c_int
+
+
+def _regular_stat(fd):
+    if os.name == "nt":
+        handle = msvcrt.get_osfhandle(fd)
+        native = _FileInfo()
+        if (_kernel.GetFileType(handle) != 1
+                or not _kernel.GetFileInformationByHandle(handle, ctypes.byref(native))
+                or native.attributes & (0x400 | 0x10) or native.links != 1):
+            raise ValueError("file admission")
+    current = os.fstat(fd)
+    if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+        raise ValueError("file admission")
+    return current
+
+
+def _open_regular(path):
+    if os.name == "nt":
+        # OPEN_EXISTING, no reparse traversal at the leaf, non-inheritable handle.
+        # BACKUP_SEMANTICS admits directory handles only so validation can refuse
+        # them before any read. No helper imports from the retired bundle.
+        handle = _kernel.CreateFileW(path, 0x80000000, 7, None, 3,
+                                     0x00200000 | 0x02000000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        except BaseException:
+            _kernel.CloseHandle(handle)
+            raise
+    else:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        _regular_stat(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _read_pinned(path, expected, limit):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as stream:
-        before = os.fstat(stream.fileno())
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit:
+    with os.fdopen(_open_regular(path), "rb") as stream:
+        before = _regular_stat(stream.fileno())
+        if before.st_size > limit:
             raise ValueError("file admission")
         raw = stream.read(limit + 1)
-        after = os.fstat(stream.fileno())
-    current = os.stat(path, follow_symlinks=False)
+        after = _regular_stat(stream.fileno())
+    fd = _open_regular(path)
+    try:
+        current = _regular_stat(fd)
+    finally:
+        os.close(fd)
     identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
     if (len(raw) > limit or identity(before) != identity(after)
             or identity(after) != identity(current) or not stat.S_ISREG(current.st_mode)
@@ -82,9 +151,7 @@ def _read_pinned(path, expected, limit):
 def _forward():
     if __file__ != SOURCE_SCRIPT or sys.argv[0] != SOURCE_SCRIPT:
         raise ValueError("unexpected cached entry point")
-    source = os.stat(SOURCE_SCRIPT, follow_symlinks=False)
-    if not stat.S_ISREG(source.st_mode) or source.st_nlink != 1:
-        raise ValueError("invalid cached entry point")
+    os.close(_open_regular(SOURCE_SCRIPT))
     args = sys.argv[1:]
     found = None
     index = 0
@@ -118,7 +185,14 @@ def _forward():
     args[index] = ("--config=" if equals else "") + route["target_config"]
     if not os.path.isabs(sys.executable):
         raise ValueError("Python interpreter unavailable")
-    os.execv(sys.executable, [sys.executable, route["target_script"], *args])
+    command = [sys.executable, route["target_script"], *args]
+    if os.name == "nt":
+        import subprocess
+        # Windows execv is not Unix process replacement: explicitly wait so the
+        # hook caller observes target completion and its actual exit status.
+        # Defaults inherit stdin/stdout/stderr, environment and cwd unchanged.
+        raise SystemExit(subprocess.run(command, shell=False).returncode)
+    os.execv(sys.executable, command)
 
 
 if __name__ == "__main__":

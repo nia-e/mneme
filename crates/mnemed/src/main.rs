@@ -852,6 +852,10 @@ impl From<KindArg> for EdgeKind {
 async fn main() -> Result<(), AnyErr> {
     let cli = Cli::parse();
     let json = cli.json;
+    // Fresh native Windows ownership is supported; offline migration/rewrites
+    // still depend on Unix publication/recovery and must not create residue.
+    #[cfg(windows)]
+    require_windows_offline_operation_supported(&cli.command)?;
 
     if let Command::Init(args) = &cli.command {
         if cli.user || cli.db.is_some() || cli.connection.remote.is_some() {
@@ -1250,6 +1254,17 @@ async fn main() -> Result<(), AnyErr> {
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn require_windows_offline_operation_supported(command: &Command) -> Result<(), AnyErr> {
+    let operation = match command {
+        Command::Migrate => "migrate",
+        Command::Reembed => "reembed (alias: reindex)",
+        Command::SingleGraphUpgrade(_) => "single-graph-upgrade",
+        _ => return Ok(()),
+    };
+    Err(format!("{operation} is not supported on native Windows yet: its offline replacement/recovery path has not been ported; keep the original database unchanged and use a verified Unix migration workflow with a paired database/body backup").into())
 }
 
 #[cfg(feature = "cozo")]
@@ -1935,6 +1950,7 @@ std::thread_local! {
 
 #[cfg(all(test, feature = "cozo"))]
 fn migration_install_checkpoint(at: &'static str) -> std::io::Result<()> {
+    #[cfg(unix)]
     if std::env::var("MNEME_TEST_MIGRATION_KILL_AT").as_deref() == Ok(at) {
         // Only the explicitly spawned unit-test subprocess sets this variable.
         unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
@@ -4107,6 +4123,28 @@ mod embedding_identity_tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    #[cfg(windows)]
+    #[test]
+    fn windows_offline_rewrites_refuse_before_io() {
+        let upgrade = Cli::try_parse_from([
+            "mnemed",
+            "single-graph-upgrade",
+            "--backend",
+            "json",
+            "--output",
+            "unused.db",
+        ])
+        .unwrap()
+        .command;
+        for command in [Command::Migrate, Command::Reembed, upgrade] {
+            let error = require_windows_offline_operation_supported(&command)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not supported on native Windows"));
+            assert!(error.contains("original database unchanged"));
+        }
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]

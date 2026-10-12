@@ -6,28 +6,36 @@ from pathlib import Path
 import plistlib
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
-from service import (ConnectConfig, MAX_CONFIG_BYTES, ServiceConfig, _expected_catalog,
+from host_files import atomic_write, ensure_private_directory
+from host_platform import executable_name
+from service import (ConnectConfig, RemoteConfig, client_for_service, MAX_CONFIG_BYTES, MAX_STATE_BYTES, ServiceConfig, _expected_catalog,
                      _matches_process, _state_matches_config, ensure_ready, launchd_plist,
                      load_config, main, restart, start, status, stop)
 
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
+        # Existing cases exercise the preserved Unix command-line/signal
+        # contract. Windows identity and termination are tested separately.
+        unix_contract = patch("service.IS_WINDOWS", False)
+        unix_contract.start()
+        self.addCleanup(unix_contract.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
-        binary = root / "isolated" / "bin" / "mneme-mcp"
+        binary = root / "isolated" / "bin" / executable_name("mneme-mcp")
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"not run")
         binary.chmod(0o700)
         state_dir = root / "state"
-        state_dir.mkdir(mode=0o700)
+        ensure_private_directory(state_dir)
         project_root = root / "project"
         project_root.mkdir()
         (project_root / "memory.db").write_bytes(b"mock store: native host not launched")
@@ -86,7 +94,7 @@ class ServiceTests(unittest.TestCase):
                           database_name="user", database_path=self.config.project_db)
 
     def test_canonical_json_and_legacy_project_json(self):
-        for name in ("user", "project"):
+        for name in ("user", "project", "scratch", "archive.work-2"):
             with self.subTest(name=name):
                 loaded = ServiceConfig.from_json(self._config_json(database_name=name))
                 self.assertEqual(loaded, self._named_config(name))
@@ -106,7 +114,7 @@ class ServiceTests(unittest.TestCase):
             del missing[key]
             invalid.append(missing)
             invalid.append(dict(missing, project_db=str(self.config.project_db)))
-        for name in ("", "global", "User", None, True, ["user"]):
+        for name in ("", "a/b", "hello world", "x" * 129, "mémoire", None, True, ["user"]):
             invalid.append(dict(canonical, database_name=name))
         for database_path in ("relative.db", None, True, []):
             invalid.append(dict(canonical, database_path=database_path))
@@ -186,7 +194,7 @@ class ServiceTests(unittest.TestCase):
     def test_user_missing_store_or_invalid_identity_fails_before_resources(self):
         user = self._named_config(database_path=self.config.database_path.parent / "absent.db",
                                   state_dir=self.config.state_dir / "absent")
-        invalid = self._named_config(database_name="global")
+        invalid = self._named_config(database_name="invalid/name")
         with patch("service._probe", side_effect=AssertionError("unexpected HTTP")), \
                 patch("service._lock", side_effect=AssertionError("unexpected lock")), \
                 patch("service.subprocess.Popen", side_effect=AssertionError("unexpected spawn")):
@@ -531,7 +539,7 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(state_path.exists())
 
     def test_process_identity_is_exact_even_with_spaces_and_near_prefixes(self):
-        binary = self.config.binary.parent / "mneme mcp"
+        binary = self.config.binary.parent / executable_name("mneme mcp")
         project_db = self.config.project_db.parent / "memory notes.db"
         config = ServiceConfig(binary, project_db, 1876, self.config.state_dir,
                                self.config.working_directory)
@@ -547,6 +555,219 @@ class ServiceTests(unittest.TestCase):
             with self.subTest(other=other), \
                     patch("service.subprocess.run", return_value=ps(other)):
                 self.assertFalse(_matches_process(config, 123))
+
+
+class ServicePortabilityTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        binary = self.root / "program space \u03bb.exe"
+        binary.write_bytes(b"never executed except through mocked spawn")
+        binary.chmod(0o700)
+        database = self.root / "memory.db"
+        database.write_bytes(b"not a real store")
+        state_dir = self.root / "state"
+        ensure_private_directory(state_dir)
+        self.config = ServiceConfig(binary, database, 18765, state_dir, self.root)
+        self.path = state_dir / "mneme-codex-service.json"
+        self.identity = {"platform": "windows", "pid": 123,
+                         "created": 987654, "executable": str(binary)}
+        self.catalog = [{"db": "project", "name": "project", "state": "open",
+                         "configured_path": str(database)}]
+
+    def _record(self, **changes):
+        state = {"pid": 123, "binary": str(self.config.binary),
+                 "database_name": "project", "database_path": str(self.config.database_path),
+                 "port": self.config.port, "working_directory": str(self.root),
+                 "process_identity": self.identity}
+        state.update(changes)
+        atomic_write(self.path, json.dumps(state).encode())
+
+    def _windows(self):
+        stack = ExitStack()
+        stack.enter_context(patch("service.IS_WINDOWS", True))
+        for name in ("os.kill", "subprocess.run"):
+            stack.enter_context(patch("service." + name,
+                                      side_effect=AssertionError("Windows must not use " + name)))
+        return stack
+
+    def test_windows_start_records_spawn_handle_identity_and_portable_detach(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        with self._windows(), patch("service.spawn", return_value=process) as spawn, \
+                patch("service.spawned_identity", return_value=self.identity) as captured, \
+                patch("service._probe", side_effect=[None, self.catalog]):
+            self.assertEqual(start(self.config)["state"], "ready")
+        captured.assert_called_once_with(process)
+        self.assertTrue(spawn.call_args.kwargs["detached"])
+        self.assertNotIn("start_new_session", spawn.call_args.kwargs)
+        self.assertEqual(json.loads(self.path.read_text())["process_identity"], self.identity)
+
+    def test_windows_native_binary_validation_refuses_shell_wrappers_before_work(self):
+        with self._windows(), patch("host_platform.WINDOWS", True), \
+                patch("service._lock", side_effect=AssertionError("unexpected lock")), \
+                patch("service._probe", side_effect=AssertionError("unexpected HTTP")), \
+                patch("service.spawn", side_effect=AssertionError("unexpected spawn")):
+            self.assertEqual(self.config.validate().binary, self.config.binary)
+            for suffix in (".cmd", ".bat", ".ps1", ""):
+                wrapper = self.root / ("mneme-mcp" + suffix)
+                wrapper.write_bytes(b"not a native executable")
+                wrapper.chmod(0o700)
+                config = ServiceConfig(wrapper, self.config.database_path, self.config.port,
+                                       self.config.state_dir, self.root)
+                with self.subTest(suffix=suffix), self.assertRaisesRegex(ValueError, "not executable"):
+                    start(config)
+        self.assertFalse(self.path.exists())
+
+    def test_windows_missing_spawn_identity_never_publishes(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        with self._windows(), patch("service.spawn", return_value=process), \
+                patch("service.spawned_identity", return_value=None), \
+                patch("service._probe", return_value=None), \
+                patch("service._terminate_spawned") as terminate:
+            with self.assertRaisesRegex(RuntimeError, "identity unavailable"):
+                start(self.config)
+        terminate.assert_called_once_with(process)
+        self.assertFalse(self.path.exists())
+
+    def test_state_publication_failure_terminates_only_the_spawned_process(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        with self._windows(), patch("service.spawn", return_value=process), \
+                patch("service.spawned_identity", return_value=self.identity), \
+                patch("service._probe", side_effect=[None, self.catalog]), \
+                patch("service.atomic_write", side_effect=OSError("publication denied")), \
+                patch("service._terminate_spawned") as terminate:
+            with self.assertRaisesRegex(OSError, "publication denied"):
+                start(self.config)
+        terminate.assert_called_once_with(process)
+        self.assertFalse(self.path.exists())
+
+    def test_windows_current_creation_and_image_must_match_recorded_identity(self):
+        self._record()
+        for current, expected in ((self.identity, "ready"),
+                                  ({**self.identity, "created": 987655}, "stale"),
+                                  ({**self.identity, "executable": str(self.config.binary) + ".other"}, "stale")):
+            with self.subTest(current=current), self._windows(), \
+                    patch("service.process_identity", return_value=current), \
+                    patch("service._probe", return_value=self.catalog):
+                self.assertEqual(status(self.config)["state"], expected)
+
+    def test_windows_unverifiable_or_legacy_identity_cannot_authorize_stop(self):
+        identities = [None, {**self.identity, "created": True},
+                      {**self.identity, "pid": 124},
+                      {**self.identity, "executable": str(self.root / "other.exe")}]
+        for identity in identities:
+            self._record(process_identity=identity)
+            with self.subTest(identity=identity), self._windows(), \
+                    patch("service.process_alive", return_value=True), \
+                    patch("service.process_identity", return_value=None), \
+                    patch("service.terminate_verified") as terminate, \
+                    patch("service._probe", return_value=self.catalog):
+                self.assertEqual(status(self.config)["state"], "identity-unverified")
+                # HTTP reuse still grants no process-control authority.
+                self.assertEqual(ensure_ready(self.config)["process_identity"], "unchecked")
+                with self.assertRaisesRegex(RuntimeError, "identity-unverified"):
+                    stop(self.config)
+                terminate.assert_not_called()
+                self.assertTrue(self.path.exists())
+        self._record()
+        with self._windows(), patch("service.process_identity", return_value=None), \
+                patch("service.process_alive", return_value=None):
+            self.assertEqual(status(self.config)["state"], "identity-unverified")
+
+    def test_windows_stop_requires_same_handle_final_verification(self):
+        self._record()
+        with self._windows(), patch("service._probe", return_value=self.catalog), \
+                patch("service.process_identity", side_effect=[self.identity, self.identity, None]), \
+                patch("service.process_alive", return_value=False), \
+                patch("service.terminate_verified", return_value=True) as terminate:
+            self.assertEqual(stop(self.config)["state"], "stopped")
+        terminate.assert_called_once_with(123, self.identity)
+        self.assertFalse(self.path.exists())
+
+    def test_windows_final_guard_refusal_or_access_denial_retains_state(self):
+        for result in (False, PermissionError("denied")):
+            self._record()
+            with self.subTest(result=result), self._windows(), \
+                    patch("service._probe", return_value=self.catalog), \
+                    patch("service.process_identity", return_value=self.identity), \
+                    patch("service.terminate_verified", side_effect=result if isinstance(result, Exception) else None,
+                          return_value=result):
+                with self.assertRaisesRegex(RuntimeError, "identity changed|termination unavailable"):
+                    stop(self.config)
+                self.assertTrue(self.path.exists())
+
+    def test_managed_state_is_bounded_and_pid_is_not_bool(self):
+        for data in (b" " * (MAX_STATE_BYTES + 1), b'{"pid": true}', b'{"pid": 0}',
+                     b'{"pid": 123,"pid": 124}'):
+            with self.subTest(data=data[:60]):
+                atomic_write(self.path, data)
+                with self.assertRaises(ValueError):
+                    status(self.config)
+
+    def test_regular_state_log_and_lock_refuse_hard_link_aliases(self):
+        target = self.root / "unrelated"
+        target.write_bytes(b"do not modify")
+        for leaf in ("mneme-codex-service.json", "mneme-mcp.log", "service.lock"):
+            path = self.config.state_dir / leaf
+            if path.exists():
+                path.unlink()
+            os.link(target, path)
+            try:
+                with self.subTest(leaf=leaf), patch("service._probe", return_value=None), \
+                        patch("service.spawn", side_effect=AssertionError("unsafe path spawned")):
+                    with self.assertRaisesRegex(ValueError, "multiply_linked"):
+                        start(self.config)
+                    self.assertEqual(target.read_bytes(), b"do not modify")
+            finally:
+                path.unlink()
+
+    def test_regular_state_log_and_lock_refuse_symlinks(self):
+        target = self.root / "unrelated"
+        target.write_bytes(b"do not modify")
+        for leaf in ("mneme-codex-service.json", "mneme-mcp.log", "service.lock"):
+            path = self.config.state_dir / leaf
+            if path.exists():
+                path.unlink()
+            try:
+                path.symlink_to(target)
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink privilege unavailable")
+                raise
+            try:
+                with self.subTest(leaf=leaf), patch("service._probe", return_value=None), \
+                        patch("service.spawn", side_effect=AssertionError("unsafe path spawned")):
+                    with self.assertRaises((OSError, ValueError)):
+                        start(self.config)
+                    self.assertEqual(target.read_bytes(), b"do not modify")
+            finally:
+                path.unlink()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows process handles and ACLs required")
+    def test_native_windows_disposable_process_start_status_stop(self):
+        class PythonServiceConfig(ServiceConfig):
+            @property
+            def argv(self):
+                return [str(self.binary), "-c", "import time; time.sleep(30)"]
+
+        config = PythonServiceConfig(Path(sys.executable), self.config.database_path,
+                                     self.config.port, self.config.state_dir, self.root)
+        # This is an owned disposable Python child, not a real MCP host or store.
+        with patch("service._probe", side_effect=[None, self.catalog]):
+            result = start(config)
+        try:
+            with patch("service._probe", return_value=self.catalog):
+                self.assertEqual(status(config)["state"], "ready")
+                self.assertEqual(stop(config)["state"], "stopped")
+        finally:
+            from host_process import terminate_verified
+            if self.path.exists():
+                identity = json.loads(self.path.read_text())["process_identity"]
+                terminate_verified(result["pid"], identity)
 
 
 class ConnectServiceTests(unittest.TestCase):
@@ -689,6 +910,99 @@ class ConnectServiceTests(unittest.TestCase):
         with self.no_local_control(), patch("service._probe", return_value=self.catalog), redirect_stdout(output):
             main(["--config", str(self.path), "status"])
         self.assertEqual(json.loads(output.getvalue())["mode"], "connect")
+
+
+class RemoteServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "remote.json"
+        self.data = {"mode": "remote", "schema": 1, "url": "ssh://memory@owner-alias:2222",
+                     "database_name": "shared-notes", "database_path": "/srv/mneme/memory.db"}
+        self.path.write_text(json.dumps(self.data))
+        self.config = load_config(self.path)
+        self.catalog = [{"db": "shared-notes", "name": "shared-notes", "state": "open",
+                         "configured_path": self.data["database_path"]}]
+
+    def no_local_control(self):
+        stack = ExitStack()
+        for name in ("_read_state", "_lock", "_matches_process", "subprocess.Popen",
+                     "subprocess.run", "os.kill", "Path.is_file", "Path.resolve", "Path.mkdir"):
+            stack.enter_context(patch("service." + name,
+                                      side_effect=AssertionError("unexpected local control: " + name)))
+        return stack
+
+    def test_remote_config_is_closed_versioned_and_has_no_local_resources(self):
+        self.assertIsInstance(self.config, RemoteConfig)
+        self.assertEqual(self.config.ssh_mcp_port, 18766)
+        with self.no_local_control():
+            self.assertEqual(self.config.validate(), self.config)
+        for field in ("binary", "port", "state_dir", "working_directory", "argv"):
+            self.assertFalse(hasattr(self.config, field))
+        invalid = []
+        for key in self.data:
+            value = dict(self.data)
+            del value[key]
+            invalid.append(value)
+        for key, value in (("schema", True), ("schema", 2), ("schema", "1"),
+                           ("binary", "/bin/x"), ("state_dir", "/tmp/state"),
+                           ("working_directory", "/tmp"), ("project_db", "/tmp/db"),
+                           ("port", 1234), ("db_id", "not-in-transport"),
+                           ("database_name", "bad/name"), ("database_path", "../local.db"),
+                           ("ssh_mcp_port", 0), ("ssh_mcp_port", True),
+                           ("ssh_mcp_port", 65536), ("token_env", "bad-name")):
+            invalid.append(dict(self.data, **{key: value}))
+        with self.no_local_control():
+            for data in invalid:
+                with self.subTest(data=data):
+                    self.path.write_text(json.dumps(data))
+                    with self.assertRaises(ValueError):
+                        load_config(self.path)
+
+    def test_native_remote_factory_is_explicit_and_legacy_remains_local(self):
+        configs = [self.config, ConnectConfig("http://127.0.0.1:18766/", "user", "/srv/memory.db")]
+        for config in configs:
+            with self.subTest(config=config), patch("mcp_client.McpClient") as factory:
+                client_for_service(config, timeout=1.25, token="test-token")
+                args, kwargs = factory.call_args
+                self.assertEqual(args, (config.url,))
+                self.assertEqual(kwargs["timeout"], 1.25)
+                self.assertEqual(kwargs["token"], "test-token")
+                self.assertEqual(kwargs.get("remote_owner", False), isinstance(config, RemoteConfig))
+                if isinstance(config, RemoteConfig):
+                    self.assertEqual(kwargs["ssh_mcp_port"], 18766)
+                else:
+                    self.assertNotIn("ssh_mcp_port", kwargs)
+
+    def test_remote_probe_uses_native_factory_without_local_control(self):
+        with self.no_local_control(), patch("service.client_for_service") as factory:
+            factory.return_value.__enter__.return_value.call_tool.return_value = self.catalog
+            self.assertEqual(status(self.config)["mode"], "remote")
+            self.assertTrue(ensure_ready(self.config)["reuse_only"])
+            self.assertEqual(factory.call_count, 2)
+        with self.no_local_control(), patch("service._probe", return_value=self.catalog * 2):
+            with self.assertRaisesRegex(RuntimeError, "unexpected database catalog"):
+                ensure_ready(self.config)
+
+    def test_remote_failure_never_starts_or_takes_over_local_service(self):
+        with self.no_local_control(), patch("service._probe", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "no local fallback"):
+                ensure_ready(self.config, timeout=0.01)
+        with self.no_local_control(), patch("service._probe", side_effect=AssertionError("unexpected probe")):
+            for operation in (start, stop, restart, launchd_plist):
+                with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, "connect-only"):
+                    operation(self.config)
+            for action in ("start", "stop", "restart", "print-launchd"):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    main(["--config", str(self.path), action])
+
+    def test_remote_token_requires_safe_transport_and_exact_native_token_shape(self):
+        for url in ("http://owner.example/mcp", "http://localhost:18766"):
+            with self.assertRaisesRegex(ValueError, "HTTPS"):
+                RemoteConfig(url, "notes", "/srv/memory.db", "MNEME_TEST_TOKEN").validate_identity()
+        for token in ("", "has space", "has\nnewline", "nonascii-é"):
+            with patch.dict(os.environ, {"MNEME_TEST_TOKEN": token}), self.assertRaisesRegex(ValueError, "unset or invalid"):
+                RemoteConfig("https://owner.example/mcp", "notes", "/srv/memory.db", "MNEME_TEST_TOKEN").validate()
 
 
 if __name__ == "__main__":

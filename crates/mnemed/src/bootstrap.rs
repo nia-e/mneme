@@ -6,7 +6,9 @@
 //! and only then published and activated with no-clobber filesystem operations.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -33,8 +35,8 @@ use crate::native_artifact::{
     ExclusiveLock, KEY_BYTES, canonical_git_invocation_root, constant_time_eq, create_private_dir,
     ensure_private_dir, hash_serialized, hex_digest, hmac_hex, load_existing_key,
     load_or_create_key, open_dir_nofollow, open_read_nofollow, read_bounded_regular,
-    rename_no_replace, sha256_bytes, sha256_join, sync_dir, verify_path_still_names_open_file,
-    verify_path_still_names_open_file_or_dir, write_private_file,
+    rename_no_replace, sha256_bytes, sha256_join, sync_dir, verify_directory,
+    verify_path_still_names_open_file, write_private_file,
 };
 
 const PLAN_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -45,6 +47,10 @@ const VALIDATOR_TIMEOUT: Duration = Duration::from_secs(300);
 const NAMESPACE: &str = "repo-sync-v1";
 const POLICY_VERSION: &str = "repo-sync-v1-default";
 const REPO_SYNC_MAX_SUMMARY_BYTES: usize = 1_024;
+#[cfg(windows)]
+const ACTIVATION_MODE: &str = "atomic-no-clobber-windows-selector-v1";
+#[cfg(not(windows))]
+const ACTIVATION_MODE: &str = "atomic-no-clobber-relative-symlink-v1";
 const RECEIPT_NAMESPACE: &str = "repo-sync-v1-native-bootstrap-receipt";
 const TRUSTED_CONTRACT_MODULES: &[(&str, &[u8])] = &[
     (
@@ -1038,6 +1044,7 @@ fn inspect_active_layout(
     current_metadata: fs::Metadata,
     generations_metadata: Option<fs::Metadata>,
 ) -> Result<BootstrapInspection, InspectionProblem> {
+    #[cfg(not(windows))]
     if !current_metadata.file_type().is_symlink() {
         return Err(InspectionProblem::malformed(
             "selector_not_symlink",
@@ -1045,7 +1052,9 @@ fn inspect_active_layout(
             "restore the exact relative generations/<operation-id> activation symlink",
         ));
     }
-    let target = fs::read_link(current).map_err(|error| {
+    #[cfg(windows)]
+    let _ = current_metadata;
+    let selector_error = |error: std::io::Error| {
         InspectionProblem::malformed(
             "unreadable_selector",
             format!(
@@ -1054,7 +1063,14 @@ fn inspect_active_layout(
             ),
             "restore the selector from the authenticated native bootstrap receipt",
         )
-    })?;
+    };
+    #[cfg(windows)]
+    let selector =
+        mneme_store_path::windows::ActivationSelector::open(current).map_err(selector_error)?;
+    #[cfg(windows)]
+    let target = selector.target().to_path_buf();
+    #[cfg(not(windows))]
+    let target = read_activation_target_checked(current).map_err(selector_error)?;
     let operation_id = inspection_activation_operation_id(&target).ok_or_else(|| {
         InspectionProblem::malformed(
             "malformed_selector",
@@ -1113,7 +1129,15 @@ fn inspect_active_layout(
         ));
     }
     let native = inspect_native_generation(mneme, &selected, &operation_id)?;
-    if fs::read_link(current).map_err(|error| {
+    #[cfg(windows)]
+    selector.require_unchanged().map_err(|error| {
+        InspectionProblem::malformed(
+            "selector_changed",
+            format!("activation selector changed during inspection: {error}"),
+            "retry inspection after the publisher is quiescent",
+        )
+    })?;
+    if read_activation_target_checked(current).map_err(|error| {
         InspectionProblem::malformed(
             "selector_changed",
             format!("activation selector changed during inspection: {error}"),
@@ -1399,7 +1423,7 @@ fn inspect_native_generation(
         || receipt.payload.namespace != RECEIPT_NAMESPACE
         || receipt.payload.operation_id != operation_id
         || receipt.payload.activation_target != format!("generations/{operation_id}")
-        || receipt.payload.activation_mode != "atomic-no-clobber-relative-symlink-v1"
+        || receipt.payload.activation_mode != ACTIVATION_MODE
         || receipt.payload.publication_state != "activation-bound"
         || receipt.payload.manifest_path != "bootstrap/manifest.json"
         || receipt.payload.key_id != sha256_bytes(&key)
@@ -1596,7 +1620,7 @@ fn inspect_optional_database(path: &Path) -> Result<Option<DatabaseInspection>, 
             "restore a readable database from a known-good copy",
         )
     })?;
-    verify_path_still_names_open_file(path, &metadata).map_err(|error| {
+    verify_path_still_names_open_file(path, &file).map_err(|error| {
         InspectionProblem::malformed(
             "database_changed",
             format!("database changed during inspection: {error}"),
@@ -1778,6 +1802,11 @@ fn ensure_real_inspection_directory(
     metadata: &fs::Metadata,
     label: &str,
 ) -> Result<(), InspectionProblem> {
+    #[cfg(windows)]
+    open_dir_nofollow(path).map_err(|error| InspectionProblem::malformed(
+        "unsafe_directory", format!("{label} {} cannot be safely opened: {error}", path.display()),
+        "use a current-owner local NTFS directory without reparse points or shared write access",
+    ))?;
     if metadata.file_type().is_symlink() {
         return Err(InspectionProblem::symlink(label, path));
     }
@@ -1989,7 +2018,25 @@ fn inspect_lease(database: &Path) -> Result<LeaseObservation, InspectionProblem>
             "retry on a filesystem that supports advisory flock, or inspect ownership out of band",
         ))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let result = (|| -> Result<LeaseObservation, AnyErr> {
+            let file = open_read_nofollow(&lock)?;
+            mneme_store_path::windows::require_private_file(&file)?;
+            let observation = match file.try_lock_shared() {
+                Ok(()) => LeaseObservation::Free,
+                Err(std::fs::TryLockError::WouldBlock) => LeaseObservation::Held,
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            };
+            verify_path_still_names_open_file(&lock, &file)?;
+            Ok(observation)
+        })();
+        result.map_err(|error| InspectionProblem::malformed(
+            "lease_probe_failed", format!("cannot safely probe existing lease {}: {error}", lock.display()),
+            "restore the original private single-linked lease and retry after owners are quiescent",
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = metadata;
         Ok(LeaseObservation::Unknown)
@@ -2262,7 +2309,6 @@ fn inspect_target(paths: &GenerationPaths) -> Result<TargetState, AnyErr> {
                 return Err(".mneme/generations must be a real directory".into());
             }
             let generations_guard = open_dir_nofollow(&paths.generations)?;
-            let generations_opened = generations_guard.metadata()?;
             if fs::canonicalize(&paths.generations)? != paths.generations {
                 return Err(".mneme/generations resolves outside its lexical project path".into());
             }
@@ -2318,11 +2364,7 @@ fn inspect_target(paths: &GenerationPaths) -> Result<TargetState, AnyErr> {
                 }
                 return Ok(TargetState::ForeignGenerationExists);
             }
-            verify_path_still_names_open_file_or_dir(
-                &paths.generations,
-                &generations_opened,
-                true,
-            )?;
+            verify_directory(&paths.generations, &generations_guard)?;
             drop(generations_guard);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2375,7 +2417,6 @@ fn cleanup_abandoned_generation_temps(paths: &GenerationPaths) -> Result<usize, 
         return Err(".mneme/generations must be a real directory".into());
     }
     let generations_guard = open_dir_nofollow(&paths.generations)?;
-    let generations_opened = generations_guard.metadata()?;
     if fs::canonicalize(&paths.generations)? != paths.generations {
         return Err(".mneme/generations resolves outside its lexical project path".into());
     }
@@ -2422,7 +2463,7 @@ fn cleanup_abandoned_generation_temps(paths: &GenerationPaths) -> Result<usize, 
         }
         stale.push(path);
     }
-    verify_path_still_names_open_file_or_dir(&paths.generations, &generations_opened, true)?;
+    verify_directory(&paths.generations, &generations_guard)?;
 
     // Do not delete *any* candidate until all of their nested database leases
     // are held. StoreLease also validates the private adjacent lock inode.
@@ -2841,6 +2882,35 @@ fn validate_approval_shape(plan: &GreenfieldPlan, approval: &Approval) -> Result
     Ok(())
 }
 
+/// Bootstrap's inspector and contract validation are synchronous. Pin one
+/// actual interpreter per process, using init's bounded discovery policy on
+/// Windows rather than assuming a Unix executable name or trusting a launcher.
+fn bootstrap_python_command() -> Result<Command, AnyErr> {
+    #[cfg(windows)]
+    {
+        static PYTHON: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        if let Some(path) = PYTHON.get() {
+            return Ok(Command::new(path));
+        }
+        let path = std::thread::spawn(|| -> Result<PathBuf, String> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("cannot discover bootstrap Python: {error}"))?;
+            let found = runtime.block_on(crate::cli_init::discover_python(None));
+            // Shutdown must not extend the bounded executable-discovery step.
+            runtime.shutdown_background();
+            found.ok_or_else(|| "bootstrap requires Python 3.11+; install Python and make python.exe or the Python launcher available on PATH".to_string())
+        }).join().map_err(|_| "bootstrap Python discovery thread panicked")??;
+        let _ = PYTHON.set(path);
+        Ok(Command::new(PYTHON.get().expect("Python was installed")))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Command::new("python3"))
+    }
+}
+
 fn run_structural_validator(
     root: &Path,
     contract_scripts: &Path,
@@ -2861,7 +2931,7 @@ runpy.run_path(script,run_name='__main__')
         )
         .into());
     }
-    let mut command = Command::new("python3");
+    let mut command = bootstrap_python_command()?;
     command
         .arg("-I")
         .arg("-B")
@@ -2908,7 +2978,7 @@ print(hashlib.sha256(canonical).hexdigest())
     input.extend_from_slice(plan_raw);
     input.push(0);
     input.extend_from_slice(approval_raw);
-    let mut command = Command::new("python3");
+    let mut command = bootstrap_python_command()?;
     command
         .arg("-I")
         .arg("-B")
@@ -3289,7 +3359,7 @@ async fn materialize_generation(
     }
     #[cfg(not(feature = "cozo"))]
     store.save(&database)?;
-    File::open(&database)?.sync_all()?;
+    crate::native_artifact::sync_file(&database)?;
 
     let backend_format = if cfg!(feature = "cozo") {
         "cozo-sqlite-v1"
@@ -3344,10 +3414,6 @@ fn projection_digest(
 ) -> Result<String, AnyErr> {
     require_fresh_concern_state(export)?;
     let body_dir_guard = open_dir_nofollow(body_dir)?;
-    let body_dir_metadata = body_dir_guard.metadata()?;
-    if !body_dir_metadata.file_type().is_dir() {
-        return Err("bootstrap body store is not a real directory".into());
-    }
     let mut normalized = export.clone();
     normalized.nodes.sort_by_key(|node| node.id());
     normalized
@@ -3418,7 +3484,7 @@ fn projection_digest(
         hash.update([0]);
         hash.update(Sha256::digest(body));
     }
-    verify_path_still_names_open_file_or_dir(body_dir, &body_dir_metadata, true)?;
+    verify_directory(body_dir, &body_dir_guard)?;
     drop(body_dir_guard);
     Ok(hex_digest(hash.finalize().as_slice()))
 }
@@ -3530,7 +3596,7 @@ canonical=json.dumps(value,ensure_ascii=True,allow_nan=False,sort_keys=True,sepa
 print(hashlib.sha256(canonical).hexdigest())
 "#;
     let raw = read_bounded_regular(path, PLAN_MAX_BYTES, "native JSON artifact")?;
-    let mut command = Command::new("python3");
+    let mut command = bootstrap_python_command()?;
     command
         .arg("-I")
         .arg("-B")
@@ -3597,7 +3663,7 @@ fn build_receipt(
         edge_ids,
         manifest_path: "bootstrap/manifest.json".to_string(),
         manifest_hash: manifest_hash.to_string(),
-        activation_mode: "atomic-no-clobber-relative-symlink-v1".to_string(),
+        activation_mode: ACTIVATION_MODE.to_string(),
         activation_target: format!("generations/{}", validated.operation_id),
         publication_state: "activation-bound".to_string(),
         key_id,
@@ -3658,13 +3724,12 @@ async fn verify_private_generation(
     store_lease: &Arc<mneme_store_path::StoreLease>,
 ) -> Result<(), AnyErr> {
     let generation_guard = open_dir_nofollow(generation)?;
-    let generation_metadata = generation_guard.metadata()?;
-    if !generation_metadata.file_type().is_dir() {
-        return Err("native bootstrap generation is not a real directory".into());
-    }
+    #[cfg(windows)]
+    generation_guard.require_private()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let generation_metadata = generation_guard.metadata()?;
         if generation_metadata.permissions().mode() & 0o077 != 0 {
             return Err("native bootstrap generation must remain private (0700)".into());
         }
@@ -3691,7 +3756,7 @@ async fn verify_private_generation(
                 validated.plan.plan_hash.as_bytes(),
                 validated.operation_id.to_string().as_bytes(),
             ])
-        || receipt.payload.activation_mode != "atomic-no-clobber-relative-symlink-v1"
+        || receipt.payload.activation_mode != ACTIVATION_MODE
         || receipt.payload.activation_target != format!("generations/{}", validated.operation_id)
         || receipt.payload.publication_state != "activation-bound"
         || receipt.payload.manifest_path != "bootstrap/manifest.json"
@@ -3763,7 +3828,7 @@ async fn verify_private_generation(
     }
     verify_generation_identity(generation, &receipt.payload, store_lease).await?;
     if !verify_projection {
-        verify_path_still_names_open_file_or_dir(generation, &generation_metadata, true)?;
+        verify_directory(generation, &generation_guard)?;
         drop(generation_guard);
         return Ok(());
     }
@@ -3803,7 +3868,7 @@ async fn verify_private_generation(
     {
         return Err("native bootstrap projection cardinality mismatch".into());
     }
-    verify_path_still_names_open_file_or_dir(generation, &generation_metadata, true)?;
+    verify_directory(generation, &generation_guard)?;
     drop(generation_guard);
     Ok(())
 }
@@ -3918,10 +3983,6 @@ fn verify_inventory_directory(
     label: &str,
 ) -> Result<(), AnyErr> {
     let guard = open_dir_nofollow(path)?;
-    let opened = guard.metadata()?;
-    if !opened.file_type().is_dir() {
-        return Err(format!("{label} {} is not a real directory", path.display()).into());
-    }
     let mut seen = BTreeSet::new();
     for (index, entry) in fs::read_dir(path)?.enumerate() {
         if index >= 1024 {
@@ -3946,7 +4007,7 @@ fn verify_inventory_directory(
             return Err(format!("{label} is missing required entry {name:?}").into());
         }
     }
-    verify_path_still_names_open_file_or_dir(path, &opened, true)?;
+    verify_directory(path, &guard)?;
     Ok(())
 }
 
@@ -3979,7 +4040,7 @@ async fn verify_generation_identity(
             if !crate::is_snapshot(&database)? {
                 return Err("receipt says snapshot but generation database is not JSON".into());
             }
-            verify_path_still_names_open_file(&database, &metadata)?;
+            verify_path_still_names_open_file(&database, &database_guard)?;
             let store = MemStore::load(&database)?;
             (store.db_id(), store.embedding_fingerprint()?)
         }
@@ -3989,7 +4050,7 @@ async fn verify_generation_identity(
                 if crate::is_snapshot(&database)? {
                     return Err("receipt says cozo but generation database is JSON".into());
                 }
-                verify_path_still_names_open_file(&database, &metadata)?;
+                verify_path_still_names_open_file(&database, &database_guard)?;
                 let store = CozoStore::open_existing_persistent(
                     &database,
                     DEFAULT_DIM,
@@ -4015,7 +4076,7 @@ async fn verify_generation_identity(
     {
         return Err("active bootstrap database identity/fingerprint mismatch".into());
     }
-    verify_path_still_names_open_file(&database, &metadata)?;
+    verify_path_still_names_open_file(&database, &database_guard)?;
     drop(database_guard);
     Ok(())
 }
@@ -4148,28 +4209,28 @@ async fn load_generation_export(
     #[cfg(feature = "cozo")]
     {
         if crate::is_snapshot(&database)? {
-            verify_path_still_names_open_file(&database, &opened)?;
+            verify_path_still_names_open_file(&database, &guard)?;
             let export = MemStore::load(&database)?.export();
-            verify_path_still_names_open_file(&database, &opened)?;
+            verify_path_still_names_open_file(&database, &guard)?;
             drop(guard);
             return Ok(export);
         }
-        verify_path_still_names_open_file(&database, &opened)?;
+        verify_path_still_names_open_file(&database, &guard)?;
         let store =
             CozoStore::open_existing_persistent(&database, DEFAULT_DIM, _store_lease.clone())?;
         let export = store.export().await?;
         store.prepare_for_file_move()?;
         drop(store);
         crate::reject_sqlite_sidecars(&database)?;
-        verify_path_still_names_open_file(&database, &opened)?;
+        verify_path_still_names_open_file(&database, &guard)?;
         drop(guard);
         Ok(export)
     }
     #[cfg(not(feature = "cozo"))]
     {
-        verify_path_still_names_open_file(&database, &opened)?;
+        verify_path_still_names_open_file(&database, &guard)?;
         let export = MemStore::load(&database)?.export();
-        verify_path_still_names_open_file(&database, &opened)?;
+        verify_path_still_names_open_file(&database, &guard)?;
         drop(guard);
         Ok(export)
     }
@@ -4179,7 +4240,7 @@ fn sync_closed_generation_for_publication(generation: &Path) -> Result<(), AnyEr
     let database = generation.join("memory.db");
     #[cfg(feature = "cozo")]
     crate::reject_sqlite_sidecars(&database)?;
-    File::open(&database)?.sync_all()?;
+    crate::native_artifact::sync_file(&database)?;
     sync_dir(&generation.join("memory.bodies"))?;
     sync_dir(&generation.join("bootstrap"))?;
     sync_dir(generation)?;
@@ -4257,8 +4318,37 @@ impl Drop for GenerationTemp {
 }
 
 fn publish_generation_no_replace(from: &Path, to: &Path) -> Result<(), AnyErr> {
+    #[cfg(windows)]
+    let original = mneme_store_path::windows::Directory::open(from)?;
     rename_no_replace(from, to)?;
+    #[cfg(windows)]
+    {
+        let published = mneme_store_path::windows::Directory::open(to)?;
+        if !published.identity().same_object(original.identity()) {
+            return Err(
+                "published generation changed identity; preserve target for recovery".into(),
+            );
+        }
+        published.sync_all()?;
+        published.require_named()?;
+    }
+    #[cfg(not(windows))]
+    sync_dir(to)?;
     sync_dir(to.parent().ok_or("generation target has no parent")?)?;
+    Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ACTIVATION_TEST_FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+fn activation_boundary(point: &'static str) -> Result<(), AnyErr> {
+    #[cfg(test)]
+    if ACTIVATION_TEST_FAILURE.with(|selected| selected.get() == Some(point)) {
+        return Err(format!("injected activation boundary failure: {point}").into());
+    }
+    let _ = point;
     Ok(())
 }
 
@@ -4278,16 +4368,27 @@ fn activate_no_replace(paths: &GenerationPaths, operation_id: Ulid) -> Result<()
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        use std::os::unix::fs::symlink;
         let temp = paths
             .mneme
             .join(format!(".current-{operation_id}-{}", Ulid::new()));
-        symlink(&expected, &temp)?;
+        activation_boundary("before_temp_write")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&expected, &temp)?;
+        #[cfg(windows)]
+        write_private_file(
+            &temp,
+            &mneme_store_path::windows::encode_activation_selector(operation_id),
+        )?;
+        activation_boundary("after_temp_write")?;
+        activation_boundary("before_rename")?;
         match rename_no_replace(&temp, &paths.current) {
             Ok(()) => {
+                activation_boundary("after_rename")?;
+                activation_boundary("before_parent_sync")?;
                 sync_dir(&paths.mneme)?;
+                activation_boundary("after_parent_sync")?;
                 Ok(())
             }
             Err(error) => {
@@ -4301,8 +4402,8 @@ fn activate_no_replace(paths: &GenerationPaths, operation_id: Ulid) -> Result<()
             }
         }
     }
-    #[cfg(not(unix))]
-    Err("atomic bootstrap activation requires Unix symlinks".into())
+    #[cfg(not(any(unix, windows)))]
+    Err("atomic bootstrap activation is unsupported on this platform".into())
 }
 
 /// Remove only selector temps that parse as this exact operation and point at
@@ -4322,7 +4423,6 @@ fn cleanup_abandoned_activation_temps(
         return Err(".mneme must be a real directory".into());
     }
     let mneme_guard = open_dir_nofollow(&paths.mneme)?;
-    let mneme_opened = mneme_guard.metadata()?;
     let operation = operation_id.to_string();
     let mut stale = Vec::new();
     for (index, entry) in fs::read_dir(&paths.mneme)?.enumerate() {
@@ -4345,7 +4445,9 @@ fn cleanup_abandoned_activation_temps(
             continue;
         }
         let path = entry.path();
+        #[cfg(unix)]
         let entry_metadata = fs::symlink_metadata(&path)?;
+        #[cfg(unix)]
         if !entry_metadata.file_type().is_symlink() {
             return Err(format!(
                 "private activation entry {} is not a symlink",
@@ -4353,18 +4455,40 @@ fn cleanup_abandoned_activation_temps(
             )
             .into());
         }
-        if read_activation_target(&path).as_deref() != Some(expected) {
+        #[cfg(windows)]
+        let selector = mneme_store_path::windows::ActivationSelector::open(&path)?;
+        #[cfg(windows)]
+        let actual = Some(selector.target().to_path_buf());
+        #[cfg(not(windows))]
+        let actual = read_activation_target(&path);
+        if actual.as_deref() != Some(expected) {
             return Err(format!(
                 "private activation entry {} targets a different generation",
                 path.display()
             )
             .into());
         }
-        stale.push(path);
+        #[cfg(not(windows))]
+        let selector = ();
+        // Keep the same selector snapshot that proved the bytes until deletion.
+        // A second open must not mint authority over an unvalidated replacement.
+        stale.push((path, selector));
     }
-    verify_path_still_names_open_file_or_dir(&paths.mneme, &mneme_opened, true)?;
-    for path in &stale {
-        fs::remove_file(path)?;
+    verify_directory(&paths.mneme, &mneme_guard)?;
+    for (path, selector) in &stale {
+        #[cfg(windows)]
+        {
+            selector.require_unchanged()?;
+            mneme_guard.remove_file(
+                path.file_name().ok_or("selector temp has no filename")?,
+                selector.identity(),
+            )?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = selector;
+            fs::remove_file(path)?;
+        }
     }
     if !stale.is_empty() {
         mneme_guard.sync_all()?;
@@ -4373,11 +4497,24 @@ fn cleanup_abandoned_activation_temps(
 }
 
 fn read_activation_target(path: &Path) -> Option<PathBuf> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_symlink() {
-        return None;
+    read_activation_target_checked(path).ok()
+}
+
+fn read_activation_target_checked(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        mneme_store_path::windows::read_activation_selector(path)
     }
-    fs::read_link(path).ok()
+    #[cfg(not(windows))]
+    {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "activation selector is not a symlink",
+            ));
+        }
+        fs::read_link(path)
+    }
 }
 
 #[cfg(test)]
@@ -4840,22 +4977,127 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn activation_boundaries_preserve_exact_retry_and_never_change_foreign_selector() {
+        for boundary in [
+            "before_temp_write",
+            "after_temp_write",
+            "before_rename",
+            "after_rename",
+            "before_parent_sync",
+            "after_parent_sync",
+        ] {
+            let root = std::env::temp_dir().join(format!("mnemed-selector-cut-{}", Ulid::new()));
+            create_private_dir(&root).unwrap();
+            let operation = Ulid::new();
+            let paths = GenerationPaths::new(&root, operation);
+            create_private_dir(&paths.mneme).unwrap();
+            ACTIVATION_TEST_FAILURE.with(|selected| selected.set(Some(boundary)));
+            let result = activate_no_replace(&paths, operation);
+            ACTIVATION_TEST_FAILURE.with(|selected| selected.set(None));
+            assert!(result.unwrap_err().to_string().contains(boundary));
+            let crossed = matches!(
+                boundary,
+                "after_rename" | "before_parent_sync" | "after_parent_sync"
+            );
+            assert_eq!(
+                read_activation_target(&paths.current).is_some(),
+                crossed,
+                "{boundary}"
+            );
+            activate_no_replace(&paths, operation).unwrap();
+            activate_no_replace(&paths, operation).unwrap();
+            assert!(activate_no_replace(&paths, Ulid::new()).is_err());
+            assert_eq!(
+                read_activation_target(&paths.current).unwrap(),
+                PathBuf::from("generations").join(operation.to_string())
+            );
+            assert!(!fs::read_dir(&paths.mneme).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".current-")
+            }));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_selector_cleanup_requires_exact_target_and_keeps_foreign_bytes() {
+        let root = std::env::temp_dir().join(format!("mnemed-selector-cleanup-{}", Ulid::new()));
+        create_private_dir(&root).unwrap();
+        let operation = Ulid::new();
+        let paths = GenerationPaths::new(&root, operation);
+        create_private_dir(&paths.mneme).unwrap();
+        let expected = PathBuf::from("generations").join(operation.to_string());
+        let valid = paths
+            .mneme
+            .join(format!(".current-{operation}-{}", Ulid::new()));
+        write_private_file(
+            &valid,
+            &mneme_store_path::windows::encode_activation_selector(operation),
+        )
+        .unwrap();
+        cleanup_abandoned_activation_temps(&paths, operation, &expected).unwrap();
+        assert!(!valid.exists());
+        let foreign = paths
+            .mneme
+            .join(format!(".current-{operation}-{}", Ulid::new()));
+        let bytes = mneme_store_path::windows::encode_activation_selector(Ulid::new());
+        write_private_file(&foreign, &bytes).unwrap();
+        assert!(cleanup_abandoned_activation_temps(&paths, operation, &expected).is_err());
+        assert_eq!(fs::read(&foreign).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_selector_is_regular_and_unknown_or_torn_bytes_are_preserved() {
+        let root = std::env::temp_dir().join(format!("mnemed-selector-format-{}", Ulid::new()));
+        create_private_dir(&root).unwrap();
+        let operation = Ulid::new();
+        let paths = GenerationPaths::new(&root, operation);
+        create_private_dir(&paths.mneme).unwrap();
+        for bytes in [
+            b"mneme.windows-selector.v2\ngenerations/foreign\n".as_slice(),
+            b"mneme.windows-selector.v1\ngenerations/",
+        ] {
+            write_private_file(&paths.current, bytes).unwrap();
+            assert!(activate_no_replace(&paths, operation).is_err());
+            assert_eq!(fs::read(&paths.current).unwrap(), bytes);
+            fs::remove_file(&paths.current).unwrap();
+        }
+        activate_no_replace(&paths, operation).unwrap();
+        assert!(
+            fs::symlink_metadata(&paths.current)
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
+        assert_eq!(
+            fs::read(&paths.current).unwrap(),
+            mneme_store_path::windows::encode_activation_selector(operation)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn generation_and_activation_publication_never_clobber() {
         let root = std::env::temp_dir().join(format!("mnemed-bootstrap-publish-{}", Ulid::new()));
-        fs::create_dir(&root).unwrap();
+        create_private_dir(&root).unwrap();
         let generations = root.join("generations");
-        fs::create_dir(&generations).unwrap();
+        create_private_dir(&generations).unwrap();
         let first = generations.join("first-temp");
         let final_path = generations.join("generation");
-        fs::create_dir(&first).unwrap();
-        fs::write(first.join("marker"), b"first").unwrap();
+        create_private_dir(&first).unwrap();
+        write_private_file(&first.join("marker"), b"first").unwrap();
         publish_generation_no_replace(&first, &final_path).unwrap();
 
         let second = generations.join("second-temp");
-        fs::create_dir(&second).unwrap();
-        fs::write(second.join("marker"), b"second").unwrap();
+        create_private_dir(&second).unwrap();
+        write_private_file(&second.join("marker"), b"second").unwrap();
         assert!(publish_generation_no_replace(&second, &final_path).is_err());
         assert_eq!(fs::read(final_path.join("marker")).unwrap(), b"first");
 

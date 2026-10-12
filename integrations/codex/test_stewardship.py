@@ -1,5 +1,6 @@
 """Disposable auxiliary stores and injected owners/models; no live calls."""
 import json
+import hashlib
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -9,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import stewardship as subject
-from librarian_policy import LibrarianBudget
+from librarian_policy import LibrarianBudget, IDLE_SECONDS
 from tag_context import TagContext
 
 from fixture_stewardship import DB, A, B, C, FP, GUIDE, context, target
@@ -114,6 +115,47 @@ class JournalTests(unittest.TestCase):
             row=journal.db.execute("SELECT * FROM usage").fetchone()
             self.assertEqual((row["attempts"],row["input"],row["output"],row["native_rounds"]),(1,700,50,1))
 
+    def test_native_cadence_survives_reopen_without_paid_attempt_quota(self):
+        for index in range(self.budget.attempts+3):
+            now=100000+index*self.budget.native_seconds
+            with subject.Journal(DB,root=self.root,now=now) as journal:
+                journal.enqueue([A])
+                self.assertTrue(journal.reserve_native(self.budget))
+            with subject.Journal(DB,root=self.root,now=now) as journal:
+                self.assertFalse(journal.reserve_native(self.budget))
+        usage=subject.inspect(DB,root=self.root)["usage"]
+        self.assertEqual(usage["native_rounds"],self.budget.attempts+3)
+        self.assertEqual(usage["attempts"],0)
+
+    def test_idle_probe_backoff_is_durable_bounded_and_not_a_work_fence(self):
+        with self.journal() as journal:
+            journal.page([],None)
+        accepted=[]
+        for index in range(int(4*IDLE_SECONDS/self.budget.native_seconds)):
+            now=100000+index*self.budget.native_seconds
+            with subject.Journal(DB,root=self.root,now=now) as journal:
+                if journal.reserve_native(self.budget):
+                    accepted.append(now)
+                self.assertLessEqual(float(journal.get("probe_delay")),IDLE_SECONDS)
+        self.assertLess(len(accepted),12)
+        self.assertEqual(accepted[1]-accepted[0],self.budget.native_seconds)
+        self.assertEqual(accepted[2]-accepted[1],2*self.budget.native_seconds)
+        self.assertEqual(accepted[-1]-accepted[-2],IDLE_SECONDS)
+        with subject.Journal(DB,root=self.root,now=now+self.budget.native_seconds) as journal:
+            self.assertLess(journal.now,float(journal.get("next_probe")))
+            journal.enqueue([B])
+            self.assertTrue(journal.reserve_native(self.budget))
+
+    def test_candidate_enumeration_does_not_spend_persisted_fairness_turn(self):
+        with self.journal() as journal:
+            journal.page([A],None);journal.enqueue([B])
+            self.assertEqual(journal.candidates(GUIDE,2),[A,B])
+            self.assertEqual(journal.candidates(GUIDE,2),[A,B])
+            journal.served(A)
+        with self.journal() as journal:
+            self.assertEqual(journal.candidates(GUIDE,2),[B,A])
+            self.assertEqual(journal.candidates(GUIDE,2),[B,A])
+
     def test_unknown_ack_is_history_not_reconstructed_success(self):
         with self.journal() as journal:
             seq=journal.intent(target(),GUIDE,["rust","people"])
@@ -133,13 +175,16 @@ class FakeOwner:
     writes=[]
     lost=False
     changed=False
+    reads=[]
+    authorizations=0
     def __init__(self,*_):
         self.db_id=DB;self.deadline=time.monotonic()+15;self.remaining_bytes=64000
     def __enter__(self):return self
     def __exit__(self,*_):pass
-    def authorize(self):pass
+    def authorize(self):type(self).authorizations+=1
     def page(self,cursor,limit):return self.ids[:limit],None
     def target(self,identifier):
+        self.reads.append(identifier)
         self.remaining_bytes-=256
         fp="c"*64 if self.changed else FP
         return target(identifier,fp),fp
@@ -152,8 +197,11 @@ class FakeOwner:
 class FakeRuntime:
     calls=0
     mode="noop"
-    def steward(self,targets,context,**_):
+    def __init__(self):
+        self.batches=[];self.timeouts=[]
+    def steward(self,targets,context,*,timeout=45):
         self.calls+=1
+        self.batches.append([t["id"] for t in targets]);self.timeouts.append(timeout)
         if self.mode=="unknown":return {"provider_attempt":True,"usage":None,"decisions":None}
         if self.mode=="crash":raise RuntimeError()
         return {"provider_attempt":True,"usage":{"input_tokens":100,"output_tokens":10},
@@ -168,7 +216,10 @@ class StepTests(unittest.TestCase):
         self.config={"tag_stewardship":True,"recording_mode":"automatic","memory_mode":"async",
             "reader_model":"gpt-6.1-sol","librarian_effort":"medium"}
         self.runtime=FakeRuntime();self.accounts=[]
+        self.now=100000
         FakeOwner.writes=[];FakeOwner.lost=False;FakeOwner.changed=False;FakeOwner.ids=[A]
+        FakeOwner.reads=[];FakeOwner.authorizations=0
+        p=patch.object(subject.time,"time",lambda:self.now);p.start();self.addCleanup(p.stop)
         for name,value in (("journal_root",lambda:self.root),("NativeOwner",FakeOwner)):
             p=patch.object(subject,name,value);p.start();self.addCleanup(p.stop)
         p=patch("tag_context.collect",return_value=context());p.start();self.addCleanup(p.stop)
@@ -263,16 +314,161 @@ class StepTests(unittest.TestCase):
             self.config["librarian_effort"]="high";self.resume()
             self.assertTrue(self.step());self.assertEqual(self.runtime.calls,1)
 
+    def test_empty_passes_cannot_use_up_fresh_dirty_work(self):
+        self.assertTrue(self.step())
+        initial=subject.inspect(DB)["usage"]
+        for _ in range(LibrarianBudget().attempts+2):
+            self.now+=IDLE_SECONDS
+            self.assertFalse(self.step())
+        self.assertEqual(self.runtime.calls,1)
+        # A new session reuses the same owner journal, not a reset allowance.
+        self.now+=LibrarianBudget().native_seconds
+        self.resume(B)
+        self.assertTrue(self.step())
+        self.assertEqual(self.runtime.batches,[[A],[B]])
+        usage=subject.inspect(DB)["usage"]
+        self.assertGreater(usage["native_rounds"],LibrarianBudget().attempts)
+        self.assertEqual((usage["attempts"],usage["input"],usage["output"]),
+            (initial["attempts"]+1,initial["input"]+100,initial["output"]+10))
+
+    def test_changed_guide_is_detected_after_idle_probe_cooldown(self):
+        self.assertTrue(self.step())
+        for _ in range(8):
+            self.now+=IDLE_SECONDS
+            self.assertFalse(self.step())
+        with subject.Journal(DB) as journal:
+            next_probe=float(journal.get("next_probe"))
+            self.assertEqual(next_probe-self.now,IDLE_SECONDS)
+            before_guide=journal.get("guide")
+        text="Prefer precise topic names supported by each summary."
+        changed=TagContext(True,"available",DB,json.dumps({"id":C,"content_fingerprint":"c"*64,
+            "text":text,"text_sha256":hashlib.sha256(text.encode()).hexdigest()}),context().vocabulary_json,10)
+        with patch("tag_context.collect",return_value=changed):
+            self.now=next_probe
+            self.assertFalse(self.step())  # Discover policy change without stale-content inference.
+            with subject.Journal(DB) as journal:
+                self.assertNotEqual(journal.get("guide"),before_guide)
+                self.assertTrue(journal.has_work())
+            self.now+=LibrarianBudget().native_seconds
+            self.assertTrue(self.step())
+        self.assertEqual(self.runtime.batches,[[A],[A]])
+
+    def test_large_summaries_fair_at_native_and_model_admission_across_reopens(self):
+        cold=[f"{index:026d}" for index in range(1,33)]
+        hot=f"{100:026d}"
+        FakeOwner.ids=cold
+        original_init=FakeOwner.__init__
+        original_target=FakeOwner.target
+        def get(owner,identifier):
+            node,fp=original_target(owner,identifier)
+            if identifier==hot:
+                fp=hashlib.sha256(str(self.now).encode()).hexdigest()
+                node["content_fingerprint"]=fp
+            node["summary"]="x"*7168
+            owner.remaining_bytes-=len(subject.encoded(node))-256
+            return node,fp
+        # Exercise both one native slot and several native slots with one
+        # actual model slot. Each step closes/reopens the owner journal.
+        for read_bytes in (2*len(subject.encoded({**target(),"summary":"x"*7168}))-1,65536):
+            with self.subTest(read_bytes=read_bytes):
+                with subject.Journal(DB) as journal:
+                    journal.db.execute("DELETE FROM work")
+                    journal.put("cursor","");journal.put("next_sweep",0)
+                    journal.put("next_batch",0);journal.put("next_lane","cold")
+                    journal.enqueue([hot])
+                def init(owner,*args):
+                    original_init(owner,*args);owner.remaining_bytes=read_bytes
+                self.runtime.batches.clear();FakeOwner.reads=[]
+                with patch.object(FakeOwner,"__init__",init),patch.object(FakeOwner,"target",get):
+                    for index in range(4):
+                        self.now+=LibrarianBudget().native_seconds
+                        with subject.Journal(DB) as journal:journal.enqueue([hot])
+                        # Changing hot content keeps hot work genuinely pending.
+                        FakeOwner.changed=bool(index%2)
+                        first_read=len(FakeOwner.reads)
+                        self.assertTrue(self.step())
+                        expected=cold[index//2] if index%2==0 else hot
+                        self.assertEqual(FakeOwner.reads[first_read],expected)
+                        self.assertEqual(self.runtime.batches[-1],[expected])
+
+    def test_examined_cold_scan_and_oversized_head_leave_hot_room(self):
+        # Stable no-op/unresolved cold heads count as actual scan progress;
+        # they cannot keep buying the first read while dirty work waits.
+        for mode in ("noop","unresolved"):
+            with self.subTest(mode=mode):
+                self.runtime.mode=mode
+                FakeOwner.ids=[A]
+                self.resume(A)
+                FakeOwner.changed=not FakeOwner.changed
+                self.assertTrue(self.step())
+                with subject.Journal(DB) as journal:
+                    journal.page([A],None);journal.enqueue([B]);journal.put("next_lane","cold")
+                original=FakeOwner.target
+                def single(owner,identifier):
+                    node,fp=original(owner,identifier)
+                    owner.remaining_bytes=16000
+                    return node,fp
+                self.now+=LibrarianBudget().native_seconds
+                with patch.object(FakeOwner,"target",single):
+                    self.assertFalse(self.step())
+                    self.now+=LibrarianBudget().native_seconds
+                    self.assertTrue(self.step())
+                self.assertEqual(self.runtime.batches[-1],[B])
+        # Individually unrepresentable cold content is deferred, not called a
+        # semantic abstention and not allowed to trap the other lane.
+        self.config["librarian_effort"]="low"
+        with subject.Journal(DB) as journal:
+            journal.page([A],None);journal.enqueue([B]);journal.put("next_lane","cold")
+        original=FakeOwner.target
+        def oversized(owner,identifier):
+            node,fp=original(owner,identifier)
+            if identifier==A:
+                node["summary"]="x"*(16*1024);owner.remaining_bytes=16000
+            return node,fp
+        with patch.object(FakeOwner,"target",oversized):
+            self.now+=LibrarianBudget().native_seconds
+            self.assertFalse(self.step())
+            with subject.Journal(DB) as journal:
+                self.assertEqual(journal.db.execute("SELECT outcome FROM work WHERE id=?",(A,)).fetchone()[0],"resource_deferred")
+            self.now+=LibrarianBudget().native_seconds
+            self.assertTrue(self.step())
+        self.assertEqual(self.runtime.batches[-1],[B])
+
+    def test_owner_exhaustion_and_unknown_fence_inference_not_scan_or_history(self):
+        for unknown in (0,1):
+            with self.subTest(unknown=unknown):
+                with subject.Journal(DB) as journal:
+                    epoch=int(self.now//subject.DAY)
+                    journal.db.execute("INSERT OR IGNORE INTO usage(epoch) VALUES(?)",(epoch,))
+                    journal.db.execute("UPDATE usage SET attempts=?,input=2345,output=345,unknown=? WHERE epoch=?",
+                        (LibrarianBudget().attempts,unknown,epoch))
+                    journal.enqueue([B]);journal.put("next_batch",0)
+                    before=tuple(journal.db.execute("SELECT attempts,input,output,unknown FROM usage WHERE epoch=?",(epoch,)).fetchone())
+                self.assertFalse(self.step())
+                self.assertIn(B,FakeOwner.reads)
+                self.assertEqual(self.runtime.calls,0)
+                self.assertEqual(FakeOwner.writes,[])
+                with subject.Journal(DB) as journal:
+                    after=tuple(journal.db.execute("SELECT attempts,input,output,unknown FROM usage WHERE epoch=?",(epoch,)).fetchone())
+                    self.assertEqual(after,before)
+
+    def test_native_io_deadline_does_not_shorten_existing_provider_deadline(self):
+        for effort in ("low","medium","high"):
+            self.config["librarian_effort"]=effort
+            self.resume()
+            self.assertTrue(self.step())
+            self.assertEqual(self.runtime.timeouts[-1],45)
+
 
 class NativeOwnerTests(unittest.TestCase):
     def test_real_host_adapter_uses_complete_summary_and_strong_owner_guards(self):
-        from types import SimpleNamespace
+        from service import ConnectConfig
         from target_policy import TargetPolicy
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);service_path=root/"service.json";service_path.write_text("{}")
             database=root/".mneme/codex-memory.db"
             policy=TargetPolicy("project","project",str(database),None,str(root),str(service_path))
-            service=SimpleNamespace(url="http://127.0.0.1:12345/",token_env=None)
+            service=ConnectConfig("http://127.0.0.1:12345/","project",str(database))
             calls=[]
             class Client:
                 timeout=1

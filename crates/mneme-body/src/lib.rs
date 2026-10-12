@@ -7,7 +7,7 @@
 //! once a node clears the relevance threshold, and *where* it lives (memory,
 //! disk, the network) is swappable without touching the graph.
 //!
-//! Two stores ship here, both std-only:
+//! Two stores ship here:
 //! - [`InlineStore`] (`inline://`) — bytes held in-process. The default for
 //!   ingested-on-the-fly content; nothing to clean up, nothing external.
 //! - [`FsStore`] (`fs://`) — bytes on the local filesystem under a base dir.
@@ -17,13 +17,18 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use mneme_core::BodyRef;
 use mneme_core::ports::{BodyChunk, BodyStore, Error, Result};
 use ulid::Ulid;
+
+#[cfg(windows)]
+mod windows;
 
 fn checked_probe_limit(max_bytes: usize) -> Result<u64> {
     let with_probe = max_bytes.checked_add(1).ok_or_else(|| {
@@ -132,22 +137,37 @@ impl BodyStore for InlineStore {
     }
 }
 
-/// `fs://` — bodies as files under `base`. A `put` mints `fs://<base>/<ulid>`;
-/// `get` reads the path back out. The scheme prefix is stripped to recover the
-/// path, so the URI is self-describing.
+/// `fs://` — bodies as files under `base`. A `put` mints a portable
+/// `fs://<ulid>` reference. Legacy absolute references remain readable inside
+/// the configured root; Windows requires one immediate child and refuses
+/// reparse points, alternate streams, and multiply linked files.
 pub struct FsStore {
+    #[cfg(not(windows))]
     base: PathBuf,
+    #[cfg(windows)]
+    root: windows::Root,
 }
 
 impl FsStore {
-    /// Create the store, ensuring `base` exists.
+    /// Create the store, ensuring `base` exists. Windows creates private NTFS
+    /// directories and validates existing ACLs rather than silently repairing
+    /// an existing directory's permissions.
     pub fn new(base: impl Into<PathBuf>) -> Result<Self> {
         let base = base.into();
-        std::fs::create_dir_all(&base).map_err(|e| Error::Body(format!("create {base:?}: {e}")))?;
-        set_private_dir(&base)?;
-        let base = std::fs::canonicalize(&base)
-            .map_err(|e| Error::Body(format!("canonicalize {base:?}: {e}")))?;
-        Ok(Self { base })
+        #[cfg(windows)]
+        {
+            let root = windows::Root::create_or_open(&base)?;
+            Ok(Self { root })
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::create_dir_all(&base)
+                .map_err(|e| Error::Body(format!("create {base:?}: {e}")))?;
+            set_private_dir(&base)?;
+            let base = std::fs::canonicalize(&base)
+                .map_err(|e| Error::Body(format!("canonicalize {base:?}: {e}")))?;
+            Ok(Self { base })
+        }
     }
 
     /// Open an already-admitted body directory without creating, repairing, or
@@ -157,15 +177,17 @@ impl FsStore {
     /// generation. `base` must be absolute. On Unix, the final named object
     /// must be a current-owner directory with exact mode `0700`; symlinks are
     /// rejected. Its identity is checked before and after canonicalization so a
-    /// simple replacement race fails closed. Other platforms fail as
-    /// unsupported until they have an equivalent identity-and-permission
-    /// admission policy.
+    /// simple replacement race fails closed. Windows uses the shared native
+    /// store-path directory admission policy: local NTFS, current-user private
+    /// ACL, no reparse traversal, and a retained directory handle. Other
+    /// platforms fail as unsupported.
     ///
-    /// The returned `PathBuf` is deliberately not advertised as an fd-backed
-    /// namespace authority. A same-UID process can still replace a path after
-    /// this function returns, and `std` cannot keep every ancestor pinned while
-    /// canonicalizing it. The managed generation/root guard must remain held
-    /// for the lifetime of a store opened through this constructor.
+    /// On Unix, the retained canonical path is not an fd-backed namespace
+    /// authority. A same-UID process can still replace a path after this function
+    /// returns, and `std` cannot keep every ancestor pinned while canonicalizing
+    /// it. Windows child operations instead use the retained directory handle
+    /// and check that its name still identifies it. On either platform, the
+    /// managed generation/root guard must remain held for the store's lifetime.
     pub fn open_existing(base: impl Into<PathBuf>) -> Result<Self> {
         let base = base.into();
         if !base.is_absolute() {
@@ -174,13 +196,22 @@ impl FsStore {
             )));
         }
 
-        let base = admit_existing_fs_root(&base)?;
-        Ok(Self { base })
+        #[cfg(windows)]
+        {
+            let root = windows::Root::open_existing(&base)?;
+            Ok(Self { root })
+        }
+        #[cfg(not(windows))]
+        {
+            let base = admit_existing_fs_root(&base)?;
+            Ok(Self { base })
+        }
     }
 
     /// Resolve a ref under this store's base. New refs contain only an opaque
     /// filename; legacy absolute refs remain readable iff their canonical target
     /// is still inside the configured base.
+    #[cfg(not(windows))]
     fn resolve(&self, body: &BodyRef) -> Result<PathBuf> {
         let raw = body
             .as_str()
@@ -204,6 +235,18 @@ impl FsStore {
             )));
         }
         Ok(canonical)
+    }
+
+    fn open_file(&self, body: &BodyRef) -> Result<std::fs::File> {
+        #[cfg(windows)]
+        {
+            self.root.open_file(body)
+        }
+        #[cfg(not(windows))]
+        {
+            let path = self.resolve(body)?;
+            std::fs::File::open(&path).map_err(|e| Error::Body(format!("open {path:?}: {e}")))
+        }
     }
 }
 
@@ -302,10 +345,10 @@ fn admit_existing_fs_root_for_owner(path: &Path, expected_owner: u32) -> Result<
     Ok(canonical)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn admit_existing_fs_root(_path: &Path) -> Result<PathBuf> {
     Err(Error::Body(
-        "unsupported: existing-only fs body-root admission is currently supported only on Unix"
+        "unsupported: existing-only fs body-root admission is supported only on Unix or Windows"
             .into(),
     ))
 }
@@ -317,21 +360,30 @@ impl BodyStore for FsStore {
     }
 
     async fn get(&self, body: &BodyRef) -> Result<Vec<u8>> {
-        let path = self.resolve(body)?;
-        std::fs::read(&path).map_err(|e| Error::Body(format!("read {path:?}: {e}")))
+        #[cfg(windows)]
+        {
+            let mut file = self.open_file(body)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|e| Error::Body(format!("read {}: {e}", body.as_str())))?;
+            Ok(bytes)
+        }
+        #[cfg(not(windows))]
+        {
+            let path = self.resolve(body)?;
+            std::fs::read(&path).map_err(|e| Error::Body(format!("read {path:?}: {e}")))
+        }
     }
 
     async fn get_range(&self, body: &BodyRef, offset: u64, max_bytes: usize) -> Result<BodyChunk> {
-        let path = self.resolve(body)?;
-        let mut file =
-            std::fs::File::open(&path).map_err(|e| Error::Body(format!("open {path:?}: {e}")))?;
+        let mut file = self.open_file(body)?;
         // Some platforms expose signed filesystem offsets even though Rust's
         // API accepts u64. Preserve the range contract for every u64 by avoiding
         // a seek when the requested offset is already at/past known EOF.
         checked_probe_limit(max_bytes)?;
         let source_len = file
             .metadata()
-            .map_err(|e| Error::Body(format!("stat {path:?}: {e}")))?
+            .map_err(|e| Error::Body(format!("stat {}: {e}", body.as_str())))?
             .len();
         if offset >= source_len {
             return finish_chunk(Vec::new(), offset, false);
@@ -340,53 +392,67 @@ impl BodyStore for FsStore {
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BodyRef> {
-        use std::io::Write;
-
-        let name = Ulid::new().to_string();
-        let body = BodyRef::new(format!("fs://{name}"))
-            .map_err(|error| Error::Body(format!("mint fs body reference: {error}")))?;
-        let path = self.base.join(&name);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
+        #[cfg(windows)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            self.root.put(bytes)
         }
-        let mut file = options
-            .open(&path)
-            .map_err(|e| Error::Body(format!("create {path:?}: {e}")))?;
-        file.write_all(bytes)
-            .map_err(|e| Error::Body(format!("write {path:?}: {e}")))?;
-        file.sync_all()
-            .map_err(|e| Error::Body(format!("sync {path:?}: {e}")))?;
-        std::fs::File::open(&self.base)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|e| Error::Body(format!("sync body directory {:?}: {e}", self.base)))?;
-        // Relative refs are portable with the database/body directory and do not
-        // disclose an absolute host path to every client that reads a node.
-        Ok(body)
+        #[cfg(not(windows))]
+        {
+            use std::io::Write;
+
+            let name = Ulid::new().to_string();
+            let body = BodyRef::new(format!("fs://{name}"))
+                .map_err(|error| Error::Body(format!("mint fs body reference: {error}")))?;
+            let path = self.base.join(&name);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&path)
+                .map_err(|e| Error::Body(format!("create {path:?}: {e}")))?;
+            file.write_all(bytes)
+                .map_err(|e| Error::Body(format!("write {path:?}: {e}")))?;
+            file.sync_all()
+                .map_err(|e| Error::Body(format!("sync {path:?}: {e}")))?;
+            std::fs::File::open(&self.base)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|e| Error::Body(format!("sync body directory {:?}: {e}", self.base)))?;
+            // Relative refs are portable with the database/body directory and do not
+            // disclose an absolute host path to every client that reads a node.
+            Ok(body)
+        }
     }
 
     async fn delete(&self, body: &BodyRef) -> Result<()> {
-        let raw = body
-            .as_str()
-            .strip_prefix("fs://")
-            .ok_or_else(|| Error::Body(format!("not an fs:// ref: {}", body.as_str())))?;
-        let raw = Path::new(raw);
-        let untrusted = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else {
-            self.base.join(raw)
-        };
-        if !untrusted.exists() {
-            return Ok(());
+        #[cfg(windows)]
+        {
+            self.root.delete(body)
         }
-        let path = self.resolve(body)?;
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(Error::Body(format!("delete {path:?}: {e}"))),
+        #[cfg(not(windows))]
+        {
+            let raw = body
+                .as_str()
+                .strip_prefix("fs://")
+                .ok_or_else(|| Error::Body(format!("not an fs:// ref: {}", body.as_str())))?;
+            let raw = Path::new(raw);
+            let untrusted = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                self.base.join(raw)
+            };
+            if !untrusted.exists() {
+                return Ok(());
+            }
+            let path = self.resolve(body)?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(Error::Body(format!("delete {path:?}: {e}"))),
+            }
         }
     }
 }
@@ -398,7 +464,7 @@ fn set_private_dir(path: &Path) -> Result<()> {
         .map_err(|e| Error::Body(format!("chmod 0700 {path:?}: {e}")))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn set_private_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -407,8 +473,10 @@ fn set_private_dir(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     struct Scratch(PathBuf);
 
+    #[cfg(unix)]
     impl Scratch {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!("mneme-body-test-{}", Ulid::new()));
@@ -418,12 +486,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
+    #[cfg(not(windows))]
     fn expect_existing_root_refusal(path: &Path) -> Error {
         match FsStore::open_existing(path) {
             Ok(_) => panic!("unexpectedly admitted existing body root {path:?}"),
@@ -713,9 +783,9 @@ mod tests {
         );
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
-    fn fs_open_existing_is_explicitly_unsupported_off_unix() {
+    fn fs_open_existing_is_explicitly_unsupported_on_other_platforms() {
         let absent = std::env::temp_dir().join(format!(
             "mneme-body-unsupported-existing-root-{}",
             Ulid::new()
@@ -725,7 +795,11 @@ mod tests {
         let error = expect_existing_root_refusal(&absent);
 
         assert!(error.to_string().contains("unsupported"));
-        assert!(error.to_string().contains("supported only on Unix"));
+        assert!(
+            error
+                .to_string()
+                .contains("supported only on Unix or Windows")
+        );
         assert!(!absent.exists());
     }
 
@@ -931,7 +1005,7 @@ mod tests {
         let store = FsStore::new(&dir).unwrap();
         let source: Vec<u8> = (0..4_096).map(|index| (index % 251) as u8).collect();
         let body = store.put(&source).await.unwrap();
-        let file = std::fs::File::open(store.resolve(&body).unwrap()).unwrap();
+        let file = store.open_file(&body).unwrap();
         let mut counted = CountingReader {
             inner: file,
             bytes_read: 0,
@@ -945,7 +1019,7 @@ mod tests {
             "Take must prevent the source from serving more than max_bytes + 1"
         );
 
-        let file = std::fs::File::open(store.resolve(&body).unwrap()).unwrap();
+        let file = store.open_file(&body).unwrap();
         let mut zero = CountingReader {
             inner: file,
             bytes_read: 0,

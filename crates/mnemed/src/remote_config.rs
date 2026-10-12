@@ -17,7 +17,7 @@ const DEFAULT_SSH_MCP_PORT: u16 = 18766;
 #[command(next_help_heading = "Remote connection")]
 pub(crate) struct RemoteOptions {
     /// Use an existing MCP server: http(s)://URL, ssh://[USER@]HOST[:SSH_PORT],
-    /// or a name from ~/.config/mneme/remotes.json. Never opens a local database.
+    /// or a name from the per-user mneme/remotes.json. Never opens a local database.
     #[arg(long, global = true, value_name = "URL_OR_NAME", conflicts_with = "db")]
     pub remote: Option<String>,
     /// Remote registry name (not a path). Defaults to project, or user with --user.
@@ -29,7 +29,8 @@ pub(crate) struct RemoteOptions {
         conflicts_with = "user"
     )]
     pub remote_db: Option<String>,
-    /// Named-connection JSON; defaults to $XDG_CONFIG_HOME/mneme/remotes.json.
+    /// Named-connection JSON; defaults below XDG_CONFIG_HOME, APPDATA on Windows,
+    /// or ~/.config on Unix, at mneme/remotes.json.
     #[arg(long, global = true, value_name = "PATH", requires = "remote")]
     pub remote_config: Option<PathBuf>,
     /// MCP port on the SSH host's loopback interface (default 18766).
@@ -92,9 +93,23 @@ fn default_config() -> Result<PathBuf, AnyErr> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
+            #[cfg(windows)]
+            {
+                std::env::var_os("APPDATA")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE")
+                            .filter(|value| !value.is_empty())
+                            .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|home| PathBuf::from(home).join(".config"))
+            }
         })
         .ok_or("cannot locate remotes.json; set --remote-config PATH or use an explicit URL")?;
     Ok(root.join("mneme/remotes.json"))

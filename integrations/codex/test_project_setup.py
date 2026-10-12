@@ -27,7 +27,8 @@ class ProjectSetupTests(unittest.TestCase):
             library_helper=Path(__file__).resolve().parent.parent / "library/library.py",
             library_config=None, port=19871, no_recording=False, no_trust_hooks=False, json=True)
         self.addCleanup(patch.stopall)
-        patch.dict(os.environ, {"HOME":str(self.base / "home"), "XDG_DATA_HOME":str(self.base / "data")}).start()
+        patch.dict(os.environ, {"HOME":str(self.base / "home"), "XDG_DATA_HOME":str(self.base / "data"),
+                                "XDG_CONFIG_HOME":str(self.base / "config")}).start()
         self.native = patch.object(setup, "native", side_effect=self.native_call).start()
         self.trust = patch.object(setup, "trust_project_hooks", return_value={"status":"trusted", "trusted":8}).start()
         self.ready = patch.object(setup, "ensure_ready", return_value={"state":"ready"}).start()
@@ -62,6 +63,64 @@ class ProjectSetupTests(unittest.TestCase):
         receipt = json.loads((self.root / ".mneme/codex-integration/receipt.json").read_text())
         self.assertEqual(receipt["plan"]["library_enrollment"], "none")
         self.assertNotIn("library_helper", result)
+
+    def registry_config(self, path=None):
+        from store_registry import default_registry_path
+        path = path or default_registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"schema":"mneme.stores.v1","stores":[]}')
+        return path
+
+    def test_new_setup_discovers_existing_default_store_registry(self):
+        path = self.registry_config()
+        result = self.run_setup()
+        self.assertEqual(result["store_registry"], str(path))
+        hook_path = self.root / ".mneme/codex-integration/config/hooks.json"
+        hook = json.loads(hook_path.read_bytes())
+        self.assertEqual(hook["schema"], "mneme.codex-hooks.config.v12")
+        self.assertEqual(hook["store_registry"], str(path))
+        self.assertNotIn("global_preferences", hook)
+        self.assertIsNone(setup.load_profile(self.root)["library_config"])
+        self.assertEqual(self.run_setup()["store_registry"], str(path))
+
+    def test_explicit_store_registry_wins_over_default_for_new_setup(self):
+        default = self.registry_config()
+        default.write_text('{"invalid":true}')
+        self.args.store_registry = self.registry_config(self.base / "explicit/stores.json")
+        self.assertEqual(self.run_setup()["store_registry"], str(self.args.store_registry))
+
+    def test_invalid_default_store_registry_refuses_before_native_or_config_writes(self):
+        path = self.registry_config()
+        path.write_text('{"schema":"mneme.stores.v1","stores":[],"unknown":true}')
+        with self.assertRaisesRegex(ValueError, "store registry"):
+            self.run_setup()
+        self.native.assert_not_called()
+        self.ready.assert_not_called()
+        self.assertFalse((self.root / ".mneme").exists())
+        self.assertFalse((self.root / ".codex").exists())
+
+    def test_existing_legacy_setup_never_silently_adopts_new_default_registry(self):
+        self.assertNotIn("store_registry", self.run_setup())
+        path = self.registry_config()
+        path.write_text('{"invalid":true}')
+        self.assertNotIn("store_registry", self.run_setup())
+        path.write_text('{"schema":"mneme.stores.v1","stores":[]}')
+        self.args.store_registry = path
+        self.ready.reset_mock()
+        with self.assertRaisesRegex(ValueError, "conflicts with existing integration"):
+            self.run_setup()
+        self.ready.assert_not_called()
+
+    def test_existing_named_setup_preserves_route_and_refuses_explicit_reroute(self):
+        original = self.registry_config()
+        self.run_setup()
+        self.args.store_registry = self.registry_config(self.base / "other/stores.json")
+        self.ready.reset_mock()
+        with self.assertRaisesRegex(ValueError, "conflicts with existing integration"):
+            self.run_setup()
+        self.ready.assert_not_called()
+        self.args.store_registry = original
+        self.assertEqual(self.run_setup()["store_registry"], str(original))
 
     def test_adopts_existing_database_and_bodies_unchanged(self):
         dot = self.root / ".mneme"

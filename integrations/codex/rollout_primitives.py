@@ -9,8 +9,12 @@ import json
 import os
 from pathlib import Path
 import re
-import stat
 from typing import Any
+
+if __package__:
+    from .host_files import open_regular as _open_regular
+else:
+    from host_files import open_regular as _open_regular
 
 TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 META = "internal_chat_message_metadata_passthrough"
@@ -58,16 +62,10 @@ def record_ref(row: dict, raw: bytes, ordinal: int, offset: int) -> dict:
 
 
 def open_regular(path: Path) -> int:
-    """Return an owned nonblocking descriptor; caller must close it."""
-    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("not_regular_file")
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
+    """Return an owned checked binary descriptor; caller must close it."""
+    # These are read-only sources, not writable state identities. Preserve the
+    # existing hard-link allowance; callers bind source identity and anchors.
+    return _open_regular(path, single_link=False)
 
 
 def read_regular(path: Path, limit: int) -> bytes:

@@ -103,6 +103,7 @@ struct WirePolicy {
     request_bytes: usize,
     response_bytes: usize,
     expected_server: Option<&'static str>,
+    loopback_only: bool,
 }
 impl Default for WirePolicy {
     fn default() -> Self {
@@ -110,6 +111,7 @@ impl Default for WirePolicy {
             request_bytes: MAX_WIRE_BYTES,
             response_bytes: MAX_WIRE_BYTES,
             expected_server: None,
+            loopback_only: false,
         }
     }
 }
@@ -655,17 +657,45 @@ impl RemoteClient {
         timeouts: ClientTimeouts,
         expected_server: &str,
     ) -> Result<Self, AnyErr> {
+        Self::connect_checked_owner(options, timeouts, expected_server, true).await
+    }
+
+    /// Explicit configured-owner connection using the native HTTP/HTTPS/SSH
+    /// transport, with the same bounded wire contract as passive local clients.
+    /// Server identity is checked during initialize, before catalog discovery.
+    pub async fn connect_owner(
+        options: &ConnectionOptions,
+        timeouts: ClientTimeouts,
+        expected_server: &str,
+    ) -> Result<Self, AnyErr> {
+        Self::connect_checked_owner(options, timeouts, expected_server, false).await
+    }
+
+    async fn connect_checked_owner(
+        options: &ConnectionOptions,
+        timeouts: ClientTimeouts,
+        expected_server: &str,
+        loopback_only: bool,
+    ) -> Result<Self, AnyErr> {
+        let connection_kind = if loopback_only { "local" } else { "owner" };
         let expected = match expected_server {
             "mneme-mcp" => "mneme-mcp",
             "mneme-mcp-library" => "mneme-mcp-library",
-            _ => return Err("unsupported expected local MCP server identity".into()),
+            _ => {
+                return Err(
+                    format!("unsupported expected {connection_kind} MCP server identity").into(),
+                );
+            }
         };
         if timeouts.connect.is_zero()
             || timeouts.request.is_zero()
             || timeouts.connect > Duration::from_secs(30)
             || timeouts.request > Duration::from_secs(30)
         {
-            return Err("local MCP deadlines must be nonzero and at most 30 seconds".into());
+            return Err(format!(
+                "{connection_kind} MCP deadlines must be nonzero and at most 30 seconds"
+            )
+            .into());
         }
         tokio::time::timeout(
             timeouts.connect,
@@ -676,12 +706,15 @@ impl RemoteClient {
                     request_bytes: CODEX_REQUEST_BYTES,
                     response_bytes: CODEX_RESPONSE_BYTES,
                     expected_server: Some(expected),
+                    loopback_only,
                 },
             ),
         )
         .await
         .map_err(|_| -> AnyErr {
-            Box::new(AvailabilityError("local MCP connection timed out".into()))
+            Box::new(AvailabilityError(format!(
+                "{connection_kind} MCP connection timed out"
+            )))
         })?
     }
 
@@ -716,7 +749,7 @@ impl RemoteClient {
         wire_policy: WirePolicy,
     ) -> Result<Self, AnyErr> {
         let parsed = Url::parse(&options.url).map_err(|_| "invalid remote URL")?;
-        if wire_policy.expected_server.is_some() && !numeric_loopback_http(&parsed) {
+        if wire_policy.loopback_only && !numeric_loopback_http(&parsed) {
             return Err("local MCP endpoint must be numeric loopback HTTP".into());
         }
         let token = match options.token_env.as_deref() {
@@ -2740,6 +2773,76 @@ mod tests {
         assert_eq!(client.raw_rpc("ping", json!({})).await.unwrap(), json!({}));
         client.close().await;
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_owner_uses_bounded_wire_policy_for_both_server_identities() {
+        for expected in ["mneme-mcp", "mneme-mcp-library"] {
+            let (options, server) = fixture_server_with_catalog(expected, json!([]), Some(vec![]));
+            let mut client = RemoteClient::connect_owner(
+                &options,
+                ClientTimeouts {
+                    connect: Duration::from_secs(2),
+                    request: Duration::from_secs(2),
+                },
+                expected,
+            )
+            .await
+            .unwrap();
+            assert!(!client.wire_policy.loopback_only);
+            assert_eq!(client.wire_policy.expected_server, Some(expected));
+            assert_eq!(client.wire_policy.request_bytes, CODEX_REQUEST_BYTES);
+            assert_eq!(client.wire_policy.response_bytes, CODEX_RESPONSE_BYTES);
+            assert_eq!(client.server_name(), expected);
+            // The fixture expects only the handshake and close: oversized
+            // requests are rejected before any additional network operation.
+            assert!(
+                client
+                    .raw_rpc("ping", json!({"body":"x".repeat(CODEX_REQUEST_BYTES)}))
+                    .await
+                    .is_err()
+            );
+            client.close().await;
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_owner_refuses_identity_and_deadlines_before_contact() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let options = ConnectionOptions {
+            url: format!(
+                "http://127.0.0.1:{}/mcp",
+                listener.local_addr().unwrap().port()
+            ),
+            ssh_mcp_port: 18766,
+            token_env: None,
+        };
+        for (expected, connect, request) in [
+            ("unknown", 1, 1),
+            ("mneme-mcp", 0, 1),
+            ("mneme-mcp", 1, 0),
+            ("mneme-mcp", 31, 1),
+            ("mneme-mcp-library", 1, 31),
+        ] {
+            let error = RemoteClient::connect_owner(
+                &options,
+                ClientTimeouts {
+                    connect: Duration::from_secs(connect),
+                    request: Duration::from_secs(request),
+                },
+                expected,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(classify_error(error.as_ref()), ClientErrorClass::Protocol);
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[tokio::test]

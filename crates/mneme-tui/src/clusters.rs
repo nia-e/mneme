@@ -2,8 +2,15 @@
 //! Direction and relation kind remain facts of the drawn links/inspector; grouping
 //! only summarizes their finite positive weights as an undirected visual aid.
 
+mod community;
+
 use crate::model::Graph;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The exact tag text visible on the map, shared with collision assignment.
+pub(crate) fn label_text(tag: &str) -> String {
+    crate::render::short(tag.trim(), 22)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct DisplayGroupId(pub(crate) u64);
@@ -80,7 +87,8 @@ impl DisplayGroups {
                 *all.entry(tag).or_default() += 1;
             }
         }
-        for group in &mut self.groups {
+        let mut eligible = Vec::new();
+        for (group_index, group) in self.groups.iter_mut().enumerate() {
             group.label = None;
             let inside = group.members.len();
             let outside = tags.len().saturating_sub(inside);
@@ -99,22 +107,35 @@ impl DisplayGroups {
                 }
             }
             let unknown_outside = unknown.saturating_sub(unknown_inside);
-            group.label = candidates
-                .into_iter()
-                .filter_map(|(tag, count)| {
-                    // Display heuristic, not statistical significance: at least
-                    // two exact authored supporters and half the group; inside
-                    // lower prevalence must be at least twice outside's upper
-                    // prevalence (all unknown outside cards may have this tag).
-                    let outside_upper =
-                        all.get(tag).copied().unwrap_or(0).saturating_sub(count) + unknown_outside;
-                    let lower = count as u128 * outside as u128;
-                    let upper = outside_upper as u128 * inside as u128;
-                    (count >= 2 && count * 2 >= inside && lower > upper && lower >= 2 * upper)
-                        .then(|| (tag, count, lower - upper))
-                })
-                .max_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)).then_with(|| b.0.cmp(a.0)))
-                .map(|(tag, _, _)| tag.trim().to_owned());
+            for (tag, count) in candidates {
+                // Display heuristic, not statistical significance: at least
+                // two exact authored supporters and half the group; inside
+                // lower prevalence must be at least twice outside's upper
+                // prevalence (all unknown outside cards may have this tag).
+                let outside_upper =
+                    all.get(tag).copied().unwrap_or(0).saturating_sub(count) + unknown_outside;
+                let lower = count as u128 * outside as u128;
+                let upper = outside_upper as u128 * inside as u128;
+                if count >= 2 && count * 2 >= inside && lower > upper && lower >= 2 * upper {
+                    eligible.push((group_index, tag, count, lower - upper));
+                }
+            }
+        }
+        // Allocate names across the whole loaded field, strongest evidence
+        // first. Losing a name still leaves every eligible alternative in the
+        // queue. We prefer omission over inventing a topic or weakening support
+        // to fill a blank. Work is bounded by the already bounded exact tags.
+        eligible.sort_by(|a, b| {
+            b.3.cmp(&a.3)
+                .then(b.2.cmp(&a.2))
+                .then(a.1.cmp(b.1))
+                .then_with(|| self.groups[a.0].members.cmp(&self.groups[b.0].members))
+        });
+        let mut used = BTreeSet::new();
+        for (index, tag, _, _) in eligible {
+            if self.groups[index].label.is_none() && used.insert(label_text(tag)) {
+                self.groups[index].label = Some(tag.trim().to_owned());
+            }
         }
         self
     }
@@ -169,28 +190,10 @@ impl DisplayTopology {
         let n = self.ids.len();
         let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
         let mut degrees = vec![0.0; n];
-        // Large skeletons must not allocate an n² matrix merely to decorate
-        // the canvas. Use loaded-link components there; small neighborhoods keep
-        // the finer weighted modularity composition below.
+        // Large skeletons retain weighted pockets without an n² matrix;
+        // one weak bridge must not turn the entire loaded field into a group.
         if n > 128 {
-            let mut parent: Vec<_> = (0..n).collect();
-            fn root(parent: &mut [usize], mut i: usize) -> usize {
-                while parent[i] != i {
-                    parent[i] = parent[parent[i]];
-                    i = parent[i];
-                }
-                i
-            }
-            for link in &self.links {
-                let a = root(&mut parent, link.a);
-                let b = root(&mut parent, link.b);
-                parent[b] = a;
-            }
-            let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-            for i in 0..n {
-                components.entry(root(&mut parent, i)).or_default().push(i);
-            }
-            members = components.into_values().collect();
+            members = community::sparse_groups(n, &self.links);
         }
         let matrix_n = if n > 128 { 0 } else { n };
         let mut between = vec![vec![0.0; matrix_n]; matrix_n];
@@ -577,6 +580,105 @@ mod tests {
             node.tags.reverse();
         }
         assert_eq!(pair_label(&graph).as_deref(), Some("alpha"));
+    }
+
+    fn named_pairs(tags: &[&[&str]]) -> (Graph, DisplayGroups) {
+        let mut graph = pair_field(16, 0);
+        let groups = tags
+            .iter()
+            .enumerate()
+            .map(|(i, tags)| {
+                let members = graph.nodes[i * 2..i * 2 + 2]
+                    .iter_mut()
+                    .map(|node| {
+                        node.tags = tags.iter().map(|tag| (*tag).to_owned()).collect();
+                        node.id.clone()
+                    })
+                    .collect();
+                DisplayGroup {
+                    id: DisplayGroupId(i as u64),
+                    members,
+                    label: None,
+                }
+            })
+            .collect();
+        (
+            graph,
+            DisplayGroups {
+                groups,
+                lookup: Default::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn colliding_names_use_supported_alternatives_or_stay_unnamed() {
+        let (graph, groups) = named_pairs(&[&["shared"], &["shared", "garden"]]);
+        let labels = groups.with_labels(&graph);
+        assert_eq!(labels.groups[0].label.as_deref(), Some("shared"));
+        assert_eq!(labels.groups[1].label.as_deref(), Some("garden"));
+
+        let (graph, groups) = named_pairs(&[&["shared"], &["shared"]]);
+        let labels = groups.with_labels(&graph);
+        assert_eq!(labels.groups[0].label.as_deref(), Some("shared"));
+        assert_eq!(labels.groups[1].label, None);
+    }
+
+    #[test]
+    fn stronger_supported_name_wins_over_earlier_group_order() {
+        let (mut graph, mut groups) = named_pairs(&[&["shared"], &["shared"]]);
+        graph.nodes[4].tags = vec!["shared".into()];
+        groups.groups[1].members.push(graph.nodes[4].id.clone());
+        let labels = groups.with_labels(&graph);
+        assert_eq!(labels.groups[0].label, None);
+        assert_eq!(labels.groups[1].label.as_deref(), Some("shared"));
+    }
+
+    #[test]
+    fn visually_identical_trimmed_and_clipped_tags_cannot_name_two_groups() {
+        for (first, second) in [
+            (" shared ", "shared"),
+            (
+                "a-long-identical-tag-prefix-one",
+                "a-long-identical-tag-prefix-two",
+            ),
+            (
+                "庭庭庭庭庭庭庭庭庭庭庭-first",
+                "庭庭庭庭庭庭庭庭庭庭庭-second",
+            ),
+        ] {
+            let (graph, groups) = named_pairs(&[&[first], &[second, "zz-alternative"]]);
+            let labels = groups.with_labels(&graph);
+            let visible: BTreeSet<_> = labels
+                .groups
+                .iter()
+                .filter_map(|g| g.label.as_deref())
+                .map(label_text)
+                .collect();
+            assert_eq!(visible.len(), 2, "eligible alternate survives collision");
+            assert!(visible.contains("zz-alternative"));
+        }
+    }
+
+    #[test]
+    fn global_label_assignment_is_independent_of_group_card_and_tag_order() {
+        let (mut graph, mut groups) =
+            named_pairs(&[&["shared"], &["shared", "garden"], &["garden", "extra"]]);
+        let labels = groups.clone().with_labels(&graph);
+        graph.nodes.reverse();
+        for node in &mut graph.nodes {
+            node.tags.reverse();
+        }
+        groups.groups.reverse();
+        let reversed = groups.with_labels(&graph);
+        let by_id = |groups: DisplayGroups| {
+            groups
+                .groups
+                .into_iter()
+                .map(|g| (g.id, g.label))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(by_id(labels), by_id(reversed));
     }
 
     #[test]

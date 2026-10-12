@@ -1,7 +1,8 @@
-"""Bounded Codex stdio MCP front door for one shared, explicit Mneme HTTP host.
+"""Bounded Codex stdio MCP front door for one explicitly selected Mneme owner.
 
-The first valid initialize ensures that host is ready. This process owns only its
-HTTP MCP session, never a database lease. A failed request is reported once and
+The first valid initialize ensures that owner is ready; remote owners remain
+connect-only. This process owns only its MCP session, never a database lease.
+A failed request is reported once and
 never replayed; the next explicit client request may establish a new session.
 """
 
@@ -15,7 +16,7 @@ import re
 import sys
 
 from mcp_client import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PROTOCOL_VERSION, McpClient, McpError
-from service import _expected_catalog, ensure_ready, load_config
+from service import _expected_catalog, client_for_service, ensure_ready, load_config
 from profile import permit_service, select_for_cwd
 
 ALLOWED_METHODS = frozenset(("initialize", "notifications/initialized", "ping", "tools/list", "tools/call"))
@@ -82,13 +83,41 @@ def _error(ident, code, message):
     return _response(ident, error={"code": code, "message": message[:MAX_ERROR_TEXT]})
 
 
+def _owner_scoped(schema):
+    """Recognize root or union-branch owner scope; native validates the guard.
+
+    This is routing, not an independent schema validator. The native client
+    rejects malformed or action-inapplicable guards rather than retrying without
+    one. An old db-only schema or a union advertisement must not silently become
+    an unguarded call here: exact-owner registry selection has no legacy downgrade.
+    """
+    if {"db", "expected_db_id"}.intersection(schema.get("properties", {})):
+        return True
+    branches = schema.get("oneOf", [])
+    return (isinstance(branches, list) and any(isinstance(branch, dict)
+            and isinstance(branch.get("properties"), dict)
+            and {"db", "expected_db_id"}.intersection(branch["properties"]) for branch in branches))
+
+
 class Relay:
-    def __init__(self, config, *, ensure=ensure_ready, client_factory=McpClient):
+    def __init__(self, config, *, ensure=ensure_ready, client_factory=None, selection=None, store_name=None):
         self.config = config
         self.ensure = ensure
         self.client_factory = client_factory
         self.client = None
         self.client_initialized = False
+        self.selection = selection
+        self.store_name = store_name
+        self.guarded_tools = frozenset()
+
+    def _selected(self):
+        if self.selection is None:
+            return None
+        from store_registry import revalidate
+        selection = revalidate(self.selection, operation="read", store_name=self.store_name)
+        selected = selection.named(self.store_name)
+        selected.service()  # Do not continue with a changed service config.
+        return selected
 
     def _reset(self):
         client, self.client = self.client, None
@@ -96,12 +125,47 @@ class Relay:
             client.close()
 
     def _connect(self):
+        selected = self._selected()
         self.ensure(self.config)
-        self.client = self.client_factory(self.config.url,
-                                          token_env=self.config.token_env or None,
-                                          timeout=30.0)
+        # Readiness may have waited; it must not extend a stale selection.
+        if selected is not None:
+            self._selected()
+        self.client = (self.client_factory(self.config.url,
+                                           token_env=self.config.token_env or None, timeout=30.0)
+                       if self.client_factory is not None else
+                       client_for_service(self.config, timeout=30.0))
         self.client.connect()
+        if selected is not None:
+            catalog = self.client.call_tool("databases", {})
+            if (not _expected_catalog(self.config, catalog)
+                    or selected.db_id is not None and catalog[0].get("db_id") != selected.db_id):
+                raise RelayError("selected store has an unexpected database catalog")
+            # Keep native profile/tool authority intact. Automatic recording
+            # grants do not authorize (or forbid) manually requested MCP writes.
+            tools = self.client.list_tools()
+            if any(not isinstance(tool, dict) or not isinstance(tool.get("name"), str)
+                   or not isinstance(tool.get("inputSchema"), dict)
+                   or not isinstance(tool["inputSchema"].get("properties", {}), dict) for tool in tools):
+                raise RelayError("selected store tool catalog is malformed")
+            self.guarded_tools = frozenset(tool["name"] for tool in tools
+                                          if _owner_scoped(tool["inputSchema"]))
+            self._selected()
         return self.client.connect_result
+
+    def _params(self, method, params, selected):
+        if selected is None or method != "tools/call":
+            return params
+        arguments = params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            raise RelayError("MCP tool arguments must be an object")
+        if "db" in arguments and arguments["db"] != selected.db_alias:
+            raise RelayError("MCP database alias differs from selected store")
+        if "expected_db_id" in arguments and arguments["expected_db_id"] != selected.db_id:
+            raise RelayError("MCP identity pin differs from selected store")
+        if params.get("name") in self.guarded_tools and selected.db_id is not None:
+            return {**params, "arguments": {**arguments, "db": selected.db_alias,
+                                            "expected_db_id": selected.db_id}}
+        return params
 
     def handle(self, message):
         method = message["method"]
@@ -109,6 +173,7 @@ class Relay:
         if method not in ALLOWED_METHODS:
             return None if ident is None else _error(ident, -32601, "method not found")
         try:
+            selected = self._selected()
             if method == "initialize":
                 self._reset()
                 self.client_initialized = False
@@ -134,7 +199,9 @@ class Relay:
             else:
                 if self.client is None:
                     self._connect()
-                result = self.client.raw_rpc(method, message.get("params", {}))
+                selected = self._selected()
+                result = self.client.raw_rpc(method, self._params(method, message.get("params", {}), selected))
+            self._selected()
             return None if ident is None else _response(ident, result=result)
         except (McpError, RelayError, ValueError, RuntimeError, OSError) as error:
             self._reset()
@@ -148,8 +215,10 @@ class Relay:
         self._reset()
 
 
-def run_stream(config, source, sink, *, ensure=ensure_ready, client_factory=McpClient):
-    relay = Relay(config, ensure=ensure, client_factory=client_factory)
+def run_stream(config, source, sink, *, ensure=ensure_ready, client_factory=None,
+               selection=None, store_name=None):
+    relay = Relay(config, ensure=ensure, client_factory=client_factory,
+                  selection=selection, store_name=store_name)
     try:
         while True:
             raw = source.readline(MAX_REQUEST_BYTES + 2)
@@ -186,7 +255,7 @@ def _enroll_selected_project(config, selection, service_path):
         return
     if marker.stat().st_size > 8192:
         raise ValueError("library enrollment marker exceeds size limit")
-    value = json.loads(marker.read_text())
+    value = json.loads(marker.read_text(encoding="utf-8"))
     if (not isinstance(value, dict) or set(value) != {"mode", "project_root", "helper_sha256"}
             or value["mode"] not in ("none", "fresh", "existing")
             or value["project_root"] != str(selection["root"])):
@@ -217,8 +286,23 @@ def _enroll_selected_project(config, selection, service_path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--service-config", required=True, help="existing explicit private Mneme service JSON")
+    routing = parser.add_mutually_exclusive_group(required=True)
+    routing.add_argument("--service-config", help="existing explicit private Mneme service JSON")
+    routing.add_argument("--store-registry", help="explicit named-store registry JSON")
+    parser.add_argument("--store", help="read-enabled named store selected for this workspace")
     args = parser.parse_args(argv)
+    if args.store_registry:
+        if args.store is None:
+            parser.error("--store-registry requires --store")
+        from store_registry import resolve, revalidate
+        selection = resolve(Path.cwd(), registry_path=args.store_registry, mode="read")
+        selection = revalidate(selection, operation="read", store_name=args.store)
+        selected = selection.named(args.store)
+        run_stream(selected.service(), sys.stdin.buffer, sys.stdout.buffer,
+                   selection=selection, store_name=args.store)
+        return
+    if args.store is not None:
+        parser.error("--store requires --store-registry")
     selection = select_for_cwd(Path.cwd())
     config = load_config(args.service_config)
     permit_service(selection, config.database_name, config.database_path, args.service_config)

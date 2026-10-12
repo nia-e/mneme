@@ -1,0 +1,184 @@
+name: Native Windows (local persistent owner)
+
+# A newly added workflow can run on an authorized PR before it reaches the
+# default branch (workflow_dispatch alone cannot provide that first receipt).
+# No provider credentials, live configuration or enrolled stores are used.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/windows.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - vendor/**
+      - integrations/**
+      - tools/windows_smoke.py
+      - tools/test_windows_smoke.py
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: never
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      MNEME_RERANK: "0"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_ENDPOINT: http://127.0.0.1:9
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable installer
+        with:
+          toolchain: stable
+      - name: Establish native host, local NTFS and required reparse fixture privilege
+        run: |
+          New-Item -ItemType Directory receipts | Out-Null
+          $drive = Get-Volume -DriveLetter ([IO.Path]::GetPathRoot($env:RUNNER_TEMP).Substring(0,1))
+          if ($drive.FileSystemType -ne 'NTFS') { throw 'Native local NTFS required; unsupported filesystem is not a skipped success' }
+          $probe = Join-Path $env:RUNNER_TEMP ('mneme-reparse-' + [guid]::NewGuid())
+          New-Item -ItemType Directory $probe | Out-Null
+          try {
+            New-Item -ItemType Directory (Join-Path $probe 'target') | Out-Null
+            New-Item -ItemType SymbolicLink -Path (Join-Path $probe 'alias') -Target (Join-Path $probe 'target') -ErrorAction Stop | Out-Null
+          } finally {
+            if (Test-Path (Join-Path $probe 'alias')) { (Get-Item (Join-Path $probe 'alias')).Delete() }
+            Remove-Item -Recurse -Force $probe
+          }
+          python -c "import os,sys; assert os.name == 'nt'; assert sys.version_info[:2] == (3,14); print(sys.version)" | Tee-Object receipts/python.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          rustc -vV | Tee-Object receipts/rustc.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo -V | Tee-Object receipts/cargo.txt
+          git rev-parse HEAD | Tee-Object receipts/commit.txt
+      - name: Build locked, persistent, model-independent CLI and MCP HTTP pair
+        run: |
+          cargo build --locked --no-default-features --features cozo,http -p mnemed -p mneme-mcp 2>&1 | Tee-Object receipts/build.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Native store ACL, leases, activation and publication recovery contracts
+        run: |
+          cargo test --locked -p mneme-store-path -p mneme-body -- --nocapture 2>&1 | Tee-Object receipts/storage-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (Select-String -Path receipts/storage-tests.txt -Pattern 'SKIPPED symlink fixture') {
+            throw 'Native reparse coverage was skipped despite successful privilege preflight'
+          }
+      - name: Native SQLite admission and Cozo owner-opening composition
+        run: |
+          cargo test --locked --manifest-path vendor/mnestic/Cargo.toml --no-default-features --features storage-sqlite,storage-sqlite-src --lib storage::sqlite::windows::tests -- --nocapture 2>&1 | Tee-Object receipts/vendor-windows-sqlite-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path vendor/mnestic/Cargo.toml --no-default-features --features storage-sqlite,storage-sqlite-src --lib policy_fingerprint -- --nocapture 2>&1 | Tee-Object receipts/vendor-policy-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p mneme-cozo --features cozo cozo_store::opening::tests -- --nocapture 2>&1 | Tee-Object receipts/cozo-windows-opening-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (Select-String -Path receipts/cozo-windows-opening-tests.txt -Pattern 'SKIPPED|symlink privilege unavailable') {
+            throw 'Native Cozo reparse coverage was skipped despite privilege preflight'
+          }
+          cargo test --locked -p mneme-cozo --features cozo storage_contract::conventional_unmanaged::admission::tests -- --nocapture 2>&1 | Tee-Object receipts/cozo-admission-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Native CLI init bundle and executable-discovery contracts
+        run: |
+          cargo test --locked --no-default-features --features cozo -p mnemed cli_init::tests -- --nocapture 2>&1 | Tee-Object receipts/cli-init-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --no-default-features --features cozo -p mnemed native_artifact::tests -- --nocapture 2>&1 | Tee-Object receipts/native-artifact-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Snapshot publication and recovery in reference and persistent builds
+        run: |
+          cargo test --locked --no-default-features -p mneme-mcp snapshot::tests -- --nocapture 2>&1 | Tee-Object receipts/snapshot-reference-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --no-default-features --features cozo -p mneme-mcp snapshot::tests -- --nocapture 2>&1 | Tee-Object receipts/snapshot-cozo-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Native Python files, locks, jobs, pipes, inherited stdin and actual shell argv
+        run: |
+          python -m unittest discover -s integrations/codex -p 'test_host*.py' -v 2>&1 | Tee-Object receipts/python-host-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Provider-free state ownership, protocol adapters and service identity
+        run: |
+          foreach ($suite in @('test_state_host.py','test_client.py','test_reader_runtime.py','test_hook_trust.py','test_service.py')) {
+            $log = 'receipts/python-' + $suite.Replace('.py','.txt')
+            python -m unittest discover -s integrations/codex -p $suite -v 2>&1 | Tee-Object $log
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Registry selection, passive core, launcher and bounded multi-owner reads
+        run: |
+          # The core registry fixture uses the actual native client against
+          # finite fake HTTP peers, not a provider or a Unix shebang executable.
+          $env:MNEME_CLIENT_BINARY = (Resolve-Path target/debug/mnemed.exe).Path
+          foreach ($suite in @('test_store_registry.py','test_registry_target_policy.py','test_profile.py',
+                              'test_registry_lifecycle.py','test_registry_reader.py','test_registry_native_work.py',
+                              'test_core_registry.py','test_launcher_registry.py')) {
+            $log = 'receipts/python-' + $suite.Replace('.py','.txt')
+            python -m unittest discover -s integrations/codex -p $suite -v 2>&1 | Tee-Object $log
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Supported provider-free installed helper and finite harness suites
+        run: |
+          python -m unittest discover -s integrations/codex -p test_install_platform.py -v 2>&1 | Tee-Object receipts/python-install-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s integrations/codex -p test_install_registry.py -v 2>&1 | Tee-Object receipts/python-install-registry-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s integrations/codex -p test_hook_forwarder.py -v 2>&1 | Tee-Object receipts/python-forwarder-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s tools -p test_windows_smoke.py -v 2>&1 | Tee-Object receipts/python-smoke-tests.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build the default install feature set without loading a model
+        timeout-minutes: 20
+        run: |
+          # Published cargo install defaults include fastembed/ORT. Compilation
+          # may fetch the ONNX SDK; this does not run inference/download weights.
+          cargo build --locked -p mnemed -p mneme-mcp 2>&1 | Tee-Object receipts/default-build.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $record = @{command='cargo build --locked -p mnemed -p mneme-mcp'; runtime='not executed; no model or quality claim';
+            binaries=@('target/debug/mnemed.exe','target/debug/mneme-mcp.exe') | ForEach-Object {
+              @{path=$_; bytes=(Get-Item $_).Length; sha256=(Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant()}
+            }}
+          $bytes = [Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Depth 8) + "`n")
+          $stream = [IO.File]::Open((Join-Path $pwd 'receipts/default-build-binaries.json'), [IO.FileMode]::CreateNew)
+          try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+      - name: Finite ordinary init, copied HTTP owner, stdio lifecycle and cleanup
+        run: |
+          # Reassert the exact pair after cargo test; no default/model features.
+          cargo build --locked --no-default-features --features cozo,http -p mnemed -p mneme-mcp 2>&1 | Tee-Object receipts/smoke-build.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tools/windows_smoke.py --require-windows --cli target/debug/mnemed.exe --mcp target/debug/mneme-mcp.exe --timeout 300 --output receipts/native-smoke.json --build-description 'cargo build --locked --no-default-features --features cozo,http -p mnemed -p mneme-mcp' 2>&1 | Tee-Object receipts/native-smoke-output.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Seal immutable receipt inventory even on failure
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force receipts | Out-Null
+          $files = @(Get-ChildItem receipts -File | Sort-Object Name | ForEach-Object {
+            @{path=$_.Name; bytes=$_.Length; sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
+          })
+          $binaries = @('target/debug/mnemed.exe','target/debug/mneme-mcp.exe') | Where-Object { Test-Path $_ } | ForEach-Object {
+            @{path=$_; bytes=(Get-Item $_).Length; sha256=(Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant()}
+          }
+          $record = @{schema='mneme.windows-ci-receipts.v1'; commit=$env:GITHUB_SHA; run_id=$env:GITHUB_RUN_ID;
+            run_attempt=$env:GITHUB_RUN_ATTEMPT; runner_os=$env:RUNNER_OS; runner_arch=$env:RUNNER_ARCH;
+            preceding_job_status='${{ job.status }}';
+            image_os=$env:ImageOS; image_version=$env:ImageVersion; files=$files; binaries=@($binaries);
+            omitted=@('Providers/fastembed model runtime and quality','Codex app hook trust and delivery','Production stores','TUI interaction',
+              'Remote/non-NTFS filesystems','Legacy Unix-shebang integration fixtures: not silently labeled portable')}
+          $bytes = [Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Depth 8) + "`n")
+          $stream = [IO.File]::Open((Join-Path $pwd 'receipts/manifest.json'), [IO.FileMode]::CreateNew)
+          try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+      - name: Upload immutable native evidence (not a claim of success)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-native-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: receipts/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false

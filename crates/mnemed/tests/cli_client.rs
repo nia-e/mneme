@@ -8,6 +8,16 @@ fn run(frames: &[Value], endpoint: &str) -> (Vec<Value>, String) {
 }
 
 fn run_with_timeout(frames: &[Value], endpoint: &str, timeout: &str) -> (Vec<Value>, String) {
+    run_with_options(frames, endpoint, timeout, "mneme-mcp", &["--local-only"])
+}
+
+fn run_with_options(
+    frames: &[Value],
+    endpoint: &str,
+    timeout: &str,
+    expected_server: &str,
+    mode: &[&str],
+) -> (Vec<Value>, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mnemed"))
         .args([
             "client",
@@ -16,9 +26,9 @@ fn run_with_timeout(frames: &[Value], endpoint: &str, timeout: &str) -> (Vec<Val
             "--timeout-ms",
             timeout,
             "--expected-server",
-            "mneme-mcp",
-            "--local-only",
+            expected_server,
         ])
+        .args(mode)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -54,6 +64,14 @@ fn protocol_fixture(
 }
 
 fn protocol_fixture_sessions(
+    catalogs: Vec<Value>,
+    call: impl FnMut(&Value, &Value) -> Option<Value> + Send + 'static,
+) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+    protocol_fixture_named_sessions("mneme-mcp", catalogs, call)
+}
+
+fn protocol_fixture_named_sessions(
+    server_name: &'static str,
     catalogs: Vec<Value>,
     mut call: impl FnMut(&Value, &Value) -> Option<Value> + Send + 'static,
 ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
@@ -120,7 +138,7 @@ fn protocol_fixture_sessions(
             let method = request["method"].as_str().unwrap_or("close");
             let result = match method {
                 "initialize" => json!({
-                    "protocolVersion":"2025-11-25", "serverInfo":{"name":"mneme-mcp"},
+                    "protocolVersion":"2025-11-25", "serverInfo":{"name":server_name},
                     "_mneme_client":{"expected_db_id":999,"owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true}},
                     "owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true},
                 }),
@@ -148,7 +166,7 @@ fn protocol_fixture_sessions(
             stream.write_all(response.as_bytes()).unwrap();
             if close {
                 session += 1;
-                if session == catalogs.len() {
+                if session >= catalogs.len() {
                     break;
                 }
             }
@@ -869,6 +887,249 @@ fn connect_refusal_is_bounded_and_nonretrying() {
     );
     assert_eq!(responses[0]["error"]["kind"], "transport");
     assert_eq!(responses[1]["ok"], true);
+}
+
+#[test]
+fn client_requires_one_explicit_transport_mode_and_valid_remote_ssh_port() {
+    for flags in [
+        vec![],
+        vec!["--local-only", "--remote-owner"],
+        vec!["--local-only", "--ssh-mcp-port", "18766"],
+        vec!["--remote-owner", "--ssh-mcp-port", "0"],
+        vec!["--remote-owner", "--ssh-mcp-port", "65536"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mnemed"))
+            .args([
+                "client",
+                "--endpoint",
+                "http://127.0.0.1:1/mcp",
+                "--timeout-ms",
+                "100",
+                "--expected-server",
+                "mneme-mcp",
+            ])
+            .args(&flags)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{flags:?}");
+        assert!(output.stdout.is_empty(), "{flags:?}");
+        assert!(!output.stderr.is_empty(), "{flags:?}");
+    }
+    for port in ["1", "65535"] {
+        let (responses, stderr) = run_with_options(
+            &[json!({"id":1,"op":"close"})],
+            "ssh://fixture.invalid",
+            "100",
+            "mneme-mcp",
+            &["--remote-owner", "--ssh-mcp-port", port],
+        );
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(responses[0]["ok"], true);
+    }
+}
+
+#[test]
+fn remote_owner_http_uses_the_requested_server_identity_and_existing_protocol() {
+    // Exercise the general remote mode against a disposable loopback fixture,
+    // not an enrolled owner or a live remote service.
+    for server_name in ["mneme-mcp", "mneme-mcp-library"] {
+        let (endpoint, server) = protocol_fixture_named_sessions(
+            server_name,
+            vec![tag_capability_catalog(true)],
+            |name, arguments| {
+                assert_eq!(name, "status");
+                assert_eq!(arguments, &json!({"db":"configured-owner"}));
+                Some(json!({"structuredContent":{"owner":"fixture-only"},"content":[]}))
+            },
+        );
+        let (responses, stderr) = run_with_options(
+            &[
+                json!({"id":1,"op":"connect"}),
+                json!({"id":2,"op":"tools/list"}),
+                json!({"id":3,"op":"tools/call","name":"status","arguments":{"db":"configured-owner"}}),
+                json!({"id":4,"op":"close"}),
+            ],
+            &endpoint,
+            "1000",
+            server_name,
+            &["--remote-owner"],
+        );
+        assert!(stderr.is_empty(), "{stderr}");
+        assert!(responses.iter().all(|response| response["ok"] == true));
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], server_name);
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(responses[2]["result"], json!({"owner":"fixture-only"}));
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn remote_owner_identity_mismatch_never_exposes_a_usable_client() {
+    for (server_name, expected_server) in [
+        ("mneme-mcp", "mneme-mcp-library"),
+        ("mneme-mcp-library", "mneme-mcp"),
+    ] {
+        let (endpoint, server) = protocol_fixture_named_sessions(
+            server_name,
+            // Identity must be checked before even requesting the catalog.
+            vec![],
+            |_, _| panic!("identity mismatch must not call tools"),
+        );
+        let (responses, stderr) = run_with_options(
+            &[
+                json!({"id":1,"op":"connect"}),
+                json!({"id":2,"op":"tools/list"}),
+                json!({"id":3,"op":"tools/call","name":"status","arguments":{}}),
+                json!({"id":4,"op":"close"}),
+            ],
+            &endpoint,
+            "1000",
+            expected_server,
+            &["--remote-owner"],
+        );
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(responses[0]["ok"], false);
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("identity mismatch"),
+            "{}",
+            responses[0]
+        );
+        assert_eq!(responses[1]["error"]["kind"], "input");
+        assert_eq!(responses[2]["error"]["kind"], "input");
+        assert_eq!(responses[3]["ok"], true);
+        assert!(server.join().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn remote_owner_rejects_malformed_endpoints_before_network() {
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    for endpoint in [
+        format!("ftp://127.0.0.1:{port}/mcp"),
+        format!("http://user@127.0.0.1:{port}/mcp"),
+        format!("http://user:secret@127.0.0.1:{port}/mcp"),
+        format!("http://127.0.0.1:{port}/mcp?token=secret"),
+        format!("http://127.0.0.1:{port}/mcp#fragment"),
+        format!("http://127.0.0.1:{port}/with space"),
+        format!(" http://127.0.0.1:{port}/mcp"),
+        format!("http://127.0.0.1:{port}/mcp\n"),
+        format!("http://127.0.0.1:{port}/{}", "x".repeat(4096)),
+        format!("ssh://127.0.0.1:{port}/database"),
+        format!("ssh://127.0.0.1:{port}?query"),
+        format!("ssh://127.0.0.1:{port}#fragment"),
+        format!("ssh://user:secret@127.0.0.1:{port}"),
+    ] {
+        let (responses, stderr) = run_with_options(
+            &[json!({"id":1,"op":"connect"}), json!({"id":2,"op":"close"})],
+            &endpoint,
+            "100",
+            "mneme-mcp",
+            &["--remote-owner"],
+        );
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(responses[0]["error"]["kind"], "input", "{endpoint:?}");
+        assert_eq!(responses[1]["ok"], true, "{endpoint:?}");
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "invalid endpoint triggered network: {endpoint:?}"
+        );
+    }
+}
+
+#[test]
+fn remote_owner_missing_ssh_never_falls_back_or_admits_a_write() {
+    use std::{net::TcpListener, path::PathBuf};
+
+    struct EmptySearchPath(PathBuf);
+    impl Drop for EmptySearchPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let empty_path = EmptySearchPath(
+        std::env::temp_dir().join(format!("mneme-client-missing-ssh-{}", ulid::Ulid::new())),
+    );
+    std::fs::create_dir(&empty_path.0).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let binary = std::fs::canonicalize(env!("CARGO_BIN_EXE_mnemed")).unwrap();
+    let mut child = Command::new(binary)
+        .args([
+            "client",
+            "--endpoint",
+            "ssh://fixture-owner",
+            "--timeout-ms",
+            "500",
+            "--expected-server",
+            "mneme-mcp",
+            "--remote-owner",
+            "--ssh-mcp-port",
+            &port,
+        ])
+        // Do not run the installed SSH binary or consult the working checkout.
+        // Windows treats environment keys case-insensitively; removing both
+        // spellings before setting PATH also avoids retaining Path on Unix.
+        .env_remove("PATH")
+        .env_remove("Path")
+        .env("PATH", &empty_path.0)
+        .current_dir(&empty_path.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut input = child.stdin.take().unwrap();
+        for frame in [
+            json!({"id":1,"op":"connect"}),
+            json!({"id":2,"op":"tools/call","name":"save","arguments":{"db":"user","summary":"must not be written"}}),
+            json!({"id":3,"op":"close"}),
+        ] {
+            writeln!(input, "{frame}").unwrap();
+        }
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let responses: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["ok"], false);
+    assert!(
+        responses[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not inspect SSH configuration"),
+        "{}",
+        responses[0]
+    );
+    assert_eq!(responses[1]["error"]["kind"], "input");
+    assert_eq!(
+        responses[1]["error"]["message"],
+        "connect before MCP requests"
+    );
+    assert_eq!(responses[2]["ok"], true);
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "missing SSH must not fall back to the local MCP port"
+    );
+    assert!(std::fs::read_dir(&empty_path.0).unwrap().next().is_none());
 }
 
 #[test]

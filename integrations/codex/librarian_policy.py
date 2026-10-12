@@ -8,6 +8,8 @@ from collections.abc import Mapping
 
 MODEL = "gpt-6.1-sol"
 EFFORTS = ("low", "medium", "high")
+# Shared worker lifetime and maximum idle-maintenance refresh interval.
+IDLE_SECONDS = 300
 # selector prompt/answer, background latency seconds/read bytes, shared attempts,
 # input/output tokens, ordinary-selector room before optional matcher work.
 _PRESETS = (

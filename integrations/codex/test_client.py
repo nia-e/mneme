@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import tempfile
+import sys
+import host_process
 import unittest
 from unittest.mock import patch
 
@@ -49,7 +51,16 @@ class ClientTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        binary = Path(self.temp.name) / "mnemed"
+        if os.name == "nt":
+            native_spawn = host_process.spawn
+            def fixture_spawn(argv, **kwargs):
+                if Path(argv[0]).parent == Path(self.temp.name):
+                    argv = [sys.executable, *argv]
+                return native_spawn(argv, **kwargs)
+            fixture = patch.object(host_process, "spawn", side_effect=fixture_spawn)
+            fixture.start()
+            self.addCleanup(fixture.stop)
+        binary = Path(self.temp.name) / ("mnemed.exe" if os.name == "nt" else "mnemed")
         binary.write_text(SCRIPT)
         binary.chmod(0o700)
         override = patch.dict(os.environ, {"MNEME_CLIENT_BINARY": str(binary)})
@@ -74,7 +85,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(client._native_capabilities,{})
 
     def test_native_owner_summary_survives_envelope_and_downgrade_reconnect(self):
-        binary=Path(self.temp.name)/"mnemed"
+        binary=Path(self.temp.name)/ ("mnemed.exe" if os.name == "nt" else "mnemed")
         old='native = {"_mneme_client": {"expected_db_id": 1, "save": 1}} if op == "connect" else {}'
         new='native = {"_mneme_client": {"expected_db_id": 1, "save": 1, "owner_capabilities": {"retag_content_guards": True, "tag_vocabulary": True}}} if op == "connect" else {}'
         binary.write_text(SCRIPT.replace(old,new))
@@ -156,7 +167,7 @@ class ClientTests(unittest.TestCase):
                     request.assert_called_with(operation + "/verified", db="project", payload={})
 
     def test_old_bridge_cannot_forward_remote_initialize_marker_as_native_support(self):
-        binary = Path(self.temp.name) / "mnemed"
+        binary = Path(self.temp.name) / ("mnemed.exe" if os.name == "nt" else "mnemed")
         binary.write_text(SCRIPT.replace(
             'native = {"_mneme_client": {"expected_db_id": 1, "save": 1}} if op == "connect" else {}',
             'native = {}'))
@@ -205,7 +216,7 @@ class ClientTests(unittest.TestCase):
         script = SCRIPT.replace('"save": 1}', '"save": 1, "concern": 1}').replace(
             'native = {"_mneme_client": {"expected_db_id": 1, "save": 1, "concern": 1}} if op == "connect" else {}',
             'native = {}')
-        (Path(self.temp.name) / "mnemed").write_text(script)
+        (Path(self.temp.name) / ("mnemed.exe" if os.name == "nt" else "mnemed")).write_text(script)
         with McpClient(self.url) as client:
             self.assertEqual(client.connect_result["_mneme_client"]["concern"], 1)
             with self.assertRaisesRegex(McpProtocolError, "concern support"):
@@ -241,6 +252,49 @@ class ClientTests(unittest.TestCase):
                 client.call_tool("refuse", {})
             self.assertEqual(client.list_tools()[0]["name"], "capture")
 
+    def test_remote_transport_is_explicit_and_uses_native_bridge_flags(self):
+        native_spawn = host_process.spawn
+        for remote in (False, True):
+            with self.subTest(remote=remote), patch.object(host_process, "spawn", wraps=native_spawn) as spawn:
+                url = "ssh://memory@owner-alias:2222" if remote else self.url
+                with McpClient(url, remote_owner=remote, ssh_mcp_port=19001) as client:
+                    self.assertTrue(client._connected)
+                argv = spawn.call_args.args[0]
+                self.assertEqual("--remote-owner" in argv, remote)
+                self.assertEqual("--local-only" in argv, not remote)
+                self.assertEqual("--ssh-mcp-port" in argv, remote)
+                if remote:
+                    self.assertEqual(argv[argv.index("--ssh-mcp-port") + 1], "19001")
+
+    def test_remote_endpoint_admission_before_spawn(self):
+        valid = ("https://owner.example/mcp", "http://owner.example:18766/mcp",
+                 "ssh://owner-alias", "ssh://memory@owner-alias:2222/", "ssh://[::1]")
+        for url in valid:
+            with self.subTest(url=url):
+                McpClient(url, remote_owner=True)
+        invalid = (None, "", "file:///tmp/memory.db", "ssh://host/path", "ssh://user:secret@host",
+                   "ssh://-option", "ssh://host?", "ssh://host#", "ssh://host:0", "ssh://host:65536",
+                   "http://user@host", "http://:secret@host", "http://host/?query", "http://host/#fragment",
+                   " http://host", "http://host\n", "https://host/" + "a" * 4096,
+                   "ssh://a%20b@host", "ssh://")
+        with patch.object(host_process, "spawn", side_effect=AssertionError("unexpected native process")):
+            for url in invalid:
+                with self.subTest(url=url), self.assertRaises(ValueError):
+                    McpClient(url, remote_owner=True)
+            for port in (0, 65536, "18766", True, None):
+                with self.subTest(port=port), self.assertRaises(ValueError):
+                    McpClient("ssh://host", remote_owner=True, ssh_mcp_port=port)
+            for timeout in (0, -1, 31, True, None, float("nan"), float("inf")):
+                with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                    McpClient("ssh://host", remote_owner=True, timeout=timeout)
+            with self.assertRaisesRegex(ValueError, "HTTPS"):
+                McpClient("http://owner.example", remote_owner=True, token="test-token")
+            with self.assertRaisesRegex(ValueError, "HTTPS"):
+                McpClient("http://owner.example", remote_owner=True, token_env="TEST_TOKEN")
+            for url in valid:
+                with self.subTest(url=url), self.assertRaises(ValueError):
+                    McpClient(url)
+
     def test_local_only_and_bounded_request(self):
         for url in ("https://example.com/mcp", "http://localhost:1234/"):
             with self.assertRaises(ValueError):
@@ -250,15 +304,15 @@ class ClientTests(unittest.TestCase):
                 client.call_tool("x", {"text": "x" * (130 * 1024)})
 
     def test_child_exit_is_transport_error(self):
-        binary = Path(self.temp.name) / "exit"
-        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary = Path(self.temp.name) / ("exit.exe" if os.name == "nt" else "exit")
+        binary.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n")
         binary.chmod(0o700)
         with patch.dict(os.environ, {"MNEME_CLIENT_BINARY": str(binary)}):
             with self.assertRaises(McpTransportError):
                 McpClient(self.url).connect()
 
     def test_nonreading_child_cannot_block_pipe_write(self):
-        binary = Path(self.temp.name) / "sleep"
+        binary = Path(self.temp.name) / ("sleep.exe" if os.name == "nt" else "sleep")
         binary.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
         binary.chmod(0o700)
         with patch.dict(os.environ, {"MNEME_CLIENT_BINARY": str(binary)}):
@@ -266,6 +320,14 @@ class ClientTests(unittest.TestCase):
             with self.assertRaisesRegex(McpTransportError, "timed out"):
                 client.prepare_capture({"body": "x" * (100 * 1024)})
             self.assertIsNone(client._process)
+
+    def test_windows_refuses_shell_wrapper_override_before_spawn(self):
+        with patch("mcp_client.host_process.IS_WINDOWS", True), \
+             patch.dict(os.environ, {"MNEME_CLIENT_BINARY": "mnemed.cmd"}), \
+             patch("mcp_client.host_process.spawn") as spawn:
+            with self.assertRaisesRegex(McpTransportError, "shell wrapper"):
+                McpClient(self.url).connect()
+        spawn.assert_not_called()
 
     def test_token_stays_out_of_argv(self):
         with patch("mcp_client.subprocess.Popen", side_effect=OSError("stop")) as spawn:

@@ -7,16 +7,22 @@ Mneme mutation tool. A single global nonblocking lock bounds provider work.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
 import tempfile
 import time
+
+if __package__:
+    from . import host_files, host_process
+    from .rollout_primitives import read_regular
+else:
+    import host_files
+    import host_process
+    from rollout_primitives import read_regular
 
 SCHEMA = "mneme.codex-shadow.v1"
 MAX_INPUT = 8192
@@ -131,10 +137,10 @@ def _run(payload: dict) -> dict:
         return {"status": "model_unavailable", "judgments": []}
     hasher = hashlib.sha256()
     try:
-        with Path(payload["codex"]).open("rb") as stream:
+        with os.fdopen(host_files.open_regular(payload["codex"], single_link=False), "rb") as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 hasher.update(block)
-    except OSError:
+    except (OSError, ValueError):
         return {"status": "model_unavailable", "judgments": []}
     digest = hasher.hexdigest()
     if digest != payload["codex_sha256"]:
@@ -144,31 +150,53 @@ def _run(payload: dict) -> dict:
     case["delivered_cards"] = [{"id": card["id"], "summary": card["summary"]}
                                for card in payload["cards"]]
     with tempfile.TemporaryDirectory(prefix="mneme-shadow-") as name:
-        temp = Path(name)
+        temp = Path(name) / "assessor"
+        host_files.ensure_private_directory(temp)
         schema, output = temp / "schema.json", temp / "result.json"
-        schema.write_text(json.dumps(OUTPUT_SCHEMA))
+        host_files.atomic_write(schema, json.dumps(OUTPUT_SCHEMA).encode())
         command = _command(payload["codex"], payload["model"], schema, output, temp)
+        process = pipes = None
         try:
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, cwd=temp, start_new_session=True)
-            try:
-                stdout, _ = process.communicate((PROMPT + json.dumps(case, ensure_ascii=False)).encode(), timeout=TIMEOUT)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.communicate()
-                return {"status": "timeout", "judgments": []}
-        except OSError:
+            process = host_process.spawn(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, cwd=temp, tree=True)
+            pipes = host_process.BoundedPipe(process, max_read_bytes=MAX_EVENTS + 1)
+            deadline = time.monotonic() + TIMEOUT
+            pipes.write((PROMPT + json.dumps(case, ensure_ascii=False)).encode(), deadline)
+            process.stdin.close()
+            stdout = bytearray()
+            while True:
+                block = pipes.read(min(4096, MAX_EVENTS + 1 - len(stdout)), deadline)
+                if not block:
+                    break
+                stdout.extend(block)
+                if len(stdout) > MAX_EVENTS:
+                    return {"status": "model_unavailable", "judgments": []}
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except (TimeoutError, subprocess.TimeoutExpired):
+            return {"status": "timeout", "judgments": []}
+        except (OSError, ValueError):
             return {"status": "model_unavailable", "judgments": []}
+        finally:
+            # Close the owned job/group even after its leader exits: descendants
+            # must not survive a successful assessment or an output refusal.
+            if process is not None:
+                try:
+                    host_process.terminate_tree(process, timeout=2)
+                finally:
+                    if pipes is not None:
+                        pipes.close()
+                    else:
+                        for stream in (process.stdin, process.stdout):
+                            if stream is not None:
+                                stream.close()
         if (process.returncode != 0 or len(stdout) > MAX_EVENTS or not _events_are_tool_free(stdout)
                 or not output.is_file() or output.is_symlink()):
             return {"status": "model_unavailable", "judgments": []}
         try:
-            if output.stat().st_size > MAX_MODEL_OUTPUT:
+            raw = read_regular(output, MAX_MODEL_OUTPUT)
+            if len(raw) > MAX_MODEL_OUTPUT:
                 raise ValueError("output bound")
-            value = json.loads(output.read_bytes())
+            value = json.loads(raw)
             if not isinstance(value, dict) or set(value) != {"judgments"} or not isinstance(value["judgments"], list):
                 raise ValueError("output shape")
             if len(value["judgments"]) != len(payload["cards"]):
@@ -191,33 +219,21 @@ def _run(payload: dict) -> dict:
 
 def _write_result(state_dir: Path, turn_key: str, result: dict) -> None:
     directory = state_dir / "shadow"
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    host_files.ensure_state_directory(directory)
     target = directory / (turn_key + ".json")
     data = {"schema": SCHEMA, "turn_key": turn_key, **result}
     raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
     if len(raw) > MAX_SIDECAR:
         raise ValueError("shadow result exceeds bound")
-    fd, temporary = tempfile.mkstemp(prefix=".shadow-", dir=directory)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-        # Disposable shadow observations is bounded globally, not an append-only log.
-        files = sorted((p for p in directory.glob("[0-9a-f]" * 64 + ".json") if p.is_file()),
-                       key=lambda p: p.stat().st_mtime)
-        cutoff = time.time() - 7 * 86400
-        for old in files:
-            if len(files) <= 64 and old.stat().st_mtime >= cutoff:
-                break
-            old.unlink(missing_ok=True)
-            files.remove(old)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+    host_files.atomic_write(target, raw)
+    # Disposable shadow observations are bounded globally, not an append-only log.
+    files = sorted((p for p in directory.glob("[0-9a-f]" * 64 + ".json") if p.is_file()),
+                   key=lambda p: p.stat().st_mtime)
+    cutoff = time.time() - 7 * 86400
+    for index, old in enumerate(files):
+        if len(files) - index <= 64 and old.stat().st_mtime >= cutoff:
+            break
+        old.unlink(missing_ok=True)
 
 
 def launch(state_dir: Path, session_id: str, turn_id: str, cue: str,
@@ -237,9 +253,9 @@ def launch(state_dir: Path, session_id: str, turn_id: str, cue: str,
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         if len(raw) > MAX_INPUT:
             return False
-        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker"],
-                                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        child = host_process.spawn([sys.executable, str(Path(__file__).resolve()), "--worker"],
+                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, close_fds=True, detached=True)
         assert child.stdin is not None
         child.stdin.write(raw)
         child.stdin.close()
@@ -255,16 +271,17 @@ def _worker() -> int:
             return 0
         payload = _validate(json.loads(raw))
         state_dir = Path(payload["state_dir"])
-        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        host_files.ensure_state_directory(state_dir)
         delivered = [{"id": card["id"], "display_sha256": card["display_sha256"],
                       **({"native": card["native"]} if "native" in card else {})}
                      for card in payload["cards"]]
         context = {"task_cue": payload["cue"],
                    "candidate_cards": [{"id": card["id"], "summary": card["summary"]}
                                        for card in payload["cards"]]}
-        with (state_dir / "shadow.lock").open("a+b") as lock:
+        lock_fd = host_files.open_regular(state_dir / "shadow.lock", os.O_RDWR | os.O_CREAT)
+        with os.fdopen(lock_fd, "r+b") as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                host_files.lock_file(lock, blocking=False)
             except BlockingIOError:
                 _write_result(state_dir, payload["turn_key"],
                               {"status": "busy", "judgments": [], "delivered": delivered, **context})

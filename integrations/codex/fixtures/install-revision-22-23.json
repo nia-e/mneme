@@ -1,0 +1,290 @@
+{
+  "schema": "mneme.install-history-fixture.v1",
+  "source_commit": "e318dd146f0d50286fc0341fd5e95d55d511b71e",
+  "source_path": "integrations/codex/install.py",
+  "source_sha256": "7246ffd15fe6e97d4c454e155a1137e71eff9242a5ad853425a6fcb012fab277",
+  "entries": [
+    {
+      "plan": {
+        "config_revision": 22,
+        "project_root": "/mneme fixture/project",
+        "prefix": "/mneme fixture/runtime",
+        "python": "/usr/bin/python3",
+        "url": "http://127.0.0.1:18765/",
+        "recall_mode": "async",
+        "recording_mode": "automatic"
+      },
+      "before": {
+        "config.toml": "model = \"original\"\n",
+        "hooks.json": null
+      },
+      "outputs": {
+        "config.toml": "model = \"original\"\n\n# BEGIN mneme-codex-v1\n[mcp_servers.mneme_project]\ncommand = \"/usr/bin/python3\"\nargs = [\"/mneme fixture/runtime/lib/launcher.py\", \"--service-config\", \"/mneme fixture/runtime/config/service.json\"]\nstartup_timeout_sec = 30\nenabled_tools = [\"recall_context\", \"get\", \"capture\", \"supersede\", \"status\", \"episode\", \"save\", \"concern\"]\n[mcp_servers.mneme_project.tools.recall_context]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.get]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.capture]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.supersede]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.status]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.episode]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.save]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.concern]\napproval_mode = \"approve\"\n# END mneme-codex-v1\n",
+        "hooks.json": "{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5,\n            \"additionalContextLimit\": 1600\n          }\n        ]\n      }\n    ],\n    \"UserPromptSubmit\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5,\n            \"additionalContextLimit\": 0\n          }\n        ]\n      },\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json' --reader-background\",\n            \"timeout\": 5,\n            \"async\": true\n          }\n        ]\n      }\n    ],\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5\n          }\n        ]\n      },\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json' --reader-background\",\n            \"timeout\": 5,\n            \"async\": true\n          }\n        ]\n      }\n    ],\n    \"PostToolUse\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5,\n            \"additionalContextLimit\": 0\n          }\n        ]\n      }\n    ],\n    \"Interrupt\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 3\n          }\n        ]\n      }\n    ],\n    \"SessionEnd\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 3\n          }\n        ]\n      }\n    ]\n  }\n}\n"
+      },
+      "destinations": [
+        [
+          "bin/mnemed",
+          true
+        ],
+        [
+          "bin/mneme-mcp",
+          true
+        ],
+        [
+          "lib/hooks.py",
+          false
+        ],
+        [
+          "lib/mcp_client.py",
+          false
+        ],
+        [
+          "lib/service.py",
+          false
+        ],
+        [
+          "lib/memory.py",
+          false
+        ],
+        [
+          "lib/launcher.py",
+          false
+        ],
+        [
+          "lib/hook_recall.py",
+          false
+        ],
+        [
+          "lib/profile.py",
+          false
+        ],
+        [
+          "lib/library_launcher.py",
+          false
+        ],
+        [
+          "lib/shadow.py",
+          false
+        ],
+        [
+          "lib/reader_worker.py",
+          false
+        ],
+        [
+          "lib/reader_runtime.py",
+          false
+        ],
+        [
+          "lib/reader_contract.py",
+          false
+        ],
+        [
+          "lib/turn_observer.py",
+          false
+        ],
+        [
+          "lib/rollout_primitives.py",
+          false
+        ],
+        [
+          "lib/recording_contract.py",
+          false
+        ],
+        [
+          "lib/recording_jobs.py",
+          false
+        ],
+        [
+          "lib/routing_memory.py",
+          false
+        ],
+        [
+          "lib/routing_contract.py",
+          false
+        ],
+        [
+          "lib/librarian_policy.py",
+          false
+        ],
+        [
+          "lib/touchstone_contract.py",
+          false
+        ],
+        [
+          "lib/target_policy.py",
+          false
+        ],
+        [
+          "lib/misc_binding.py",
+          false
+        ],
+        [
+          "lib/misc_config.py",
+          false
+        ],
+        [
+          "lib/hook_launcher.py",
+          false
+        ],
+        [
+          "lib/tag_config.py",
+          false
+        ],
+        [
+          "lib/tag_context.py",
+          false
+        ],
+        [
+          "lib/stewardship.py",
+          false
+        ],
+        [
+          "lib/stewardship_contract.py",
+          false
+        ]
+      ]
+    },
+    {
+      "plan": {
+        "config_revision": 23,
+        "project_root": "/mneme fixture/project",
+        "prefix": "/mneme fixture/runtime",
+        "python": "/usr/bin/python3",
+        "url": "http://127.0.0.1:18765/",
+        "recall_mode": "async",
+        "recording_mode": "automatic"
+      },
+      "before": {
+        "config.toml": "model = \"original\"\n",
+        "hooks.json": null
+      },
+      "outputs": {
+        "config.toml": "model = \"original\"\n\n# BEGIN mneme-codex-v1\n[mcp_servers.mneme_project]\ncommand = \"/usr/bin/python3\"\nargs = [\"/mneme fixture/runtime/lib/launcher.py\", \"--service-config\", \"/mneme fixture/runtime/config/service.json\"]\nstartup_timeout_sec = 30\nenabled_tools = [\"recall_context\", \"get\", \"capture\", \"supersede\", \"status\", \"episode\", \"save\", \"concern\"]\n[mcp_servers.mneme_project.tools.recall_context]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.get]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.capture]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.supersede]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.status]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.episode]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.save]\napproval_mode = \"approve\"\n[mcp_servers.mneme_project.tools.concern]\napproval_mode = \"approve\"\n# END mneme-codex-v1\n",
+        "hooks.json": "{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5,\n            \"additionalContextLimit\": 1600\n          }\n        ]\n      }\n    ],\n    \"UserPromptSubmit\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5,\n            \"additionalContextLimit\": 0\n          }\n        ]\n      },\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json' --reader-background\",\n            \"timeout\": 5,\n            \"async\": true\n          }\n        ]\n      }\n    ],\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5\n          }\n        ]\n      },\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json' --reader-background\",\n            \"timeout\": 5,\n            \"async\": true\n          }\n        ]\n      }\n    ],\n    \"PostToolUse\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 5,\n            \"additionalContextLimit\": 0\n          }\n        ]\n      }\n    ],\n    \"Interrupt\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 3\n          }\n        ]\n      }\n    ],\n    \"SessionEnd\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/bin/python3 '/mneme fixture/runtime/lib/hooks.py' --config '/mneme fixture/runtime/config/hooks.json'\",\n            \"timeout\": 3\n          }\n        ]\n      }\n    ]\n  }\n}\n"
+      },
+      "destinations": [
+        [
+          "bin/mnemed",
+          true
+        ],
+        [
+          "bin/mneme-mcp",
+          true
+        ],
+        [
+          "lib/hooks.py",
+          false
+        ],
+        [
+          "lib/mcp_client.py",
+          false
+        ],
+        [
+          "lib/service.py",
+          false
+        ],
+        [
+          "lib/memory.py",
+          false
+        ],
+        [
+          "lib/launcher.py",
+          false
+        ],
+        [
+          "lib/hook_recall.py",
+          false
+        ],
+        [
+          "lib/profile.py",
+          false
+        ],
+        [
+          "lib/library_launcher.py",
+          false
+        ],
+        [
+          "lib/shadow.py",
+          false
+        ],
+        [
+          "lib/reader_worker.py",
+          false
+        ],
+        [
+          "lib/reader_runtime.py",
+          false
+        ],
+        [
+          "lib/reader_contract.py",
+          false
+        ],
+        [
+          "lib/turn_observer.py",
+          false
+        ],
+        [
+          "lib/rollout_primitives.py",
+          false
+        ],
+        [
+          "lib/recording_contract.py",
+          false
+        ],
+        [
+          "lib/recording_jobs.py",
+          false
+        ],
+        [
+          "lib/routing_memory.py",
+          false
+        ],
+        [
+          "lib/routing_contract.py",
+          false
+        ],
+        [
+          "lib/librarian_policy.py",
+          false
+        ],
+        [
+          "lib/touchstone_contract.py",
+          false
+        ],
+        [
+          "lib/target_policy.py",
+          false
+        ],
+        [
+          "lib/misc_binding.py",
+          false
+        ],
+        [
+          "lib/misc_config.py",
+          false
+        ],
+        [
+          "lib/hook_launcher.py",
+          false
+        ],
+        [
+          "lib/tag_config.py",
+          false
+        ],
+        [
+          "lib/tag_context.py",
+          false
+        ],
+        [
+          "lib/stewardship.py",
+          false
+        ],
+        [
+          "lib/stewardship_contract.py",
+          false
+        ]
+      ]
+    }
+  ]
+}

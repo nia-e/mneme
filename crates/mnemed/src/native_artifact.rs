@@ -4,8 +4,11 @@
 //! module only centralizes the byte-preserving cryptographic and filesystem
 //! mechanics those callers share.
 
+#[cfg(unix)]
 use std::ffi::CString;
-use std::fs::{self, File, OpenOptions};
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -71,10 +74,11 @@ pub(super) fn read_bounded_regular(
     if bytes.len() > max {
         return Err(format!("{label} exceeds its hard {max}-byte maximum").into());
     }
-    verify_path_still_names_open_file(path, &metadata)?;
+    verify_path_still_names_open_file(path, &file)?;
     Ok(bytes)
 }
 
+#[cfg(not(windows))]
 pub(super) fn open_read_nofollow(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -103,45 +107,80 @@ pub(super) fn open_dir_nofollow(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-#[cfg(not(unix))]
-pub(super) fn open_dir_nofollow(path: &Path) -> std::io::Result<File> {
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "refusing symlink",
-        ));
+#[cfg(windows)]
+pub(super) fn open_read_nofollow(path: &Path) -> std::io::Result<File> {
+    mneme_store_path::windows::open_regular_checked(path, false)
+}
+
+#[cfg(windows)]
+pub(super) fn open_dir_nofollow(
+    path: &Path,
+) -> std::io::Result<mneme_store_path::windows::Directory> {
+    mneme_store_path::windows::Directory::open_parent(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn open_dir_nofollow(_path: &Path) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "checked directories unsupported",
+    ))
+}
+
+pub(super) fn verify_path_still_names_open_file(path: &Path, opened: &File) -> Result<(), AnyErr> {
+    #[cfg(windows)]
+    {
+        use mneme_store_path::windows::file_identity;
+        let current = open_read_nofollow(path)?;
+        if !file_identity(&current)?.same_file(file_identity(opened)?) {
+            return Err(format!("{} was replaced while it was open", path.display()).into());
+        }
     }
-    File::open(path)
+    #[cfg(not(windows))]
+    {
+        let current = fs::symlink_metadata(path)?;
+        if !current.file_type().is_file() || current.file_type().is_symlink() {
+            return Err(format!("{} changed identity while it was open", path.display()).into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let opened = opened.metadata()?;
+            if current.dev() != opened.dev() || current.ino() != opened.ino() {
+                return Err(format!("{} was replaced while it was open", path.display()).into());
+            }
+        }
+    }
+    Ok(())
 }
 
-pub(super) fn verify_path_still_names_open_file(
-    path: &Path,
-    opened: &fs::Metadata,
-) -> Result<(), AnyErr> {
-    verify_path_still_names_open_file_or_dir(path, opened, false)
-}
-
-pub(super) fn verify_path_still_names_open_file_or_dir(
-    path: &Path,
-    opened: &fs::Metadata,
-    directory: bool,
-) -> Result<(), AnyErr> {
+#[cfg(not(windows))]
+pub(super) fn verify_directory(path: &Path, opened: &File) -> Result<(), AnyErr> {
     let current = fs::symlink_metadata(path)?;
-    let right_type = if directory {
-        current.file_type().is_dir()
-    } else {
-        current.file_type().is_file()
-    };
-    if !right_type || current.file_type().is_symlink() {
-        return Err(format!("{} changed identity while it was open", path.display()).into());
+    if !current.file_type().is_dir() || current.file_type().is_symlink() {
+        return Err(format!("{} changed directory identity", path.display()).into());
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let opened = opened.metadata()?;
         if current.dev() != opened.dev() || current.ino() != opened.ino() {
             return Err(format!("{} was replaced while it was open", path.display()).into());
         }
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(super) fn verify_directory(
+    path: &Path,
+    opened: &mneme_store_path::windows::Directory,
+) -> Result<(), AnyErr> {
+    let named = mneme_store_path::windows::Directory::open_parent(path)?;
+    if !named.identity().same_object(opened.identity()) {
+        return Err(format!("{} was replaced while it was open", path.display()).into());
+    }
+    opened.require_named()?;
     Ok(())
 }
 
@@ -155,15 +194,45 @@ impl ExclusiveLock {
         artifact_label: &str,
         contention_owner: &str,
     ) -> Result<Self, AnyErr> {
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let file = options.open(path)?;
+        #[cfg(windows)]
+        let file = {
+            let parent = mneme_store_path::windows::Directory::open_parent(
+                path.parent().ok_or("lock has no parent")?,
+            )?;
+            let name = path.file_name().ok_or("lock has no filename")?;
+            let file = match parent.create_file(name) {
+                Ok(file) => {
+                    file.sync_all()?;
+                    parent.sync_all()?;
+                    file
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    parent.open_file(name, true)?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            file.try_lock().map_err(|error| {
+                format!(
+                    "{contention_owner} owns {} ({artifact_label}): {error}",
+                    path.display()
+                )
+            })?;
+            parent.require_named()?;
+            verify_path_still_names_open_file(path, &file)?;
+            file
+        };
+        #[cfg(not(windows))]
+        let file = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+                options.custom_flags(libc::O_NOFOLLOW);
+            }
+            options.open(path)?
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -187,7 +256,7 @@ impl ExclusiveLock {
                 )
                 .into());
             }
-            verify_path_still_names_open_file(path, &metadata)?;
+            verify_path_still_names_open_file(path, &file)?;
         }
         Ok(Self { _file: file })
     }
@@ -281,6 +350,8 @@ pub(super) fn load_existing_key(path: &Path) -> Result<[u8; KEY_BYTES], AnyErr> 
             return Err("native bootstrap key must be single-linked and private (0600)".into());
         }
     }
+    #[cfg(windows)]
+    mneme_store_path::windows::require_private_file(&file)?;
     let mut bytes = Vec::with_capacity(KEY_BYTES + 1);
     Read::by_ref(&mut file)
         .take((KEY_BYTES + 1) as u64)
@@ -288,7 +359,7 @@ pub(super) fn load_existing_key(path: &Path) -> Result<[u8; KEY_BYTES], AnyErr> 
     let key = bytes
         .try_into()
         .map_err(|_| "native bootstrap key must be exactly 32 bytes")?;
-    verify_path_still_names_open_file(path, &metadata)?;
+    verify_path_still_names_open_file(path, &file)?;
     Ok(key)
 }
 
@@ -309,22 +380,40 @@ fn publish_private_bytes_no_clobber(path: &Path, bytes: &[u8]) -> Result<(), Any
 }
 
 pub(super) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), AnyErr> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
+    #[cfg(windows)]
+    let mut file = {
+        let parent = mneme_store_path::windows::Directory::open_parent(
+            path.parent().ok_or("file has no parent")?,
+        )?;
+        parent.create_file(path.file_name().ok_or("file has no filename")?)?
+    };
+    #[cfg(not(windows))]
+    let mut file = {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)?
+    };
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
 }
 
 pub(super) fn create_private_dir(path: &Path) -> Result<(), AnyErr> {
-    fs::create_dir(path)?;
-    set_private_dir(path)
+    #[cfg(windows)]
+    {
+        mneme_store_path::windows::Directory::create(path)?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        fs::create_dir(path)?;
+        set_private_dir(path)
+    }
 }
 
 pub(super) fn ensure_private_dir(path: &Path) -> Result<(), AnyErr> {
@@ -339,6 +428,9 @@ pub(super) fn ensure_private_dir(path: &Path) -> Result<(), AnyErr> {
 }
 
 fn set_private_dir(path: &Path) -> Result<(), AnyErr> {
+    // Existing Windows ACLs are validated, never silently repaired.
+    #[cfg(windows)]
+    mneme_store_path::windows::Directory::open(path)?.require_private()?;
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
@@ -351,16 +443,28 @@ fn set_private_dir(path: &Path) -> Result<(), AnyErr> {
         if rc != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        verify_path_still_names_open_file_or_dir(path, &opened, true)?;
+        verify_directory(path, &directory)?;
     }
     Ok(())
 }
 
-pub(super) fn sync_dir(path: &Path) -> Result<(), AnyErr> {
-    #[cfg(unix)]
+pub(super) fn sync_file(path: &Path) -> Result<(), AnyErr> {
+    #[cfg(windows)]
     {
-        open_dir_nofollow(path)?.sync_all()?;
+        let parent = mneme_store_path::windows::Directory::open_parent(
+            path.parent().ok_or("file has no parent")?,
+        )?;
+        let file = parent.open_file(path.file_name().ok_or("file has no filename")?, true)?;
+        file.sync_all()?;
+        verify_path_still_names_open_file(path, &file)?;
     }
+    #[cfg(not(windows))]
+    open_read_nofollow(path)?.sync_all()?;
+    Ok(())
+}
+
+pub(super) fn sync_dir(path: &Path) -> Result<(), AnyErr> {
+    open_dir_nofollow(path)?.sync_all()?;
     Ok(())
 }
 
@@ -412,7 +516,35 @@ pub(super) fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(super) fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use mneme_store_path::windows::{Directory, rename_directory_no_replace};
+    let parent = Directory::open_parent(
+        to.parent()
+            .ok_or_else(|| std::io::Error::other("target has no parent"))?,
+    )?;
+    let name = to
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("target has no name"))?;
+    if fs::symlink_metadata(from)?.is_dir() {
+        let source = Directory::open(from)?;
+        rename_directory_no_replace(&source, &parent, name)
+    } else {
+        let source_parent = Directory::open_parent(
+            from.parent()
+                .ok_or_else(|| std::io::Error::other("source has no parent"))?,
+        )?;
+        let source = source_parent.open_file(
+            from.file_name()
+                .ok_or_else(|| std::io::Error::other("source has no name"))?,
+            true,
+        )?;
+        source_parent.require_named()?;
+        mneme_store_path::windows::rename_no_replace(&source, &parent, name)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) fn rename_no_replace(_from: &Path, _to: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -452,24 +584,73 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn private_key_publication_is_atomic_single_link_and_no_clobber() {
+        #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
         let requested_root =
             std::env::temp_dir().join(format!("mnemed-bootstrap-key-{}", Ulid::new()));
-        fs::create_dir(&requested_root).unwrap();
+        create_private_dir(&requested_root).unwrap();
         let root = fs::canonicalize(&requested_root).unwrap();
         let key = root.join("native-bootstrap.key");
         publish_private_bytes_no_clobber(&key, &[7; KEY_BYTES]).unwrap();
+        #[cfg(unix)]
         assert_eq!(fs::symlink_metadata(&key).unwrap().nlink(), 1);
         assert_eq!(load_existing_key(&key).unwrap(), [7; KEY_BYTES]);
 
         assert!(publish_private_bytes_no_clobber(&key, &[9; KEY_BYTES]).is_err());
         assert_eq!(load_existing_key(&key).unwrap(), [7; KEY_BYTES]);
+        #[cfg(unix)]
         assert_eq!(fs::symlink_metadata(&key).unwrap().nlink(), 1);
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_lock_contends_and_releases() {
+        let root = std::env::temp_dir().join(format!("mnemed-native-lock-{}", Ulid::new()));
+        create_private_dir(&root).unwrap();
+        let path = root.join("lock");
+        let first = ExclusiveLock::acquire(&path, "test lock", "another test").unwrap();
+        assert!(ExclusiveLock::acquire(&path, "test lock", "another test").is_err());
+        drop(first);
+        let second = ExclusiveLock::acquire(&path, "test lock", "another test").unwrap();
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_identity_rejects_same_size_file_and_directory_replacement() {
+        let root = std::env::temp_dir().join(format!("mnemed-native-identity-{}", Ulid::new()));
+        create_private_dir(&root).unwrap();
+        let path = root.join("artifact");
+        write_private_file(&path, b"old").unwrap();
+        let retained = open_read_nofollow(&path).unwrap();
+        rename_no_replace(&path, &root.join("previous")).unwrap();
+        write_private_file(&path, b"new").unwrap();
+        assert!(verify_path_still_names_open_file(&path, &retained).is_err());
+        drop(retained);
+        let directory = root.join("directory");
+        create_private_dir(&directory).unwrap();
+        let retained = open_dir_nofollow(&directory).unwrap();
+        rename_no_replace(&directory, &root.join("old-directory")).unwrap();
+        create_private_dir(&directory).unwrap();
+        assert!(verify_directory(&directory, &retained).is_err());
+        drop(retained);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_key_and_lock_reject_hardlinks() {
+        let root = std::env::temp_dir().join(format!("mnemed-native-hardlink-{}", Ulid::new()));
+        create_private_dir(&root).unwrap();
+        let key = root.join("key");
+        write_private_file(&key, &[7; KEY_BYTES]).unwrap();
+        fs::hard_link(&key, root.join("alias")).unwrap();
+        assert!(load_existing_key(&key).is_err());
+        assert!(ExclusiveLock::acquire(&key, "test lock", "another test").is_err());
+        assert_eq!(fs::read(&key).unwrap(), [7; KEY_BYTES]);
         fs::remove_dir_all(root).unwrap();
     }
 

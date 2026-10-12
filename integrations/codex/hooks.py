@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import importlib.util
 import json
@@ -22,13 +21,13 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shlex
 import stat
 import sys
-import tempfile
 import time
 from typing import Any
 from profile import select_for_cwd
+import host_files
+from host_platform import checkpoint_command as render_checkpoint_command
 from reader_contract import (EPISODE_FIELDS as EPISODE_CARD_FIELDS,
                              EPISODE_OPTIONAL_FIELDS as EPISODE_OPTIONAL_CARD_FIELDS,
                              validate_episode_projection_fields)
@@ -44,6 +43,7 @@ CONFIG_SCHEMA_V8 = "mneme.codex-hooks.config.v8"
 CONFIG_SCHEMA_V9 = "mneme.codex-hooks.config.v9"
 CONFIG_SCHEMA_V10 = "mneme.codex-hooks.config.v10"
 CONFIG_SCHEMA_V11 = "mneme.codex-hooks.config.v11"
+CONFIG_SCHEMA_V12 = "mneme.codex-hooks.config.v12"
 STATE_SCHEMA = "mneme.codex-hooks.state.v2"
 LEGACY_STATE_SCHEMA = "mneme.codex-hooks.state.v1"
 MAX_STDIN = 64_000
@@ -193,7 +193,7 @@ def _input_warning(reason: str) -> dict[str, str]:
 
 
 def _bounded_json(path: Path, limit: int, *, with_raw=False) -> Any:
-    with path.open("rb") as file:
+    with os.fdopen(host_files.open_regular(path), "rb") as file:
         raw = file.read(limit + 1)
     if len(raw) > limit:
         raise HookError("local JSON exceeds size limit")
@@ -208,10 +208,16 @@ def _valid_id(value: Any) -> bool:
     return isinstance(value, str) and ID_RE.fullmatch(value) is not None
 
 
-def _config(path: Path, *, workspace_binding=None) -> dict[str, Any]:
+def _config(path: Path, *, workspace_binding=None, cwd=None) -> dict[str, Any]:
     data, parsed_raw = _bounded_json(path, MAX_CONFIG, with_raw=True)
     if not isinstance(data, dict):
         raise HookError("invalid hook config schema")
+    if data.get("schema") == CONFIG_SCHEMA_V12:
+        from registry_runtime import load
+        try:
+            return load(data, path, parsed_raw, workspace_binding=workspace_binding, cwd=cwd)
+        except (ValueError, OSError, TypeError, KeyError) as error:
+            raise HookError("invalid or changed named-store configuration; reprepare and use a fresh session") from error
     if data.get("schema") == CONFIG_SCHEMA_V11:
         from misc_config import validate_config
         from misc_binding import validate_binding
@@ -397,38 +403,22 @@ def _atomic_write(path: Path, data: Any) -> None:
 def _atomic_write_raw(path: Path, raw: bytes) -> None:
     if len(raw) > MAX_STATE:
         raise HookError("hook state exceeds size limit")
-    fd, name = tempfile.mkstemp(prefix=".mneme-hook-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as file:
-            file.write(raw)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(name, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        try:
-            os.unlink(name)
-        except FileNotFoundError:
-            pass
+    host_files.atomic_write(path, raw)
 
 
 @contextmanager
 def _locked_state(state_dir: Path, session_id: str, *, blocking: bool = True, create: bool = True):
     if create:
-        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        host_files.ensure_state_directory(state_dir)
     path = _state_path(state_dir, session_id)
     lock = path.with_suffix(".lock")
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = host_files.open_regular(lock, os.O_CREAT | os.O_RDWR)
     with os.fdopen(fd, "a+b") as file:
         metadata = os.fstat(file.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise HookError("invalid hook state lock")
         try:
-            fcntl.flock(file, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            host_files.lock_file(file, blocking=blocking)
         except BlockingIOError as exc:
             raise HookError("hook state busy") from exc
         if path.is_symlink() or path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
@@ -545,7 +535,7 @@ def _legacy_preimage(path: Path, raw: bytes) -> None:
     directory = path.with_suffix(".v1-preimage")
     if directory.is_symlink():
         raise HookError("invalid legacy backup path")
-    directory.mkdir(mode=0o700, exist_ok=True)
+    host_files.ensure_state_directory(directory, parents=False)
     backup = directory / (hashlib.sha256(raw).hexdigest() + ".json")
     with os.scandir(directory) as entries:
         first, second = next(entries, None), next(entries, None)
@@ -559,12 +549,13 @@ def _legacy_preimage(path: Path, raw: bytes) -> None:
         _atomic_write_raw(backup, raw)
     # A prior attempt may have stopped after replace but before directory fsync.
     # Reusing matching bytes must finish durability, not just check existence.
-    for durable in (backup, directory, path.parent):
-        descriptor = os.open(durable, os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    descriptor = host_files.open_regular(backup)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    for durable in (directory, path.parent):
+        host_files.sync_directory(durable)
 
 
 def _admit_async_state(config: dict[str, Any], session_id: str) -> None:
@@ -579,6 +570,10 @@ def _admit_async_state(config: dict[str, Any], session_id: str) -> None:
     if config.get("memory_scope") not in ("project", "workshop"):
         raise HookError("unsupported legacy hook scope")
     _legacy_hook_state(raw)  # Refuse unknown/torn state before creating sidecars.
+    if host_files.WINDOWS:
+        # v1 was never a supported native-Windows writer. Its namespace barrier
+        # cannot be established by rewriting immutable evidence as a new file.
+        raise HookError("legacy hook state requires migration on its supported Unix host before copying to Windows")
     with _locked_state(config["state_dir"], session_id, blocking=False, create=False) as path:
         data, raw = _bounded_json(path, MAX_STATE, with_raw=True)
         if isinstance(data, dict) and data.get("schema") == STATE_SCHEMA:
@@ -610,7 +605,9 @@ def _lifecycle_failure(event: dict[str, Any] | None, *, background: bool = False
 
 
 def _memory_choice(config: dict[str, Any]) -> str:
-    if config["memory_scope"] == "workshop":
+    if "frozen_selection" in config:
+        routing = "Choose the narrowest explicitly selected store purpose, or save nothing. Never retarget an unavailable owner."
+    elif config["memory_scope"] == "workshop":
         routing = ("Use the configured global user store only for personal/shared continuity. "
                    "Project details belong in their explicitly configured project store; "
                    "without one, keep them in artifacts, not global memory.")
@@ -634,10 +631,12 @@ def _checkpoint_command(config: dict[str, Any], session_id: str, turn_id: str) -
         raise HookError("hook config path unavailable")
     words = [sys.executable, str(Path(__file__).resolve()), "checkpoint", "--config", str(config_path),
              "--session-id", session_id, "--turn-id", turn_id]
-    if config.get("memory_scope") == "misc":
+    if config.get("memory_scope") in ("misc", "registry") and "workspace_binding" in config:
         words.extend(["--workspace-binding", json.dumps(config["workspace_binding"], ensure_ascii=False,
                                                         separators=(",", ":"))])
-    return " ".join(shlex.quote(word) for word in words)
+    if "frozen_selection" in config:
+        words.extend(["--selection-cwd", str(config["selection_cwd"])])
+    return render_checkpoint_command(words)
 
 
 def _recall_cards(config: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -666,10 +665,17 @@ def _valid_card(card: Any) -> bool:
                      and card["edition_id"] == card["id"])))
     if isinstance(card, dict) and "db_id" in card and (not isinstance(card["db_id"], str) or ULID_RE.fullmatch(card["db_id"]) is None):
         return False
-    if isinstance(card, dict) and "scope" in card and (card["scope"] not in ("project", "global_preference")
+    if isinstance(card, dict) and "scope" in card and (card["scope"] not in ("project", "global_preference", "named")
             or card["scope"] == "global_preference" and (card.get("kind", "semantic") != "semantic"
                 or "db_id" not in card or "touchstone" in card
                 or any(k in card for k in ("routing_binding", "conditional_binding", "entry_kind")))):
+        return False
+    if isinstance(card, dict) and card.get("scope") == "named":
+        if (not isinstance(card.get("store_name"), str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", card["store_name"]) is None
+                or not isinstance(card.get("store_purpose"), str) or len(card["store_purpose"].encode()) > 2048
+                or "db_id" not in card):
+            return False
+    elif isinstance(card, dict) and any(key in card for key in ("store_name", "store_purpose")):
         return False
     if not basic:
         return False
@@ -710,6 +716,8 @@ def _render_cards_with_display(cards: list[dict[str, Any]], db_id: str | None = 
     items = [{"id": c["id"], "summary": _limited_text(c["summary"], 800),
               "status": c["status"], "source": c["source"],
               "kind": c.get("kind", "semantic"),
+              **({key: c[key] for key in ("scope", "store_name", "store_purpose", "db_id")}
+                 if c.get("scope") == "named" else {}),
               **({"touchstone": c["touchstone"]} if "touchstone" in c else {}),
               **({key: c[key] for key in (*EPISODE_CARD_FIELDS, *EPISODE_OPTIONAL_CARD_FIELDS)
                   if key in c}
@@ -776,7 +784,7 @@ ASYNC_OVERFLOW_NOTE = (" Selected-batch cards exceeded the context budget; "
 
 def _pack_async_delivery(cards: list[dict[str, Any]], session_id: str, turn_id: str,
                          db_id: str | None = None, *, concerns=None,
-                         prior_budget_omitted: int = 0) -> dict[str, Any]:
+                         prior_budget_omitted: int = 0, read_coverage=None) -> dict[str, Any]:
     """One exact envelope: whole cards and atomic pair/caveat components.
 
     Optional private cases never replace useful cards or imply corpus completeness.
@@ -788,6 +796,22 @@ def _pack_async_delivery(cards: list[dict[str, Any]], session_id: str, turn_id: 
             or type(prior_budget_omitted) is not int or not 0 <= prior_budget_omitted <= MAX_STDIN):
         raise ValueError("invalid async delivery")
     from turn_observer import validate_delivery_packet, validate_delivery_concerns, render_delivery_concern, DELIVERY_SCHEMA
+    coverage_note = ""
+    if read_coverage is not None:
+        fields = {"selected", "attempted", "unavailable", "budget_omitted", "complete"}
+        if (not isinstance(read_coverage, dict) or set(read_coverage) != fields
+                or any(type(read_coverage[k]) is not int or not 0 <= read_coverage[k] <= 65536
+                       for k in fields - {"complete"}) or type(read_coverage["complete"]) is not bool
+                or read_coverage["attempted"] > read_coverage["selected"]
+                or read_coverage["unavailable"] > read_coverage["attempted"]
+                or read_coverage["budget_omitted"] > read_coverage["selected"]
+                or read_coverage["complete"] and (read_coverage["unavailable"] or read_coverage["budget_omitted"]
+                    or read_coverage["attempted"] != read_coverage["selected"])):
+            raise ValueError("invalid named-store read coverage")
+        if not read_coverage["complete"]:
+            coverage_note = (f" Store coverage is partial: {read_coverage['attempted']}/{read_coverage['selected']} owners attempted, "
+                             f"{read_coverage['unavailable']} unavailable and {read_coverage['budget_omitted']} omitted by the shared budget. "
+                             "This is not evidence that the missing stores are empty.")
     concerns = [] if concerns is None else concerns
     # Existing concerns are same-project pairs. A raw-ID collision with a
     # foreign preference cannot be resolved by their legacy ID-only endpoints.
@@ -795,7 +819,7 @@ def _pack_async_delivery(cards: list[dict[str, Any]], session_id: str, turn_id: 
     offered_concern_count = len(concerns) if isinstance(concerns, list) else 0
     if isinstance(concerns, list):
         concerns = [c for c in concerns if not isinstance(c, dict) or
-                    not duplicate_ids.intersection(c.get("displayed_endpoint_ids", []))]
+                    ("db_id" in c or not duplicate_ids.intersection(c.get("displayed_endpoint_ids", [])))]
     _, offered_displayed = _render_cards_with_display(cards, db_id)
     # No database binding means warning-only context can still be delivered.
     if concerns and not offered_displayed:
@@ -812,7 +836,7 @@ def _pack_async_delivery(cards: list[dict[str, Any]], session_id: str, turn_id: 
     def render(chosen, cases, omitted):
         text, displayed = _render_cards_with_display(chosen, db_id)
         context = prefix + text + "".join(" " + render_delivery_concern(c) for c in cases)
-        context += ASYNC_OVERFLOW_NOTE if omitted else ""
+        context += (ASYNC_OVERFLOW_NOTE if omitted else "") + coverage_note
         if len(context.encode("utf-8")) > MAX_CONTEXT_BYTES:
             return context, displayed, False
         if displayed:
@@ -842,7 +866,8 @@ def _pack_async_delivery(cards: list[dict[str, Any]], session_id: str, turn_id: 
     omitted = len(cards) - len(packed) + prior_budget_omitted
     retained = []
     for case in concerns:
-        if not set(case["displayed_endpoint_ids"]) <= {c["id"] for c in packed}:
+        eligible = {c["id"] for c in packed if case.get("db_id") is None or c.get("db_id", db_id) == case["db_id"]}
+        if not set(case["displayed_endpoint_ids"]) <= eligible:
             continue
         candidate = case
         if not render(packed, retained + [candidate], bool(omitted))[2] and case["expected_row"] is not None:
@@ -854,7 +879,7 @@ def _pack_async_delivery(cards: list[dict[str, Any]], session_id: str, turn_id: 
         raise ValueError("async envelope exceeds context budget")
     return {"cards": packed, "context": context, "displayed": displayed,
             "concerns": retained, "concern_omitted_count": offered_concern_count - len(retained),
-            "budget_omitted_count": omitted}
+            "budget_omitted_count": omitted, **({"read_coverage": read_coverage} if read_coverage is not None else {})}
 
 
 def _finalize_recall(config: dict[str, Any], session_id: str, turn_id: str, epoch: int,
@@ -1096,13 +1121,16 @@ def _recording_jobs():
 
 def _opportunity_base(config: dict[str, Any], session_id: str, turn_id: str) -> str:
     if config.get("recording_mode") == "automatic":
+        if "frozen_selection" in config:
+            return "Optional off-thread recording to purpose-selected stores is enabled; no actor checkpoint is required. Verify mutable claims."
         if config.get("memory_scope") == "misc":
             return "Optional off-thread misc recording is enabled; workspace provenance is retained. No actor memory checkpoint is required. Verify mutable claims."
         return "Optional off-thread project recording is enabled; no actor memory checkpoint is required. Verify mutable claims."
     command = _checkpoint_command(config, session_id, turn_id)
+    shell = " in PowerShell" if host_files.WINDOWS else ""
     return (f"Mneme {config['memory_scope']}-memory opportunity. Source identity: "
             f"session_id={session_id}, turn_id={turn_id}. Verify mutable claims. "
-            f"{_memory_choice(config)} Checkpoint this turn with `{command} --outcome none` "
+            f"{_memory_choice(config)} Checkpoint this turn{shell} with `{command} --outcome none` "
             "if nothing merits saving, `--outcome deferred` on service error, or "
             "`--outcome captured --id ACTUAL_ULID` using read-back note IDs or episode "
             "edition_ids. Checkpoint metadata alone is not proof that memory was saved.")
@@ -1129,6 +1157,19 @@ def _mark_opportunity(config: dict[str, Any], session_id: str, turn_id: str,
 
 def _stop_checkpoint(config: dict[str, Any], session_id: str, turn_id: str,
                      *, blocking: bool = True) -> dict[str, Any]:
+    command = _checkpoint_command(config, session_id, turn_id)
+    shell = " in PowerShell" if host_files.WINDOWS else ""
+    def guidance(token):
+        return (f"MNEME_CHECKPOINT_CONTINUATION source_session_id={session_id} source_turn_id={turn_id} token={token}\n"
+                f"One memory checkpoint pass only for ORIGINAL source turn {turn_id}. {_memory_choice(config)} "
+                f"After saving, run{shell} `{command} --outcome captured --id ACTUAL_ULID` using read-back note IDs "
+                "or episode edition_ids; otherwise run that command with `--outcome none` and no `--id`. "
+                "On service error use `--outcome deferred` and no `--id`, and say memory was not saved. "
+                "Do not repeat this continuation.")
+    # Do not spend a continuation token on recovery instructions we cannot emit.
+    # In particular, PowerShell quoting must not silently buy a larger context.
+    if len(guidance("0" * 32).encode("utf-8")) > MAX_CONTEXT_BYTES:
+        raise HookError("checkpoint guidance exceeds context limit; use a shorter installation/config path")
     def maybe_continue(data, _now):
         turn = data["turns"].get(turn_id)
         if turn is None or turn.get("checkpoint") is not None or turn.get("continued") is True:
@@ -1140,8 +1181,7 @@ def _stop_checkpoint(config: dict[str, Any], session_id: str, turn_id: str,
     token = _with_state(config["state_dir"], session_id, maybe_continue, blocking=blocking)
     if token is None:
         return {}
-    command = _checkpoint_command(config, session_id, turn_id)
-    return {"decision": "block", "reason": f"MNEME_CHECKPOINT_CONTINUATION source_session_id={session_id} source_turn_id={turn_id} token={token}\nOne memory checkpoint pass only for ORIGINAL source turn {turn_id}. {_memory_choice(config)} After saving, run `{command} --outcome captured --id ACTUAL_ULID` using read-back note IDs or episode edition_ids; otherwise run `{command} --outcome none`. On service error run `{command} --outcome deferred` and say memory was not saved. Do not repeat this continuation."}
+    return {"decision": "block", "reason": guidance(token)}
 
 
 def _handle_async(event: dict[str, Any], config: dict[str, Any],
@@ -1195,11 +1235,12 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
             pass
         recording_guidance = ("Optional off-thread recording is enabled; no actor checkpoint is required."
                               if config.get("recording_mode") == "automatic" else f"At a natural checkpoint: {_memory_choice(config)}")
-        scope_label = ("workshop user store" if config.get("memory_scope") == "workshop" else
+        scope_label = ("named-store selection" if "frozen_selection" in config else
+                       "workshop user store" if config.get("memory_scope") == "workshop" else
                        "shared misc store for unconfigured work" if config.get("memory_scope") == "misc" else "project")
         if config.get("memory_scope") == "workshop":
             recording_guidance += " Retain personal/shared continuity and agent practice only; no private project extraction into global memory."
-        selection_label = "selected" if config.get("memory_scope") == "misc" else "allowlisted"
+        selection_label = "selected" if config.get("memory_scope") in ("misc", "registry") or "frozen_selection" in config else "allowlisted"
         return _context(name, f"Mneme is configured for this {selection_label} {scope_label}; service availability is unverified. Async {scope_label} memory may appear at a later tool boundary; a missed boundary means no automatic delivery, not an empty store. Continue normal work; do not routinely call status or duplicate recall at wake/resume. If a history-dependent decision cannot wait for delivery, or needed delivery failed or missed its boundary, use explicit scoped recall; check service availability if that read fails. {recording_guidance} On compact, resume this selective workflow.")
     turn_id = event.get("turn_id")
     if name == "SessionEnd":
@@ -1258,7 +1299,7 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
                 return {}
             packed = _pack_async_delivery(cards, session_id, turn_id, result.get("db_id"),
                                           prior_budget_omitted=result.get("budget_omitted_count", 0),
-                                          concerns=result.get("concerns"))
+                                          concerns=result.get("concerns"), read_coverage=result.get("read_coverage"))
             # Consumption already packed before marking emitted. Do not accept a
             # second, different accounting decision at the hook boundary.
             if packed["cards"] != cards:
@@ -1300,6 +1341,15 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
 
 
 def handle_event(event: Any, config: dict[str, Any], *, reader_background: bool = False) -> dict[str, Any]:
+    if config.get("schema") == CONFIG_SCHEMA_V12:
+        if (not isinstance(event, dict) or _subagent(event)
+                or not _valid_id(event.get("session_id")) or not _in_scope(event, config["project_root"])):
+            return {}
+        from registry_runtime import admit_session
+        try:
+            admit_session(config, event)
+        except (ValueError, OSError, TypeError, HookError):
+            return _lifecycle_failure(event, background=reader_background)
     if config.get("memory_scope") == "misc":
         if (not isinstance(event, dict) or _subagent(event)
                 or not _valid_id(event.get("session_id"))):
@@ -1417,6 +1467,12 @@ def checkpoint(config: dict[str, Any], session_id: str, turn_id: str, outcome: s
     if (outcome == "captured" and not 1 <= len(ids) <= 8) or (outcome != "captured" and ids):
         raise HookError("checkpoint IDs do not match outcome")
     def mark(data, _now):
+        if "frozen_selection" in config:
+            from registry_runtime import selection
+            selected = selection(config)
+            expected = {"selection": selected.digest, "hook_config": str(config["_config_path"])}
+            if data.get("registry_binding") != expected:
+                raise HookError("registry checkpoint does not match this session")
         if config.get("memory_scope") == "misc":
             from target_policy import misc_policy
             try:
@@ -1460,6 +1516,7 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--turn-id", required=True)
     cp.add_argument("--outcome", required=True, choices=("captured", "none", "deferred"))
     cp.add_argument("--id", action="append", default=[])
+    cp.add_argument("--selection-cwd", type=Path)
     cp.add_argument("--workspace-binding", dest="checkpoint_workspace_binding",
                     help="internal checked misc workspace binding")
     args = parser.parse_args(argv)
@@ -1478,7 +1535,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.reader_background and args.command == "checkpoint":
             raise HookError("reader background is not a checkpoint command")
         if args.command == "checkpoint":
-            config = _config(args.config, workspace_binding=binding) if binding is not None else _config(args.config)
+            config = _config(args.config, workspace_binding=binding, cwd=args.selection_cwd)
             result = checkpoint(config, args.session_id, args.turn_id, args.outcome, args.id)
             print(json.dumps(result))
             return 0
@@ -1486,7 +1543,7 @@ def main(argv: list[str] | None = None) -> int:
         if event is None:
             print(json.dumps({}))
             return 0
-        config = _config(args.config, workspace_binding=binding) if binding is not None else _config(args.config)
+        config = _config(args.config, workspace_binding=binding, cwd=event.get("cwd"))
         print(json.dumps(handle_event(event, config, reader_background=args.reader_background)))
         return 0
     except HookInputError as exc:

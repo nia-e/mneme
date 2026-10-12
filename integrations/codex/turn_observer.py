@@ -113,7 +113,7 @@ def validate_concern_row(value):
 
 def render_delivery_concern(case):
     """Exact foreground span binds the warning to its two displayed card IDs."""
-    return ("Advisory concern (" + " ↔ ".join(case["displayed_endpoint_ids"])
+    return ("Advisory concern (" + ((case["db_id"] + ": ") if "db_id" in case else "") + " ↔ ".join(case["displayed_endpoint_ids"])
             + "): " + case["shown_text"])
 
 
@@ -121,24 +121,34 @@ def validate_delivery_concerns(concerns, displayed, *, rendered_text=None):
     if not isinstance(concerns, list):
         raise ValueError("invalid_delivery_concerns")
     result, seen = [], set()
-    by_id = {c["node_id"]: c for c in displayed}
+    by_owner = {(c["db_id"], c["node_id"]): c for c in displayed}
+    by_id = {}
+    for card in displayed:
+        by_id.setdefault(card["node_id"], []).append(card)
     for case in concerns:
-        if (not isinstance(case, dict) or set(case) != {"shown_text", "displayed_endpoint_ids", "expected_row"}
+        if (not isinstance(case, dict) or set(case) not in ({"shown_text", "displayed_endpoint_ids", "expected_row"},
+                                                        {"shown_text", "displayed_endpoint_ids", "expected_row", "db_id"})
                 or not isinstance(case["shown_text"], str) or not case["shown_text"].strip()
                 or len(case["shown_text"].encode()) > 1024
                 ):
             raise ValueError("invalid_delivery_concerns")
+        owner = case.get("db_id")
+        if "db_id" in case and (not isinstance(owner, str) or not ULID.fullmatch(owner)):
+            raise ValueError("invalid_delivery_concerns")
         ids = case["displayed_endpoint_ids"]
         if (not isinstance(ids, list) or len(ids) != 2 or any(not isinstance(i, str) for i in ids)
-                or ids[0] == ids[1] or any(i not in by_id for i in ids)
-                or by_id[ids[0]]["db_id"] != by_id[ids[1]]["db_id"]):
+                or ids[0] == ids[1]):
+            raise ValueError("invalid_delivery_concerns")
+        endpoints = ([by_owner.get((owner, node)) for node in ids] if owner is not None else
+                     [by_id[node][0] if len(by_id.get(node, [])) == 1 else None for node in ids])
+        if any(endpoint is None for endpoint in endpoints) or endpoints[0]["db_id"] != endpoints[1]["db_id"]:
             raise ValueError("invalid_delivery_concerns")
         if rendered_text is not None and render_delivery_concern(case) not in rendered_text:
             raise ValueError("invalid_delivery_concerns")
         row = validate_concern_row(case["expected_row"]) if case["expected_row"] is not None else None
         if row is not None and sorted(ids) != [e["id"] for e in row["notice"]["binding"]["endpoints"]]:
             raise ValueError("invalid_delivery_concerns")
-        key = (row["notice"]["binding"]["key"]["kind"] if row else case["shown_text"], *sorted(ids))
+        key = (endpoints[0]["db_id"], row["notice"]["binding"]["key"]["kind"] if row else case["shown_text"], *sorted(ids))
         if key in seen:
             raise ValueError("duplicate_delivery_concern")
         seen.add(key)
@@ -170,6 +180,14 @@ def validate_displayed_view(value):
         else:
             from touchstone_contract import validate_touchstone_view
         facets["touchstone"] = validate_touchstone_view(value["touchstone"])
+    named = {"scope", "store_name", "store_purpose", "db_id"}
+    if value.get("scope") == "named":
+        if (not named <= set(value) or not isinstance(value["store_name"], str)
+                or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value["store_name"]) is None
+                or not isinstance(value["store_purpose"], str) or len(value["store_purpose"].encode()) > 2048
+                or not isinstance(value["db_id"], str) or not ULID.fullmatch(value["db_id"])):
+            raise ValueError("invalid_delivery_view")
+        facets.update({key: value[key] for key in named})
     if set(value) != required | set(facets):
         raise ValueError("invalid_delivery_view")
     return decode_json(encoded(value))
@@ -221,6 +239,7 @@ def validate_delivery_packet(value, *, session_id=None, turn_id=None):
                     from touchstone_contract import validate_touchstone_view
                 validate_touchstone_view(view["touchstone"], expected_db_id=card["db_id"])
             if (view["id"] != card["node_id"] or view["kind"] != card["kind"]
+                    or "db_id" in view and view["db_id"] != card["db_id"]
                     or view["summary"] != card["shown_summary"]
                     or card["displayed_view_sha256"] != digest(encoded(view))
                     or card["kind"] == "episode" and any(key in card for key in

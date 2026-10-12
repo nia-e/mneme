@@ -21,6 +21,8 @@ from profile import load_profile
 from misc_binding import _codex_configured
 from service import ServiceConfig, ensure_ready, load_config, _expected_catalog
 from mcp_client import McpClient
+from host_files import open_directory, open_regular
+from host_platform import default_data_dir, executable_name, is_executable
 
 SCHEMA = "mneme.project-init.v1"
 DB_ID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
@@ -43,11 +45,11 @@ def read_json(path, limit=1024 * 1024):
 
 
 def executable(value, name, sibling=None):
-    source = value or (sibling if sibling and sibling.is_file() else shutil.which(name))
+    source = value or (sibling if sibling and sibling.is_file() else shutil.which(executable_name(name)))
     if source is None:
         raise ValueError(f"{name} executable unavailable; install it explicitly or pass --{name if name != 'mneme-mcp' else 'mcp'}-binary PATH (no builds/downloads performed)")
     source = Path(source).resolve(strict=True)
-    if not source.is_file() or not os.access(source, os.X_OK):
+    if not is_executable(source):
         raise ValueError(f"{name} executable is not usable")
     return source
 
@@ -69,16 +71,28 @@ def registry_path(selection, explicit):
         raise ValueError("--library-config conflicts with the project's explicit library selection")
     if explicit or chosen:
         return Path(explicit or chosen).absolute()
-    data = os.environ.get("XDG_DATA_HOME")
-    if not data:
-        home = os.environ.get("HOME")
-        if not home:
-            raise ValueError("cannot locate device-local registry; set HOME/XDG_DATA_HOME or --library-config")
-        data = str(Path(home) / ".local/share")
-    path = Path(data)
-    if not path.is_absolute():
-        raise ValueError("XDG_DATA_HOME must be absolute")
-    return path / "mneme/libraries/personal/library.json"
+    if os.name != "nt" and not (os.environ.get("XDG_DATA_HOME") or os.environ.get("HOME")):
+        raise ValueError("cannot locate device-local registry; set HOME/XDG_DATA_HOME or --library-config")
+    return default_data_dir() / "libraries/personal/library.json"
+
+
+def selected_store_registry(explicit, existing):
+    """Discover global config only for fresh setup; never reroute an existing install."""
+    from store_registry import default_registry_path
+    if existing is not None:
+        configured = existing[2].get("store_registry")
+        if explicit is not None:
+            chosen, _ = install.store_registry_input(explicit)
+            if configured is None or chosen != str(configured):
+                raise ValueError("--store-registry conflicts with existing integration; prepare an explicit replacement")
+        return configured
+    if explicit is not None:
+        return install.store_registry_input(explicit)[0]
+    path = default_registry_path()
+    # A dangling symlink is configured-but-invalid, not an absent default.
+    if path.exists() or path.is_symlink():
+        return install.store_registry_input(path)[0]
+    return None
 
 
 def configured_integration(root):
@@ -127,12 +141,15 @@ def setup(args, result):
     requested = Path(args.root).absolute()
     if requested.is_symlink() or not requested.is_dir():
         raise ValueError("project root must be an existing real directory")
+    os.close(open_directory(requested))
     root = requested.resolve(strict=True)
     result["project_root"] = str(root)
     dot = root / ".mneme"
     for path in (dot, root / ".codex"):
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise ValueError(f"setup requires a real directory or absent path: {path}")
+        if path.exists():
+            os.close(open_directory(path))
     # Preserve exclusions on both lexical and canonical ancestry. Setup is not
     # an escape hatch from an inherited private/isolated project.
     seen = set()
@@ -170,6 +187,8 @@ def setup(args, result):
     db = dot / "codex-memory.db"
     if db.is_symlink() or (db.exists() and (not db.is_file() or db.stat().st_nlink != 1)):
         raise ValueError("project store must be a single-link real file")
+    if db.exists():
+        os.close(open_regular(db))
     mnemed = executable(args.mnemed, "mnemed")
     # This overrides only this short-lived setup's native transport adapter.
     os.environ["MNEME_CLIENT_BINARY"] = str(mnemed)
@@ -196,6 +215,7 @@ def setup(args, result):
             existing = configured_integration(root)
         if existing is None and prefix.exists():
             raise ValueError(f"unclaimed integration prefix {prefix}; preserve it and review pending.json/receipt.json before retrying")
+    store_registry = selected_store_registry(getattr(args, "store_registry", None), existing)
     expected_db_id = None
     previous_owner = read_json(dot / "cli.json", 8192)
     if existing is None:
@@ -203,7 +223,7 @@ def setup(args, result):
             raise ValueError("other existing Mneme/managed project integration; init preserves it instead of installing a second one")
         if previous_owner is not None:
             raise ValueError("project CLI owner already exists without a matching local Codex integration; init will not replace or compete with it")
-        mcp = executable(args.mcp_binary, "mneme-mcp", mnemed.parent / "mneme-mcp")
+        mcp = executable(args.mcp_binary, "mneme-mcp", mnemed.parent / executable_name("mneme-mcp"))
         codex = executable(args.codex_binary, "codex")
         if args.port is None:
             with socket.socket() as listener:
@@ -214,9 +234,10 @@ def setup(args, result):
         # All configuration/precondition validation precedes storage creation.
         plan = install.prepare(root, prefix, mnemed, mcp, port, recall_mode="async",
                                recording_mode="off" if args.no_recording else "automatic",
-                               reader_model=install.READER_MODELS[0], reader_codex=codex)
+                               reader_model=install.READER_MODELS[0], reader_codex=codex,
+                               store_registry=store_registry)
         result["stage"] = "store_admission"
-        dot.mkdir(mode=0o700, exist_ok=True)
+        install.config_directory(dot)
         if db.exists():
             verified = native(mnemed, root, "--db", db, "capture", "inspect")
             expected_db_id = verified.get("db_id")
@@ -256,6 +277,8 @@ def setup(args, result):
     if enrollment is not None and enrollment.get("mode") not in (None, "none"):
         raise ValueError("existing integration has publishing enrollment; review/disable it explicitly before device-local init")
     result.update(service_config=str(service_path), owner_url=config.url)
+    if store_registry is not None:
+        result["store_registry"] = str(store_registry)
     result["stage"] = "owner_start"
     ensure_ready(config, timeout=10)
     db_id = catalog(config)
@@ -281,7 +304,7 @@ def setup(args, result):
     registered = import_library(args.library_helper).register_local_project(
         registry, root, db_id, database=config.database_name,
         owner_endpoint={key: owner[key] for key in ("url", "token_env") if key in owner})
-    if registered and selection["library_config"] is None:
+    if registered and selection["library_config"] is None and store_registry is None:
         install.private_write(dot / "profile.json", install.json_bytes({"schema": "mneme.profile.v1",
             "mode": "default", "library_config": str(registry)}))
     if previous_owner is None:
@@ -308,7 +331,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("root", "mnemed", "library-helper"):
         parser.add_argument("--" + name, required=True, type=Path)
-    for name in ("mcp-binary", "codex-binary", "library-config"):
+    for name in ("mcp-binary", "codex-binary", "library-config", "store-registry"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-recording", action="store_true")
@@ -322,7 +345,7 @@ def main(argv=None):
         result["error"] = str(error)[:2048]
         result["recovery"] = "Preserved data/configuration; resolve the reported conflict, then rerun mnemed init. An installer pending.json is recovered on rerun; do not delete memory data."
     if args.json:
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=True))
     elif result["status"] == "configured":
         print(f"Project memory {result['store']}: {result['project_root']}\nOwner {result['db_id']} ready; {('locally registered' if result['local_registration'] else 'not registered: existing exclusion/withdrawal preserved')} (no publishing performed).\nHippocampus: {result['hippocampus']}; recording: {result['recording']}.\nHook trust: {result['hook_trust']['status']} ({result['hook_trust']['trusted']} trusted enabled hooks). Fresh-session execution is not verified.")
         if result["hook_trust"]["status"] != "trusted":

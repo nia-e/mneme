@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import host_files
 from pathlib import Path
 import sys
 import tempfile
@@ -256,9 +257,8 @@ class ReaderStateTests(unittest.TestCase):
     def test_busy_state_skips_instead_of_waiting(self):
         reader.notice(self.config, self.event(), True)
         _, lock = reader._paths(self.config, "s1")
-        import fcntl
         with lock.open("a+b") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            host_files.lock_file(stream)
             results = []
             thread = threading.Thread(target=lambda: results.append(reader.consume(self.config, self.event())))
             start = time.monotonic()
@@ -268,7 +268,6 @@ class ReaderStateTests(unittest.TestCase):
             self.assertEqual(results[0]["outcome"], "busy")
 
     def test_busy_reset_and_trivial_notice_fence_old_ready(self):
-        import fcntl
         event = self.event()
         reader.notice(self.config, event, True)
         _, lock = reader._paths(self.config, "s1")
@@ -280,7 +279,7 @@ class ReaderStateTests(unittest.TestCase):
             self.set_state(lambda data: data.update(ready={**data["pending"],
                                                         "cards": [CARD_A], "fence": data["fence"]}))
             with lock.open("a+b") as stream:
-                fcntl.flock(stream, fcntl.LOCK_EX)
+                host_files.lock_file(stream)
                 thread = threading.Thread(target=invalidate)
                 thread.start(); thread.join(1)
                 self.assertFalse(thread.is_alive())
@@ -299,42 +298,39 @@ class ReaderStateTests(unittest.TestCase):
         self.assertFalse(self.state()["active"]["closed"])
 
     def test_busy_late_stop_conservatively_drops_newer_ready(self):
-        import fcntl
         reader.notice(self.config, self.event("t1"), True)
         reader.notice(self.config, self.event("t2", "new task"), True)
         self.set_state(lambda data: data.update(ready={**data["pending"],
                                                     "cards": [CARD_A], "fence": data["fence"]}))
         _, lock = reader._paths(self.config, "s1")
         with lock.open("a+b") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            host_files.lock_file(stream)
             thread = threading.Thread(target=lambda: reader.close_turn(self.config, "s1", "t1"))
             thread.start(); thread.join(1)
             self.assertFalse(thread.is_alive())
         self.assertEqual(reader.consume(self.config, {"session_id": "s1", "turn_id": "t2"})["cards"], [])
 
     def test_busy_matching_stop_suppresses_old_ready(self):
-        import fcntl
         event = self.event("t1")
         reader.notice(self.config, event, True)
         self.set_state(lambda data: data.update(ready={**data["pending"],
                                                     "cards": [CARD_A], "fence": data["fence"]}))
         _, lock = reader._paths(self.config, "s1")
         with lock.open("a+b") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            host_files.lock_file(stream)
             thread = threading.Thread(target=lambda: reader.close_turn(self.config, "s1", "t1"))
             thread.start(); thread.join(1)
             self.assertFalse(thread.is_alive())
         self.assertEqual(reader.consume(self.config, event)["cards"], [])
 
     def test_busy_matching_then_busy_stale_stop_cannot_restore_ready(self):
-        import fcntl
         reader.notice(self.config, self.event("t1"), True)
         reader.notice(self.config, self.event("t2", "new task"), True)
         self.set_state(lambda data: data.update(ready={**data["pending"],
                                                     "cards": [CARD_A], "fence": data["fence"]}))
         _, lock = reader._paths(self.config, "s1")
         with lock.open("a+b") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            host_files.lock_file(stream)
             for turn in ("t2", "t1"):
                 thread = threading.Thread(target=lambda value=turn: reader.close_turn(self.config, "s1", value))
                 thread.start(); thread.join(1)
@@ -1343,7 +1339,7 @@ class MiscReaderWorkerTests(unittest.TestCase):
     def test_detached_command_carries_binding_and_child_reload_keeps_origin(self):
         event = {"session_id": "s1", "turn_id": "t1", "prompt": "Investigate this mechanism"}
         self.assertEqual(reader.notice(self.config, event, True)["outcome"], "queued")
-        with patch("reader_worker.subprocess.Popen") as spawn:
+        with patch("reader_worker.host_process.spawn") as spawn:
             spawn.return_value.pid = 12345
             self.assertEqual(reader.background(self.config, event)["outcome"], "launched")
         command = spawn.call_args.args[0]

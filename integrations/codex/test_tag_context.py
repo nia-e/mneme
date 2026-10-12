@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from service import ConnectConfig
 
 sys.path.insert(0, str(Path(__file__).parent))
 import tag_context as tags
@@ -109,7 +110,7 @@ class TagContextTests(unittest.TestCase):
             config["tag_guide_id"] = GUIDE
         with patch("mcp_client.McpClient", Client), patch("target_policy.target_kwargs", return_value={}), \
                 patch("target_policy.policy_for", return_value=(SimpleNamespace(db_alias="project"),
-                      SimpleNamespace(url="http://127.0.0.1:1", token_env=None))):
+                      ConnectConfig("http://127.0.0.1:1024", "project", "/fixture/store.db"))):
             if clock:
                 with patch("tag_context.time.monotonic", side_effect=clock):
                     result = tags.collect(config, expected_db_id=DB, timeout=2, max_bytes=max_bytes,

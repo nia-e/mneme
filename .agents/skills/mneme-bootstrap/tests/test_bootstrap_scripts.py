@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import subprocess
 import sys
 import tempfile
@@ -17,7 +17,7 @@ SCRIPTS = SKILL_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from journal_contract import build_initial_journal  # noqa: E402
-from inventory_repo import publish_json_no_clobber  # noqa: E402
+from inventory_repo import InventoryError, publish_json_no_clobber, resolve_sidecar_path  # noqa: E402
 
 
 BUILD_PLAN = SCRIPTS / "build_plan.py"
@@ -50,6 +50,40 @@ def rehash_plan(plan: dict) -> None:
     payload = dict(plan)
     payload.pop("plan_hash", None)
     plan["plan_hash"] = canonical_sha256(payload)
+
+
+class SidecarPathTests(unittest.TestCase):
+    def test_native_sidecar_is_relative_posix_and_outside_root_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            resolved, relative = resolve_sidecar_path(root, ".mneme/bootstrap/manifest.json", "manifest")
+            self.assertEqual(resolved, root / ".mneme/bootstrap/manifest.json")
+            self.assertEqual(relative, ".mneme/bootstrap/manifest.json")
+            with self.assertRaises(InventoryError):
+                resolve_sidecar_path(root, str(root.parent / "outside.json"), "manifest")
+
+    def test_windows_sidecar_publication_refuses_before_directory_or_file_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "absent" / "inventory.json"
+            with mock.patch("inventory_repo.os.name", "nt"):
+                with self.assertRaisesRegex(InventoryError, "not supported on native Windows"):
+                    publish_json_no_clobber(output, {"complete": True}, "inventory")
+            self.assertFalse(output.parent.exists())
+
+    def test_windows_separators_become_posix_only_after_native_relativization(self):
+        # Model Windows path grammar on every test host; native filesystem
+        # resolution itself remains covered by the portable test above.
+        class ResolvedWindowsPath(PureWindowsPath):
+            def resolve(self, strict=False):
+                return self
+
+        root = ResolvedWindowsPath(r"C:\repo")
+        with mock.patch("inventory_repo.Path", ResolvedWindowsPath):
+            resolved, relative = resolve_sidecar_path(root, r".mneme\bootstrap\manifest.json", "manifest")
+            self.assertEqual(resolved, root / ".mneme/bootstrap/manifest.json")
+            self.assertEqual(relative, ".mneme/bootstrap/manifest.json")
+            with self.assertRaises(InventoryError):
+                resolve_sidecar_path(root, r"C:\outside\manifest.json", "manifest")
 
 
 class GitRepoTestCase(unittest.TestCase):
@@ -517,6 +551,7 @@ class InventoryTests(GitRepoTestCase):
             readme["sha256"], hashlib.sha256(b"original bytes\n").hexdigest()
         )
 
+    @unittest.skipIf(os.name == "nt", "Windows sidecar publication explicitly unsupported")
     def test_local_sidecar_publication_is_idempotent_but_never_clobbers(self) -> None:
         self.initialize_repo()
         output = self.repo / ".mneme" / "bootstrap" / "inventory-a.json"
@@ -543,6 +578,7 @@ class InventoryTests(GitRepoTestCase):
         self.assertEqual(outside.returncode, 2)
         self.assertIn("under .mneme/bootstrap", outside.stderr)
 
+    @unittest.skipIf(os.name == "nt", "Windows sidecar publication explicitly unsupported")
     def test_sidecar_write_and_publish_failures_leave_no_partial_or_temp(self) -> None:
         directory = self.repo / ".mneme" / "bootstrap"
         cases = (

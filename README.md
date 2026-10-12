@@ -19,6 +19,10 @@ cargo install --path crates/mneme-mcp --locked
 The default build uses local embeddings. Building can download ONNX Runtime;
 the first save or semantic search downloads an embedding model unless cached.
 
+The [native Windows port](docs/windows.md) is awaiting Windows runtime
+qualification; its support boundaries and validation workflow are documented
+separately.
+
 ## Set up a project
 
 For **Codex**, install the Codex CLI and Python 3.11+, then run:

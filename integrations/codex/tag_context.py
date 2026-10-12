@@ -17,6 +17,7 @@ import unicodedata
 ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 MAX_GUIDE_BYTES = 2048
+MAX_PURPOSE_BYTES = 2048
 MAX_CONTEXT_BYTES = 16 * 1024
 # Match core's checked canonical tag envelope. Capture SAVE has a separate
 # 32-tag admission ceiling, enforced by its proposal adapter rather than here.
@@ -65,6 +66,7 @@ class TagContext:
     guide_json: str | None
     vocabulary_json: str
     decoded_bytes: int = 0
+    store_purpose: str | None = None
 
     @property
     def guide(self):
@@ -82,6 +84,7 @@ class TagContext:
     def packet(self):
         vocab = self.vocabulary
         return {"guidance": BUILTIN_GUIDANCE,
+                **({"store_purpose": self.store_purpose} if self.store_purpose is not None else {}),
                 "guide": self.guide["text"] if self.guide else None,
                 "vocabulary": {"items": [{"name": item["name"], "count": item["count"]}
                                           for item in vocab["items"]],
@@ -98,6 +101,7 @@ class TagContext:
         return {"db_id": self.db_id, "guide": identity,
                 "guide_summary_sha256": guide["text_sha256"] if guide else None,
                 "guide_revision_sha256": digest({"builtin": BUILTIN_GUIDANCE,
+                    **({"store_purpose": self.store_purpose} if self.store_purpose is not None else {}),
                     "guide": {"id": guide["id"], "text_sha256": guide["text_sha256"]} if guide else None}),
                 "vocabulary_sha256": digest(self.vocabulary),
                 "vocabulary_partial": self.vocabulary.get("partial", True), "outcome": self.outcome}
@@ -114,6 +118,9 @@ def _validate_context(context, expected_db_id=None):
             or expected_db_id is not None and context.db_id != expected_db_id
             or type(context.decoded_bytes) is not int or context.decoded_bytes < 0
             or not isinstance(context.vocabulary_json, str)
+            or context.store_purpose is not None and (not isinstance(context.store_purpose, str)
+                or len(context.store_purpose.encode()) > MAX_PURPOSE_BYTES
+                or any(unicodedata.category(c) == "Cc" and c not in "\n\r\t" for c in context.store_purpose))
             or len(context.vocabulary_json.encode()) > MAX_CONTEXT_BYTES
             or context.guide_json is not None and (not isinstance(context.guide_json, str)
                                                   or len(context.guide_json.encode()) > MAX_CONTEXT_BYTES)):
@@ -198,23 +205,33 @@ def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue
             or type(max_bytes) is not int or max_bytes <= 0):
         return disabled(expected_db_id, "invalid_tag_context")
     max_bytes = min(max_bytes, MAX_CONTEXT_BYTES)
-    from mcp_client import McpClient
+    from service import client_for_service
     from target_policy import policy_for, target_kwargs
     deadline = time.monotonic() + timeout
     consumed = 0
     client = None
     try:
+        purpose = None
+        if config.get("memory_scope") == "registry":
+            from registry_runtime import selection
+            store = selection(config).named(config["selected_store"])
+            if (str(config["service_config"]) != store.service_config
+                    or config.get("tag_guide_id") != store.maintenance.tag_guide_id):
+                raise ValueError("selected tag context owner changed")
+            purpose = store.purpose
         target = target_kwargs(config)
         policy, service = policy_for(config["service_config"], config["project_root"], **target)
         alias = policy.db_alias
         token = os.environ.get(service.token_env) if service.token_env else None
         if service.token_env and not token:
             raise ValueError("native_unavailable")
-        client = McpClient(service.url, token=token, timeout=min(30, timeout))
+        client = client_for_service(service, token=token, timeout=min(30, timeout))
         client.connect()
 
         def call(name, args):
             nonlocal consumed
+            if purpose is not None:
+                policy.validate_workspace()
             left = deadline - time.monotonic()
             if left <= 0:
                 raise ValueError("tag_context_deadline")
@@ -302,7 +319,8 @@ def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue
         if not queries:
             raise ValueError("tag_context_unavailable")
         context = TagContext(True, "ok", expected_db_id,
-                             encoded(guide).decode() if guide else None, encoded(vocab).decode(), consumed)
+                             encoded(guide).decode() if guide else None, encoded(vocab).decode(), consumed,
+                             purpose)
         return validate_context(context, expected_db_id)
     except Exception:
         return disabled(expected_db_id, "tag_context_unavailable", consumed)

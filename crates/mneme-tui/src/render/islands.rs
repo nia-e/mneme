@@ -1,8 +1,8 @@
 //! Cell-aligned, non-semantic hints for groups computed from loaded links.
 
 use super::map::{PlacedStar, cell_center};
-use super::{s, short, text_line};
-use crate::clusters::{DisplayGroupId, DisplayGroups};
+use super::{s, text_line};
+use crate::clusters::{DisplayGroupId, DisplayGroups, label_text};
 use crate::model::Graph;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -99,7 +99,7 @@ pub(super) fn place(
             .min(height);
         let bounds = Rect::new(left, top, right - left, bottom - top);
         let label = group.label.as_ref().and_then(|label| {
-            let title = format!("#{}  {}", short(label, 22), group.members.len());
+            let title = format!("#{}  {}", label_text(label), group.members.len());
             let label_width = Line::raw(&title).width().min(usize::from(width)) as u16;
             let x = ((u32::from(left) + u32::from(right)).saturating_sub(u32::from(label_width))
                 / 2)
@@ -242,6 +242,68 @@ mod tests {
         let reversed = place(&groups, &[placements[1], placements[0]], &graph, 60, 20);
         assert_eq!(islands[0].label, reversed[0].label);
         assert_eq!(islands[0].bounds, reversed[0].bounds);
+    }
+
+    #[test]
+    fn actual_label_raster_uses_distinct_names_after_prefix_collision() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let graph = Graph {
+            nodes: (0..12)
+                .map(|i| Node {
+                    id: format!("node-{i:02}"),
+                    tags_complete: true,
+                    tags: match i {
+                        0 | 1 => vec!["a-long-identical-tag-prefix-one".into()],
+                        2 | 3 => vec![
+                            "a-long-identical-tag-prefix-two".into(),
+                            "zz-alternative".into(),
+                        ],
+                        _ => vec![],
+                    },
+                    ..Node::default()
+                })
+                .collect(),
+            ..Graph::default()
+        };
+        let groups = DisplayGroups {
+            groups: (0..2)
+                .map(|i| DisplayGroup {
+                    id: DisplayGroupId(i as u64),
+                    members: graph.nodes[i * 2..i * 2 + 2]
+                        .iter()
+                        .map(|node| node.id.clone())
+                        .collect(),
+                    label: None,
+                })
+                .collect(),
+            lookup: Default::default(),
+        }
+        .with_labels(&graph);
+        let placements = [
+            placement(0, 10, 8),
+            placement(1, 17, 9),
+            placement(2, 42, 8),
+            placement(3, 49, 9),
+        ];
+        let islands = place(&groups, &placements, &graph, 60, 20);
+        let titles: Vec<_> = islands
+            .iter()
+            .filter_map(|island| island.label.as_ref().map(|(_, title)| title))
+            .collect();
+        assert_eq!(titles.len(), 2);
+        assert_ne!(titles[0], titles[1]);
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| labels(frame, Rect::new(0, 0, 60, 20), &islands))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let raster: String = (0..20)
+            .flat_map(|y| (0..60).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+        for title in titles {
+            assert_eq!(raster.matches(title.as_str()).count(), 1, "{raster}");
+        }
+        assert!(raster.contains("#zz-alternative  2"));
     }
 
     #[test]

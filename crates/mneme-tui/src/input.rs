@@ -18,6 +18,11 @@ pub(crate) fn map_key(app: &mut App, key: KeyEvent) -> bool {
             app.toggle_archived();
             return true;
         }
+        KeyCode::Char('R') => {
+            app.layout.borrow_mut().recompose();
+            app.event("Map recomposed from loaded links · no source read");
+            return true;
+        }
         KeyCode::Char(',') => {
             app.cycle_nodes(false);
             return true;
@@ -596,6 +601,37 @@ mod tests {
                 y: center.y - 2.0 * f64::from(start.1),
             })
         );
+    }
+
+    #[test]
+    fn explicit_recompose_key_preserves_loaded_data_and_selection() {
+        let mut app = app(8);
+        app.select_node(3);
+        draw(&app, 120, 36);
+        assert!(app.layout.borrow().has_world());
+        let ids: Vec<_> = app.graph.nodes.iter().map(|node| node.id.clone()).collect();
+        assert!(map_key(
+            &mut app,
+            key(KeyCode::Char('R'), KeyModifiers::SHIFT)
+        ));
+        assert!(!app.layout.borrow().has_world());
+        assert_eq!(app.selected, 3);
+        assert_eq!(
+            app.graph
+                .nodes
+                .iter()
+                .map(|node| &node.id)
+                .collect::<Vec<_>>(),
+            ids.iter().collect::<Vec<_>>()
+        );
+        draw(&app, 120, 36);
+        assert!(app.layout.borrow().has_world());
+        app.show_help = true;
+        assert!(!map_key(
+            &mut app,
+            key(KeyCode::Char('R'), KeyModifiers::SHIFT)
+        ));
+        assert!(app.layout.borrow().has_world());
     }
 
     #[test]

@@ -39,11 +39,23 @@ fn personal_config() -> Result<PathBuf, AnyErr> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".local/share"))
+            #[cfg(windows)]
+            {
+                std::env::var_os("LOCALAPPDATA")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::var_os("USERPROFILE")
+                        .filter(|value| !value.is_empty())
+                        .map(|home| PathBuf::from(home).join("AppData").join("Local")))
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|home| PathBuf::from(home).join(".local/share"))
+            }
         })
-        .ok_or("library needs --config PATH when neither XDG_DATA_HOME nor HOME is set")?;
+        .ok_or("library needs --config PATH when XDG_DATA_HOME, LOCALAPPDATA/USERPROFILE (Windows), and HOME (Unix) are unavailable")?;
     if !data.is_absolute() {
         return Err("library default data directory must be absolute; use --config PATH".into());
     }

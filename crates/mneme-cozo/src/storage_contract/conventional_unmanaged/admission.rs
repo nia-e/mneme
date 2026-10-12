@@ -79,35 +79,69 @@ const MANAGED_CATALOG_FENCE_ASSERTION_POLICY_FINGERPRINT_V1: [u8; 32] = [
     188, 112, 86, 144, 47, 34, 215, 65, 89, 20, 208, 245, 196, 214, 22, 253, 119, 190, 177, 57, 88,
     55, 153, 148, 108, 88, 168, 152, 146, 189, 250, 50,
 ];
+// These source and closed-fence pins bind the platform's actual identity
+// evidence. Windows uses NTFS file IDs/revisions, never invented Unix fields.
+// Keep the Unix literals immutable; downstream classifier identities are
+// independently derived by the platform-neutral KATs below.
+#[cfg(not(windows))]
 const MANAGED_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     196, 62, 40, 190, 206, 23, 138, 178, 241, 29, 93, 139, 70, 3, 194, 169, 218, 247, 88, 214, 192,
     121, 7, 229, 80, 220, 204, 131, 121, 109, 100, 154,
 ];
+#[cfg(windows)]
+const MANAGED_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    123, 79, 192, 20, 79, 29, 71, 134, 134, 52, 212, 14, 165, 8, 40, 171, 192, 106, 249, 95, 20,
+    124, 80, 150, 241, 19, 215, 81, 233, 169, 223, 51,
+];
+#[cfg(not(windows))]
 const MANAGED_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     162, 40, 41, 176, 139, 255, 193, 176, 196, 193, 88, 125, 168, 149, 230, 47, 104, 81, 247, 121,
     184, 236, 178, 28, 34, 240, 12, 124, 90, 177, 87, 235,
+];
+#[cfg(windows)]
+const MANAGED_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    47, 34, 198, 167, 252, 85, 183, 55, 186, 202, 23, 158, 10, 85, 46, 69, 102, 151, 124, 97, 128,
+    35, 65, 180, 184, 211, 69, 16, 174, 35, 245, 86,
 ];
 #[cfg(test)]
 const OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_DOMAIN_V1: &[u8] =
     b"mneme.cozo.conventional-unmanaged-open-admission.policy-fingerprint.v1\0";
 // Repinned only through the independent policy KAT below.
+#[cfg(not(windows))]
 const OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     105, 226, 251, 159, 136, 238, 47, 128, 152, 22, 182, 243, 149, 76, 253, 33, 162, 151, 34, 121,
     1, 101, 56, 224, 229, 240, 238, 160, 165, 127, 81, 204,
 ];
+#[cfg(windows)]
+const OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    176, 132, 215, 203, 137, 225, 62, 89, 58, 250, 105, 76, 141, 27, 243, 77, 119, 131, 150, 126,
+    93, 23, 70, 216, 49, 214, 244, 1, 22, 66, 74, 254,
+];
 /// SHA-256 of the capture policy domain, the original closed-open policy
 /// fingerprint, and the exact capture generation literal (tested below).
+#[cfg(not(windows))]
 const CAPTURE_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     49, 96, 138, 97, 69, 1, 164, 134, 148, 153, 194, 232, 189, 239, 24, 38, 229, 139, 162, 90, 73,
     99, 187, 87, 118, 40, 147, 179, 110, 228, 129, 119,
+];
+#[cfg(windows)]
+const CAPTURE_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    117, 108, 202, 85, 30, 173, 120, 69, 26, 61, 72, 149, 254, 254, 36, 236, 217, 140, 147, 111,
+    133, 72, 167, 117, 127, 44, 115, 113, 61, 162, 47, 97,
 ];
 #[cfg(test)]
 const SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_DOMAIN_V1: &[u8] =
     b"mneme.cozo.conventional-unmanaged-source-bound.policy-fingerprint.v1\0";
 // Repinned only through the independent policy KAT below.
+#[cfg(not(windows))]
 const SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     120, 200, 243, 94, 119, 205, 212, 68, 144, 146, 61, 200, 27, 177, 219, 195, 118, 203, 211, 251,
     184, 129, 221, 96, 65, 255, 66, 208, 7, 236, 92, 90,
+];
+#[cfg(windows)]
+const SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    134, 126, 222, 133, 120, 30, 172, 168, 20, 91, 15, 121, 205, 245, 255, 220, 149, 106, 120, 89,
+    175, 34, 59, 252, 98, 155, 228, 230, 80, 237, 76, 219,
 ];
 
 const MANAGED_EPISODE_CATALOG_POLICY_FINGERPRINT_V1: [u8; 32] = [
@@ -118,22 +152,46 @@ const MANAGED_EPISODE_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     185, 223, 9, 190, 143, 225, 216, 254, 36, 221, 13, 64, 252, 149, 145, 133, 200, 133, 183, 203,
     76, 51, 107, 76, 157, 47, 183, 145, 17, 254, 33, 233,
 ];
+#[cfg(not(windows))]
 const MANAGED_EPISODE_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     229, 208, 243, 171, 239, 125, 35, 224, 71, 248, 242, 22, 240, 199, 105, 39, 58, 131, 33, 142,
     223, 148, 183, 95, 211, 223, 80, 63, 167, 209, 216, 86,
 ];
+#[cfg(windows)]
+const MANAGED_EPISODE_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    60, 147, 55, 15, 42, 156, 69, 49, 25, 221, 227, 92, 240, 153, 243, 248, 69, 118, 127, 146, 201,
+    174, 51, 245, 210, 36, 39, 71, 136, 172, 64, 214,
+];
+#[cfg(not(windows))]
 const MANAGED_EPISODE_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     151, 212, 248, 90, 157, 124, 92, 192, 22, 33, 67, 107, 133, 123, 176, 31, 199, 39, 86, 65, 138,
     105, 69, 254, 201, 121, 224, 226, 189, 174, 229, 209,
 ];
+#[cfg(windows)]
+const MANAGED_EPISODE_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    241, 32, 90, 231, 217, 205, 37, 161, 169, 44, 182, 73, 53, 132, 31, 226, 236, 116, 3, 100, 9,
+    218, 172, 38, 196, 89, 186, 101, 130, 85, 66, 160,
+];
+#[cfg(not(windows))]
 const EPISODE_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     246, 126, 27, 224, 218, 66, 115, 231, 42, 26, 104, 162, 246, 150, 158, 184, 68, 79, 169, 138,
     238, 0, 95, 212, 200, 127, 7, 54, 24, 143, 1, 30,
 ];
+#[cfg(windows)]
+const EPISODE_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    133, 27, 96, 116, 71, 94, 226, 103, 71, 76, 139, 43, 143, 236, 3, 231, 138, 31, 135, 83, 215,
+    46, 245, 118, 211, 237, 186, 242, 19, 43, 120, 207,
+];
 
+#[cfg(not(windows))]
 const EPISODE_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     190, 95, 58, 74, 79, 44, 245, 255, 56, 72, 193, 62, 20, 0, 228, 227, 67, 197, 137, 213, 69,
     247, 69, 84, 251, 94, 53, 249, 160, 20, 248, 79,
+];
+#[cfg(windows)]
+const EPISODE_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    245, 188, 151, 44, 83, 72, 80, 126, 125, 131, 94, 204, 155, 171, 118, 66, 200, 181, 206, 198,
+    73, 254, 43, 194, 110, 244, 186, 78, 22, 46, 116, 199,
 ];
 
 const MANAGED_SINGLE_GRAPH_CATALOG_POLICY_FINGERPRINT_V1: [u8; 32] = [
@@ -144,21 +202,45 @@ const MANAGED_SINGLE_GRAPH_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     13, 92, 233, 204, 58, 46, 48, 103, 24, 12, 92, 91, 234, 105, 138, 37, 127, 184, 150, 232, 89,
     188, 166, 236, 38, 167, 224, 203, 82, 83, 133, 51,
 ];
+#[cfg(not(windows))]
 const MANAGED_SINGLE_GRAPH_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     66, 226, 254, 49, 184, 240, 210, 118, 223, 68, 48, 5, 27, 62, 206, 139, 153, 187, 136, 14, 183,
     216, 50, 212, 189, 255, 24, 12, 220, 7, 78, 116,
 ];
+#[cfg(windows)]
+const MANAGED_SINGLE_GRAPH_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    59, 191, 13, 18, 59, 44, 204, 147, 229, 111, 113, 127, 135, 28, 215, 62, 43, 132, 54, 151, 216,
+    192, 138, 135, 187, 91, 14, 51, 23, 51, 220, 188,
+];
+#[cfg(not(windows))]
 const MANAGED_SINGLE_GRAPH_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     51, 137, 166, 205, 77, 224, 53, 168, 115, 236, 152, 172, 225, 230, 254, 65, 212, 109, 179, 156,
     4, 123, 162, 84, 94, 232, 112, 28, 151, 170, 54, 180,
 ];
+#[cfg(windows)]
+const MANAGED_SINGLE_GRAPH_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    20, 40, 106, 135, 126, 37, 114, 80, 194, 164, 25, 196, 98, 0, 225, 41, 248, 1, 26, 249, 185,
+    22, 15, 124, 99, 140, 73, 216, 34, 134, 194, 167,
+];
+#[cfg(not(windows))]
 const SINGLE_GRAPH_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     66, 202, 22, 209, 205, 29, 55, 188, 143, 132, 93, 236, 87, 128, 118, 86, 47, 53, 57, 147, 173,
     107, 101, 154, 1, 254, 88, 211, 93, 11, 101, 108,
 ];
+#[cfg(windows)]
+const SINGLE_GRAPH_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    149, 191, 88, 201, 10, 247, 41, 54, 69, 53, 84, 245, 140, 42, 157, 26, 72, 84, 92, 87, 167, 90,
+    252, 66, 43, 108, 60, 43, 236, 137, 6, 129,
+];
+#[cfg(not(windows))]
 const SINGLE_GRAPH_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     233, 211, 171, 127, 244, 111, 35, 171, 77, 90, 102, 112, 203, 81, 227, 208, 22, 154, 131, 242,
     228, 27, 59, 166, 86, 101, 167, 15, 120, 171, 154, 195,
+];
+#[cfg(windows)]
+const SINGLE_GRAPH_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    79, 183, 88, 19, 36, 229, 183, 140, 254, 236, 144, 85, 175, 250, 144, 41, 70, 201, 49, 83, 139,
+    206, 174, 191, 55, 254, 188, 239, 72, 216, 225, 76,
 ];
 
 const MANAGED_CONCERN_CATALOG_POLICY_FINGERPRINT_V1: [u8; 32] = [
@@ -169,31 +251,67 @@ const MANAGED_CONCERN_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     195, 109, 242, 83, 9, 8, 92, 151, 201, 154, 106, 55, 6, 35, 29, 189, 97, 30, 29, 196, 125, 7,
     38, 207, 121, 167, 12, 24, 182, 96, 182, 92,
 ];
+#[cfg(not(windows))]
 const MANAGED_CONCERN_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     37, 171, 178, 229, 11, 201, 75, 183, 35, 165, 111, 225, 51, 45, 102, 30, 156, 71, 71, 154, 175,
     216, 16, 112, 92, 175, 61, 241, 244, 200, 90, 218,
 ];
+#[cfg(windows)]
+const MANAGED_CONCERN_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    112, 252, 189, 184, 127, 245, 197, 49, 146, 32, 81, 44, 110, 26, 86, 209, 246, 190, 41, 21,
+    182, 32, 49, 162, 229, 209, 41, 9, 26, 82, 137, 163,
+];
+#[cfg(not(windows))]
 const MANAGED_CONCERN_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     246, 7, 157, 232, 94, 146, 19, 97, 238, 155, 152, 253, 56, 193, 218, 65, 83, 111, 213, 159,
     245, 40, 69, 143, 202, 75, 38, 65, 228, 30, 196, 100,
 ];
+#[cfg(windows)]
+const MANAGED_CONCERN_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    85, 84, 204, 249, 47, 62, 60, 27, 47, 142, 121, 11, 31, 105, 49, 13, 55, 164, 70, 223, 13, 240,
+    60, 249, 231, 227, 16, 0, 135, 26, 85, 37,
+];
+#[cfg(not(windows))]
 const CONCERN_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     250, 12, 55, 21, 17, 227, 252, 40, 130, 165, 45, 25, 192, 58, 242, 51, 222, 10, 51, 188, 1,
     251, 224, 254, 32, 143, 70, 90, 145, 169, 150, 193,
 ];
+#[cfg(windows)]
+const CONCERN_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    152, 156, 84, 220, 112, 14, 196, 205, 250, 46, 227, 35, 181, 225, 81, 194, 149, 173, 103, 220,
+    58, 242, 160, 78, 19, 54, 229, 150, 228, 102, 186, 184,
+];
+#[cfg(not(windows))]
 const CONCERN_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     81, 56, 184, 19, 92, 220, 50, 210, 123, 15, 211, 35, 197, 140, 120, 112, 161, 207, 182, 56, 67,
     3, 66, 87, 173, 148, 55, 206, 50, 111, 70, 110,
 ];
+#[cfg(windows)]
+const CONCERN_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    95, 224, 211, 214, 33, 136, 49, 216, 203, 209, 98, 13, 24, 64, 133, 51, 229, 136, 164, 250,
+    197, 201, 52, 252, 90, 29, 171, 154, 88, 129, 226, 45,
+];
 
+#[cfg(not(windows))]
 const EPISODE_CONTEXT_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V2: [u8; 32] = [
     83, 19, 179, 148, 172, 5, 197, 13, 9, 73, 108, 82, 136, 10, 39, 73, 81, 134, 22, 161, 243, 188,
     46, 124, 223, 64, 72, 65, 95, 62, 28, 83,
 ];
+#[cfg(windows)]
+const EPISODE_CONTEXT_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V2: [u8; 32] = [
+    69, 224, 164, 30, 14, 118, 74, 141, 98, 15, 201, 253, 132, 138, 130, 82, 167, 196, 15, 72, 225,
+    67, 232, 53, 48, 122, 174, 160, 149, 103, 134, 94,
+];
 
+#[cfg(not(windows))]
 const EPISODE_CONTEXT_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V2: [u8; 32] = [
     137, 188, 24, 33, 63, 185, 167, 227, 35, 81, 33, 31, 146, 30, 188, 200, 90, 55, 46, 103, 50,
     210, 91, 182, 178, 239, 94, 46, 125, 231, 53, 149,
+];
+#[cfg(windows)]
+const EPISODE_CONTEXT_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V2: [u8; 32] = [
+    47, 173, 63, 24, 45, 97, 25, 109, 182, 80, 180, 167, 45, 237, 89, 133, 113, 154, 215, 210, 219,
+    74, 128, 181, 236, 102, 63, 132, 10, 59, 176, 224,
 ];
 
 const MANAGED_TOUCHSTONES_CATALOG_POLICY_FINGERPRINT_V1: [u8; 32] = [
@@ -204,22 +322,46 @@ const MANAGED_TOUCHSTONES_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     80, 93, 29, 230, 128, 115, 116, 48, 51, 96, 63, 139, 97, 99, 176, 74, 144, 181, 39, 13, 107,
     175, 95, 125, 141, 85, 172, 219, 156, 69, 1, 90,
 ];
+#[cfg(not(windows))]
 const MANAGED_TOUCHSTONES_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     19, 76, 30, 182, 127, 106, 108, 19, 164, 202, 74, 228, 175, 91, 40, 94, 239, 85, 129, 143, 143,
     193, 189, 173, 34, 132, 243, 66, 197, 236, 157, 6,
 ];
+#[cfg(windows)]
+const MANAGED_TOUCHSTONES_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    208, 120, 206, 45, 29, 204, 61, 43, 57, 160, 116, 34, 247, 181, 217, 58, 166, 86, 212, 226,
+    214, 101, 83, 125, 188, 145, 198, 45, 172, 37, 188, 222,
+];
+#[cfg(not(windows))]
 const MANAGED_TOUCHSTONES_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     133, 104, 39, 217, 108, 57, 8, 236, 176, 214, 161, 47, 92, 38, 52, 170, 13, 192, 34, 69, 166,
     174, 28, 91, 147, 29, 160, 26, 72, 251, 79, 109,
 ];
+#[cfg(windows)]
+const MANAGED_TOUCHSTONES_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    89, 207, 38, 149, 5, 138, 93, 189, 65, 189, 243, 207, 231, 115, 40, 123, 215, 169, 173, 235,
+    88, 52, 49, 60, 135, 140, 241, 199, 210, 35, 7, 245,
+];
 
+#[cfg(not(windows))]
 const TOUCHSTONES_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     235, 237, 104, 178, 104, 219, 85, 9, 198, 125, 250, 224, 44, 240, 156, 159, 151, 75, 210, 135,
     52, 69, 122, 100, 103, 238, 119, 182, 0, 207, 129, 127,
 ];
+#[cfg(windows)]
+const TOUCHSTONES_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    105, 209, 25, 126, 91, 210, 172, 245, 108, 59, 211, 213, 46, 197, 159, 28, 209, 86, 67, 23,
+    171, 194, 73, 35, 238, 39, 221, 23, 154, 92, 24, 238,
+];
+#[cfg(not(windows))]
 const TOUCHSTONES_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
     239, 43, 90, 9, 200, 136, 36, 108, 89, 232, 232, 206, 194, 39, 114, 117, 191, 88, 116, 8, 71,
     167, 130, 26, 112, 188, 181, 76, 203, 56, 209, 204,
+];
+#[cfg(windows)]
+const TOUCHSTONES_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1: [u8; 32] = [
+    11, 6, 57, 172, 45, 228, 161, 250, 149, 206, 236, 67, 103, 122, 242, 35, 54, 118, 113, 142,
+    111, 120, 128, 21, 68, 166, 130, 41, 218, 93, 245, 245,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2176,7 +2318,13 @@ mod tests {
             let temp_root = std::fs::canonicalize(std::env::temp_dir())
                 .expect("canonical temporary-directory path");
             let root = temp_root.join(format!("{label}-{}", Ulid::new()));
+            #[cfg(not(windows))]
             std::fs::create_dir(&root).expect("create isolated catalog fixture directory");
+            #[cfg(windows)]
+            mneme_store_path::windows::Directory::create(&root)
+                .expect("create protected catalog fixture directory")
+                .require_private_children()
+                .expect("catalog fixture SQLite sidecars must inherit private ACLs");
             let path = root.join("memory.db");
             (root, path)
         }

@@ -1,5 +1,5 @@
 //! Ship exactly the installer-owned runtime plus its setup entry point/helper.
-use std::{env, fs, path::PathBuf};
+use std::{collections::BTreeSet, env, fs, path::PathBuf};
 fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let installer = root.join("integrations/codex/install.py");
@@ -20,13 +20,25 @@ fn main() {
         "codex/hook_trust.py".to_owned(),
         "library/library.py".to_owned(),
     ];
+    let mut seen_programs = BTreeSet::new();
     for item in programs.split(',').filter(|item| !item.trim().is_empty()) {
         let name = item
             .trim()
             .strip_prefix('"')
             .and_then(|name| name.strip_suffix('"'))
             .expect("installer PROGRAMS must contain only double-quoted filenames");
-        assert!(name.ends_with(".py") && !name.contains('/') && !name.contains('\\'));
+        let stem = name.strip_suffix(".py").expect("Python runtime filename");
+        assert!(
+            !stem.is_empty()
+                && stem
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+            "installer PROGRAMS must contain plain Python module filenames"
+        );
+        assert!(
+            seen_programs.insert(name),
+            "duplicate installer PROGRAMS entry: {name}"
+        );
         files.push(format!("codex/{name}"));
     }
     files.sort();
@@ -34,6 +46,11 @@ fn main() {
     let mut generated = String::from("const BUNDLE: &[(&str, &[u8])] = &[\n");
     for name in files {
         let path = root.join("integrations").join(&name);
+        assert!(
+            path.is_file(),
+            "missing init bundle file: {}",
+            path.display()
+        );
         println!("cargo:rerun-if-changed={}", path.display());
         generated.push_str(&format!(
             "({name:?}, include_bytes!({:?})),\n",

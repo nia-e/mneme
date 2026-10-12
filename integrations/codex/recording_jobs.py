@@ -9,7 +9,6 @@ replayed after uncertainty. Public observations live only in the worker's RAM.
 from __future__ import annotations
 
 from dataclasses import asdict
-import fcntl
 import hashlib
 import itertools
 import json
@@ -21,10 +20,11 @@ import secrets
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 from rollout_primitives import decode_json, digest, encoded, read_regular
+import host_files
+import host_process
 from turn_observer import (Limits, RecordAnchor, TurnAdmission, admit_source_turn,
                            observation_byte_ceiling, observe_source_turn,
                            validate_delivery_packet)
@@ -60,6 +60,12 @@ ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 def enabled(config):
     if config.get("recording_mode") != "automatic":
         return False
+    if "frozen_selection" in config:
+        from registry_recording import selection
+        try:
+            return bool(selection(config).recordable)
+        except (ValueError, OSError, TypeError, KeyError):
+            return False
     if config.get("memory_scope", "project") == "project":
         return True
     from target_policy import workshop_policy, misc_policy
@@ -103,20 +109,7 @@ def _signal_cancel(config, session, turn):
     # No admitted work exists without its ledger; avoid lifetime orphan markers.
     if not _path(config, session).exists():
         return
-    fd, temporary = tempfile.mkstemp(prefix=".cancel-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(encoded({"token": secrets.token_hex(32), "turn_id": turn}))
-            stream.flush(); os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    host_files.atomic_write(path, encoded({"token": secrets.token_hex(32), "turn_id": turn}))
 
 
 def _cancelled(config, session, job):
@@ -135,11 +128,16 @@ def load_project_focus(config):
     directory = fd = None
     try:
         try:
-            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            directory = host_files.open_directory(path.parent)
         except FileNotFoundError:
             return None
         try:
-            fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+            if host_files.WINDOWS:
+                # Windows pins every ancestor and rejects reparse points while
+                # opening; Unix retains the exact directory-relative identity.
+                fd = host_files.open_regular(path)
+            else:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
         except FileNotFoundError:
             return None
         info = os.fstat(fd)
@@ -163,6 +161,9 @@ def load_project_focus(config):
 
 
 def _config_digest(config):
+    if "frozen_selection" in config:
+        from registry_recording import config_digest
+        return config_digest(config)
     raw = read_regular(Path(config["service_config"]), 8192)
     if len(raw) > 8192:
         raise ValueError("service_config_cap")
@@ -234,6 +235,8 @@ def _unchanged(config, job):
     try:
         if _config_digest(config) != job["config_sha256"]:
             return False
+        if "frozen_selection" in config:
+            return encoded(job.get("frozen_selection")) == encoded(config["frozen_selection"])
         if config.get("memory_scope") == "misc":
             from target_policy import misc_policy
             policy = misc_policy(config)
@@ -299,19 +302,7 @@ def _write(path, data):
         raw = encoded(data)
     if len(raw) > MAX_STATE or any(len(encoded(j)) > MAX_JOB_BYTES for j in data["jobs"]):
         raise ValueError("recording_state_cap")
-    fd, temporary = tempfile.mkstemp(prefix=".recording-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    host_files.atomic_write(path, raw)
 
 
 def _new(session, fresh=False):
@@ -340,14 +331,21 @@ def _bind_workspace(config, data):
 
 def _transaction(config, session, mutate, *, create=False, fresh=False):
     """Single nonblocking directory lock also serializes bounded ledger retirement."""
-    if not enabled(config) or not isinstance(session, str) or not ID.fullmatch(session):
+    # Revoking a registry destination stops admission/writes, not accounting for
+    # work already paid for. Otherwise a config edit after inference strands a
+    # known result as an apparent interrupted intent and loses its cancellation.
+    retained_registry = "frozen_selection" in config and not create
+    if ((not retained_registry and not enabled(config))
+            or not isinstance(session, str) or not ID.fullmatch(session)):
         return False, None
     fd = None
     try:
         directory = _directory(config)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(directory / ".lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if retained_registry and not _path(config, session).exists():
+            return True, None
+        host_files.ensure_state_directory(directory)
+        fd = host_files.open_regular(directory / ".lock", os.O_CREAT | os.O_RDWR)
+        host_files.lock_file(fd, blocking=False)
         path = _path(config, session)
         if path.exists():
             data = _load(path, session)
@@ -407,6 +405,10 @@ def _count(data, name):
 def _boot_id():
     """Local OS boot witness; missing witness means no renewable deadline."""
     try:
+        if host_files.WINDOWS:
+            # An exact same-boot witness, never wall-clock-minus-uptime. Missing
+            # CIM access leaves closed jobs nonrenewable rather than replayable.
+            return host_process.boot_identity()
         if sys.platform == "linux":
             raw = read_regular(Path("/proc/sys/kernel/random/boot_id"), 128)
         elif sys.platform == "darwin":
@@ -646,8 +648,12 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         summary["closure_ref"] = job["closure_ref"]
     if "destination" in job:
         summary["destination"] = job["destination"]
-        summary["target"] = job.get("store_target", {
-            "scope": job["destination"], "db_alias": job.get("db_alias", "project"), "db_id": job["db_id"]})
+        if "frozen_selection" in job:
+            from registry_recording import receipt_target
+            summary["target"] = receipt_target(job)
+        else:
+            summary["target"] = job.get("store_target", {
+                "scope": job["destination"], "db_alias": job.get("db_alias", "project"), "db_id": job["db_id"]})
     if "payload" in job:
         summary["proposal"] = {"kind": job["proposal_kind"], "summary": job["payload"]["summary"],
                                "body": job.get("note_body", job["payload"]["body"])}
@@ -655,12 +661,16 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         if "tag_context" in job:
             summary["proposal"]["tags"] = job["payload"].get("tags", [])
             summary["tag_context"] = job["tag_context"]
+        elif "frozen_selection" in job:
+            summary["proposal"]["tags"] = job["payload"].get("tags", [])
     if "save_outcome" in job:
         summary["save_outcome"] = {k:v for k,v in job["save_outcome"].items() if k != "native"}
     if "maintenance" in job:
         summary["maintenance"] = [_maintenance_summary(item) for item in job["maintenance"]]
     if "intent_omissions" in job:
         summary["intent_omissions"] = job["intent_omissions"]
+    if "store_context" in job:
+        summary["store_context"] = job["store_context"]
     if "maintenance_omitted_count" in job:
         summary["maintenance_omitted_count"] = job["maintenance_omitted_count"]
     if "association" in job:
@@ -720,6 +730,14 @@ def notice(config, event):
         return {"outcome": "skipped"}
     if not enabled(config):
         return {"outcome": "skipped"}
+    if "frozen_selection" in config:
+        from registry_recording import selection
+        try:
+            current = selection(config)
+            if event.get("cwd") is not None and Path(event["cwd"]).resolve() != Path(current.cwd).resolve():
+                return {"outcome": "skipped"}
+        except (ValueError, TypeError, OSError):
+            return {"outcome": "skipped"}
     if config.get("memory_scope") in ("workshop", "misc"):
         from target_policy import workshop_policy, misc_policy
         try:
@@ -776,6 +794,8 @@ def notice(config, event):
                                  "cancel_token": marker["token"],
                                  "config_sha256": binding, "phase": "admitted", "polls": 0,
                                  "bytes_read": 0, "records_parsed": 0})
+            if "frozen_selection" in config:
+                data["jobs"][-1]["frozen_selection"] = json.loads(encoded(config["frozen_selection"]))
             if config.get("memory_scope") == "workshop":
                 from target_policy import workshop_policy
                 data["jobs"][-1]["store_target"] = workshop_policy(config).canonical()
@@ -823,7 +843,8 @@ def attach_delivery(config, packet):
 
 
 def close_turn(config, session, turn=None, *, cancel=False, ended=False):
-    if (not enabled(config) or not isinstance(session, str) or not ID.fullmatch(session)
+    if (("frozen_selection" not in config and not enabled(config))
+            or not isinstance(session, str) or not ID.fullmatch(session)
             or (turn is not None and (not isinstance(turn, str) or not ID.fullmatch(turn)))):
         return
     if cancel:
@@ -871,7 +892,7 @@ def _update(config, session, key, mutation):
 
 def _native_write(config, job, timeout):
     from mcp_client import McpClient
-    from service import load_config
+    from service import client_for_service, load_config
     deadline = time.monotonic() + timeout
     from target_policy import policy_for, target_kwargs, target_service_config
     destination = job.get("destination")
@@ -888,7 +909,16 @@ def _native_write(config, job, timeout):
         raise ValueError("config_changed")
     if config.get("memory_scope") == "misc" and not _unchanged(config, job):
         raise ValueError("frozen_workspace_changed")
-    if destination == "global_preference":
+    registry = "frozen_selection" in config
+    if registry:
+        from registry_recording import validate_payload, ReadBudgetRefused
+        from librarian_policy import resolve
+        registry_store = validate_payload(config, job)
+        native_charge = job.get("registry_native_bytes")
+        native_limit = resolve(config).native_read_bytes
+        if type(native_charge) is not int or not 0 <= native_charge < native_limit:
+            raise ReadBudgetRefused("native_read_budget")
+    if not registry and destination == "global_preference":
         from target_policy import GLOBAL_PREFERENCE_NAMESPACE, GLOBAL_PREFERENCE_TAG
         from recording_contract import MAX_PREFERENCE_SUMMARY_BYTES, MAX_PREFERENCE_BODY_BYTES
         payload = job["payload"]
@@ -914,12 +944,13 @@ def _native_write(config, job, timeout):
         if not isinstance(possibility_tags, list) or "possibility" not in possibility_tags:
             raise ValueError("possibility_operation")
         try:
-            ordinary_tags([tag for tag in possibility_tags if tag != "possibility"], max_count=31)
+            ordinary_tags([tag for tag in possibility_tags if tag != "possibility"
+                           and (not registry or tag not in registry_store.record.required_tags)], max_count=31)
         except ValueError as error:
             raise ValueError("possibility_operation") from error
-        if (destination == "global_preference" or config.get("memory_scope", "project") not in ("project", "misc")
+        if (not registry and (destination == "global_preference" or config.get("memory_scope", "project") not in ("project", "misc"))
                 or len(possibility_tags) > 32 or len(set(possibility_tags)) != len(possibility_tags)
-                or possibility_tags != ["possibility"] and "tag_context" not in job
+                or not registry and possibility_tags != ["possibility"] and "tag_context" not in job
                 or "action" in job["payload"] or job["payload"].get("links")
                 or job.get("routing") or job.get("association")):
             raise ValueError("possibility_operation")
@@ -931,7 +962,8 @@ def _native_write(config, job, timeout):
         raise TimeoutError("native_deadline")
     # The native child pins its transport ceiling at startup. Give it the
     # write allowance now; the mutable Python timeout still bounds each phase.
-    client = McpClient(service.url, token=token, timeout=min(30, remaining))
+    client = (client_for_service(service, token=token, timeout=min(30, remaining)) if registry
+              else McpClient(service.url, token=token, timeout=min(30, remaining)))
     try:
         client.connect()
         if policy is not None:
@@ -939,7 +971,12 @@ def _native_write(config, job, timeout):
             if remaining <= 0:
                 raise TimeoutError("native_deadline")
             client.timeout = min(2, remaining)
-            policy.catalog_identity(client.call_tool("databases", {}), job["db_id"])
+            catalog = client.call_tool("databases", {})
+            if registry:
+                native_charge += len(encoded(catalog))
+                if native_charge > native_limit:
+                    raise ReadBudgetRefused("native_read_budget")
+            policy.catalog_identity(catalog, job["db_id"])
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("native_deadline")
@@ -960,8 +997,13 @@ def _native_write(config, job, timeout):
             policy.validate_workspace()
         if _config_digest(config) != job["config_sha256"]:
             raise ValueError("config_changed")
+        if registry:
+            validate_payload(config, job)
         receipt = client.save_verified(policy.db_alias if policy is not None else "project", payload, expected_db_id=job["db_id"])
-        if _config_digest(config) != job["config_sha256"]:
+        # The synchronous verified receipt is historical evidence of this
+        # already-completed write. Later registry revocation cannot make the
+        # observed acknowledgement disappear or authorize a replay elsewhere.
+        if not registry and _config_digest(config) != job["config_sha256"]:
             raise ValueError("config_changed_after_write")
         return receipt
     finally:
@@ -970,7 +1012,7 @@ def _native_write(config, job, timeout):
 
 
 def _native_maintenance(config, job, item, timeout):
-    if job.get("destination") == "global_preference":
+    if "frozen_selection" in config or job.get("destination") == "global_preference":
         raise ValueError("global_preference_operation")
     from mcp_client import McpClient
     from service import load_config
@@ -1224,80 +1266,104 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                     finish("deferred", observation["reason"])
                 return True
             context_diagnostic = _context_diagnostic(observation)
-            from hook_recall import resolve_project_identity, collect_overlap
             from librarian_policy import resolve
-            from recording_contract import prepare, overlap_plan
-            from target_policy import target_kwargs, workshop_policy, global_preferences_policy, target_service_config
-            preference_policy = global_preferences_policy(config)
-            routing_target = target_kwargs(config)
-            scope_options = ({"recording_scope": "workshop", "expected_db_id": workshop_policy(config).db_id}
-                             if config.get("memory_scope") == "workshop" else {})
-            if preference_policy is not None:
-                scope_options["global_preferences_enabled"] = True
-            if config.get("memory_scope", "project") == "project" and config.get("_project_focus") is not None:
-                scope_options["project_focus"] = config["_project_focus"]
-            budget = resolve(config)
-            read_plan, reason = overlap_plan(observation, budget=budget, **scope_options)
-            if read_plan is None:
-                diagnostic = sanitize_assessment_diagnostic({"runtime_reason": reason,
-                                                            "validation_reason": "unknown"})
-                finish("deferred", "assessment_input_refused"); return True
-            left = lambda: _remaining(job)
-            native_deadline = time.monotonic() + min(budget.native_seconds, left())
-            native_left = lambda: native_deadline - time.monotonic()
-            identity = resolve_project_identity(config["service_config"], config["project_root"],
-                                                timeout=min(2, native_left()), **routing_target)
-            if identity.get("outcome") != "ok":
-                finish("deferred", "native_identity_unavailable"); return True
-            db_id = identity.get("db_id")
-            if not isinstance(db_id, str) or not ULID.fullmatch(db_id):
-                finish("deferred", "invalid_native_identity"); return True
-            identity_work = identity.get("native_work")
-            spent_native_bytes = (identity_work.get("decoded_bytes")
-                                  if isinstance(identity_work, dict) else None)
-            if type(spent_native_bytes) is not int or spent_native_bytes < 0:
-                finish("deferred", "native_identity_unavailable"); return True
-            if spent_native_bytes >= budget.native_read_bytes:
-                finish("deferred", "overlap_unavailable_or_changed"); return True
-            if native_left() <= 0:
-                finish("deferred", "native_read_deadline"); return True
-            prompt = observation["evidence"][0]["content"][0]["text"]
-            routing_options = {}
-            for item in observation["evidence"]:
-                if item.get("kind") == "memory_delivery":
-                    packet = validate_delivery_packet(item["packet"])
-                    if any(card.get("routing_binding") or card.get("conditional_binding")
-                           for card in packet["displayed"]):
-                        routing_options["include_routing"] = True
-            overlap = collect_overlap(config["service_config"], prompt, config["project_root"],
-                                      expected_db_id=db_id, timeout=native_left(), budget=budget,
-                                      read_plan=read_plan, spent_native_bytes=spent_native_bytes,
-                                      **routing_options, **routing_target)
-            if overlap.get("outcome") not in ("ok", "empty") or overlap.get("db_id") != db_id:
-                finish("deferred", "overlap_unavailable_or_changed"); return True
-            if native_left() <= 0 or left() <= 0 or not _unchanged(config, job):
-                finish("deferred", "deadline_or_config_changed"); return True
-            # Once native project identity is known, foreign delivered cards stay
-            # visible but cannot become project associations, routing or maintenance.
-            if preference_policy is not None:
-                scope_options["expected_db_id"] = db_id
-            native_seconds_left = native_left()
-            native_work = overlap.get("native_work")
-            aggregate_native_bytes = (native_work.get("decoded_bytes") if isinstance(native_work, dict) else None)
-            if config.get("tag_stewardship") is True:
-                from tag_context import collect
-                tag_room = (budget.native_read_bytes - aggregate_native_bytes
-                            if type(aggregate_native_bytes) is int else 0)
-                if native_left() > 0 and tag_room > 0:
-                    tags_context = collect(config, expected_db_id=db_id,
-                                           timeout=min(30, native_left() / 2),
-                                           max_bytes=min(tag_room // 2, budget.recording_hint_bytes),
-                                           cue=prompt)
-                    aggregate_native_bytes += tags_context.decoded_bytes
-                    if tags_context.enabled:
-                        scope_options["tag_context"] = tags_context
-                # Lookup errors are optional tag omissions, never failed capture.
+            from recording_contract import prepare
+            from target_policy import target_kwargs, target_service_config
+            registry_mode = "frozen_selection" in config
+            acquisition = None
+            if registry_mode:
+                from registry_recording import collect as collect_registry
+                budget = resolve(config)
+                left = lambda: _remaining(job)
+                acquisition = collect_registry(config, observation, budget=budget, seconds=left())
+                _update(config, session, key, lambda _d, current: current.update(
+                    store_context=acquisition.diagnostic))
+                if not acquisition.stores:
+                    finish("deferred", "no_available_destination"); return True
+                if acquisition.decoded_bytes >= budget.native_read_bytes:
+                    finish("deferred", "native_read_budget"); return True
+                if acquisition.native_seconds_left <= 0:
+                    finish("deferred", "native_read_deadline"); return True
+                preference_policy, routing_target, db_id = None, {}, None
+                scope_options = acquisition.scope_options
+                overlap = {"cards": acquisition.cards}
+                native_seconds_left = acquisition.native_seconds_left
+                aggregate_native_bytes = acquisition.decoded_bytes
+            else:
+                from hook_recall import resolve_project_identity, collect_overlap
+                from librarian_policy import resolve
+                from recording_contract import prepare, overlap_plan
+                from target_policy import target_kwargs, workshop_policy, global_preferences_policy, target_service_config
+                preference_policy = global_preferences_policy(config)
+                routing_target = target_kwargs(config)
+                scope_options = ({"recording_scope": "workshop", "expected_db_id": workshop_policy(config).db_id}
+                                 if config.get("memory_scope") == "workshop" else {})
+                if preference_policy is not None:
+                    scope_options["global_preferences_enabled"] = True
+                if config.get("memory_scope", "project") == "project" and config.get("_project_focus") is not None:
+                    scope_options["project_focus"] = config["_project_focus"]
+                budget = resolve(config)
+                read_plan, reason = overlap_plan(observation, budget=budget, **scope_options)
+                if read_plan is None:
+                    diagnostic = sanitize_assessment_diagnostic({"runtime_reason": reason,
+                                                                "validation_reason": "unknown"})
+                    finish("deferred", "assessment_input_refused"); return True
+                left = lambda: _remaining(job)
+                native_deadline = time.monotonic() + min(budget.native_seconds, left())
+                native_left = lambda: native_deadline - time.monotonic()
+                identity = resolve_project_identity(config["service_config"], config["project_root"],
+                                                    timeout=min(2, native_left()), **routing_target)
+                if identity.get("outcome") != "ok":
+                    finish("deferred", "native_identity_unavailable"); return True
+                db_id = identity.get("db_id")
+                if not isinstance(db_id, str) or not ULID.fullmatch(db_id):
+                    finish("deferred", "invalid_native_identity"); return True
+                identity_work = identity.get("native_work")
+                spent_native_bytes = (identity_work.get("decoded_bytes")
+                                      if isinstance(identity_work, dict) else None)
+                if type(spent_native_bytes) is not int or spent_native_bytes < 0:
+                    finish("deferred", "native_identity_unavailable"); return True
+                if spent_native_bytes >= budget.native_read_bytes:
+                    finish("deferred", "overlap_unavailable_or_changed"); return True
+                if native_left() <= 0:
+                    finish("deferred", "native_read_deadline"); return True
+                prompt = observation["evidence"][0]["content"][0]["text"]
+                routing_options = {}
+                for item in observation["evidence"]:
+                    if item.get("kind") == "memory_delivery":
+                        packet = validate_delivery_packet(item["packet"])
+                        if any(card.get("routing_binding") or card.get("conditional_binding")
+                               for card in packet["displayed"]):
+                            routing_options["include_routing"] = True
+                overlap = collect_overlap(config["service_config"], prompt, config["project_root"],
+                                          expected_db_id=db_id, timeout=native_left(), budget=budget,
+                                          read_plan=read_plan, spent_native_bytes=spent_native_bytes,
+                                          **routing_options, **routing_target)
+                if overlap.get("outcome") not in ("ok", "empty") or overlap.get("db_id") != db_id:
+                    finish("deferred", "overlap_unavailable_or_changed"); return True
+                if native_left() <= 0 or left() <= 0 or not _unchanged(config, job):
+                    finish("deferred", "deadline_or_config_changed"); return True
+                # Once native project identity is known, foreign delivered cards stay
+                # visible but cannot become project associations, routing or maintenance.
+                if preference_policy is not None:
+                    scope_options["expected_db_id"] = db_id
                 native_seconds_left = native_left()
+                native_work = overlap.get("native_work")
+                aggregate_native_bytes = (native_work.get("decoded_bytes") if isinstance(native_work, dict) else None)
+                if config.get("tag_stewardship") is True:
+                    from tag_context import collect
+                    tag_room = (budget.native_read_bytes - aggregate_native_bytes
+                                if type(aggregate_native_bytes) is int else 0)
+                    if native_left() > 0 and tag_room > 0:
+                        tags_context = collect(config, expected_db_id=db_id,
+                                               timeout=min(30, native_left() / 2),
+                                               max_bytes=min(tag_room // 2, budget.recording_hint_bytes),
+                                               cue=prompt)
+                        aggregate_native_bytes += tags_context.decoded_bytes
+                        if tags_context.enabled:
+                            scope_options["tag_context"] = tags_context
+                    # Lookup errors are optional tag omissions, never failed capture.
+                    native_seconds_left = native_left()
             prepared, _context = prepare(observation, overlap["cards"], budget=budget, **scope_options)
             if prepared is None:
                 diagnostic = sanitize_assessment_diagnostic({"runtime_reason": _context,
@@ -1356,9 +1422,22 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
             if result.get("reason") != "proposed" or (proposal is None and not maintenance):
                 finish("deferred", "assessment_refused"); return True
             destination = proposal.destination if proposal is not None else "project"
-            if destination not in ("project", "global_preference"):
+            registry_frozen, selected_store = {}, None
+            if registry_mode:
+                from registry_recording import check_proposal, freeze_destination
+                try:
+                    if maintenance or proposal is None:
+                        raise ValueError("registry_operation_refused")
+                    check_proposal(proposal, _context)
+                    selected_store, destination_policy, registry_frozen = freeze_destination(
+                        acquisition, destination, seconds=left())
+                    db_id = selected_store.db_id
+                    routing_target = {"store_target": destination_policy}
+                except (ValueError, TypeError, AttributeError, KeyError):
+                    finish("deferred", "assessment_refused"); return True
+            elif destination not in ("project", "global_preference"):
                 finish("deferred", "assessment_refused"); return True
-            if destination == "global_preference":
+            if not registry_mode and destination == "global_preference":
                 from recording_contract import validate_global_preference
                 try:
                     validate_global_preference(proposal, _context)
@@ -1384,9 +1463,10 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                     finish("deferred", "global_identity_unavailable"); return True
                 db_id = preference_policy.db_id
             frozen = {"phase": "frozen", "db_id": db_id, "assessment_diagnostic": diagnostic}
+            frozen.update(registry_frozen)
             if preference_policy is not None:
                 frozen["destination"] = destination
-            if destination == "global_preference":
+            if not registry_mode and destination == "global_preference":
                 frozen.update(db_alias=preference_policy.db_alias, store_target=preference_policy.canonical(),
                               native_deadline_monotonic=global_native_deadline)
             if proposal is not None:
@@ -1394,7 +1474,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                     from recording_contract import AssociationTarget
                     target = proposal.associate_with
                     if proposal.kind == "possibility":
-                        if (destination != "project" or config.get("memory_scope", "project") not in ("project", "misc")
+                        if (not registry_mode and (destination != "project" or config.get("memory_scope", "project") not in ("project", "misc"))
                                 or target is not None or proposal.routing_judgment is not None):
                             raise ValueError("possibility_operation")
                     if (target is not None and
@@ -1420,10 +1500,15 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                                "summary": proposal.summary, "body": proposal.body}
                     if proposal.tags:
                         from tag_context import ordinary_tags
-                        payload["tags"] = list(ordinary_tags(list(proposal.tags), max_count=32))
+                        if registry_mode:
+                            tags = ordinary_tags([tag for tag in proposal.tags
+                                                 if tag not in selected_store.record.required_tags], max_count=32)
+                            payload["tags"] = sorted(set(tags) | set(selected_store.record.required_tags))
+                        else:
+                            payload["tags"] = list(ordinary_tags(list(proposal.tags), max_count=32))
                     if proposal.tag_context_json is not None and destination == "project":
                         frozen["tag_context"] = json.loads(proposal.tag_context_json)
-                    if destination == "global_preference":
+                    if not registry_mode and destination == "global_preference":
                         from target_policy import GLOBAL_PREFERENCE_NAMESPACE, GLOBAL_PREFERENCE_TAG
                         coordinate = {"session": session, "turn": job["turn_id"], "key": key,
                                       "ordinals": [json.loads(c.source_ref_json)["ordinal"] for c in proposal.evidence]}
@@ -1447,14 +1532,29 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                     if target is not None:
                         from hook_recall import check_association_target
                         # Reserve write time inside the same one-shot job deadline.
-                        budget = min(2, max(0, left()) / 3)
-                        disposition = (check_association_target(config["service_config"], config["project_root"],
-                                                                target, expected_db_id=db_id, timeout=budget,
-                                                                **routing_target)
-                                       if budget > 0 else "unavailable")
+                        association_seconds = min(2, max(0, left()) / 3)
+                        if registry_mode:
+                            association_seconds = min(association_seconds,
+                                max(0, registry_frozen["native_deadline_monotonic"] - time.monotonic()))
+                            checked = (check_association_target(Path(selected_store.service_config), config["project_root"],
+                                       target, expected_db_id=db_id, timeout=association_seconds, with_work=True,
+                                       budget=budget, spent_native_bytes=aggregate_native_bytes, **routing_target)
+                                       if association_seconds > 0 and aggregate_native_bytes < budget.native_read_bytes else None)
+                            work = checked.get("native_work") if isinstance(checked, dict) else None
+                            charged = work.get("decoded_bytes") if isinstance(work, dict) else None
+                            disposition = (checked.get("outcome", "unavailable") if type(charged) is int
+                                           and aggregate_native_bytes <= charged <= budget.native_read_bytes else "unavailable")
+                            frozen["registry_native_bytes"] = charged if type(charged) is int else None
+                        else:
+                            disposition = (check_association_target(config["service_config"], config["project_root"],
+                                                                    target, expected_db_id=db_id, timeout=association_seconds,
+                                                                    **routing_target)
+                                           if association_seconds > 0 else "unavailable")
                         association = {"target": target.native_id,
                                        "outcome": "requested" if disposition == "kept" else "omitted",
                                        "reason": disposition}
+                        if registry_mode:
+                            association["db_id"] = db_id
                         if disposition == "kept":
                             payload["links"] = [{"to": target.native_id, "kind": "associative", "weight": 0.5}]
                     frozen.update({"proposal_kind": proposal.kind,
@@ -1529,7 +1629,12 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
         pending = (["save"] if "payload" in job and "save_outcome" not in job else [])
         pending += [index for index,item in enumerate(job.get("maintenance", [])) if item["status"] == "pending"]
         for branch in pending:
-            if (job.get("destination") == "global_preference"
+            if "frozen_selection" in job:
+                from librarian_policy import resolve
+                native_charge = job.get("registry_native_bytes")
+                if type(native_charge) is not int or not 0 <= native_charge < resolve(config).native_read_bytes:
+                    finish("deferred", "native_read_budget"); return True
+            if (("frozen_selection" in job or job.get("destination") == "global_preference")
                     and time.monotonic() >= job.get("native_deadline_monotonic", 0)):
                 finish("deferred", "native_deadline"); return True
             if (_cancelled(config, session, job) or _remaining(job) <= 0
@@ -1559,7 +1664,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                 try:
                     write_job = {k:v for k,v in job.items() if k != "observation"}
                     timeout = _remaining(job)
-                    if job.get("destination") == "global_preference":
+                    if "frozen_selection" in job or job.get("destination") == "global_preference":
                         timeout = min(timeout, job["native_deadline_monotonic"] - time.monotonic())
                     receipt = (native_write or _native_write)(config, write_job, timeout)
                     if (not isinstance(receipt, dict) or receipt.get("readback_status") != "verified"
@@ -1569,7 +1674,18 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                         small = {k:receipt[k] for k in ("db","db_id","id","episode_id","edition_id","revision","replayed","readback_status") if k in receipt}
                         outcome = ({"status":"verified","reason":"native_verified","native":small}
                                    if len(encoded(small)) <= 2048 else {"status":"unresolved","reason":"native_receipt_cap"})
-                        if (outcome["status"] == "verified" and config.get("tag_stewardship") is True
+                        if outcome["status"] == "verified" and "frozen_selection" in job:
+                            try:
+                                from registry_runtime import selection, config_for_store
+                                from stewardship import enqueue
+                                selected = selection(config)
+                                store = selected.named(job["destination"])
+                                if store.maintenance.enabled:
+                                    ids = [small[k] for k in ("id", "edition_id") if isinstance(small.get(k), str)]
+                                    enqueue(config_for_store(config, store), job["db_id"], ids)
+                            except Exception:
+                                pass  # Durable SAVE remains successful after an optional queue miss.
+                        elif (outcome["status"] == "verified" and config.get("tag_stewardship") is True
                                 and job.get("destination", "project") == "project"):
                             # Native acceptance is already durable; a failed
                             # optional queue handoff cannot make it unsuccessful.
@@ -1580,7 +1696,10 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                             except Exception:
                                 pass
                 except Exception as error:
-                    outcome = {"status":"unresolved","reason":"native_write_ambiguous"}
+                    from registry_recording import ReadBudgetRefused
+                    outcome = ({"status":"deferred","reason":"native_read_budget"}
+                               if "frozen_selection" in job and isinstance(error, ReadBudgetRefused)
+                               else {"status":"unresolved","reason":"native_write_ambiguous"})
                     details = getattr(error,"details",None)
                     accepted = details.get("accepted") if isinstance(details,dict) else None
                     if isinstance(accepted,dict):
@@ -1643,7 +1762,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
 def drain_status(config, session_ids):
     result = {"schema": "mneme.codex-recording.drain.v1", "pending": 0, "unresolved": 0,
               "usage_unknown": False, "counts": {k: 0 for k in COUNTERS}, "ledgers": [], "truncated": False}
-    if not enabled(config):
+    if "frozen_selection" not in config and not enabled(config):
         return result
     if not isinstance(session_ids, (list, tuple)) or len(session_ids) > MAX_LEDGERS:
         result.update(truncated=True, usage_unknown=True); return result
@@ -1669,7 +1788,7 @@ def export_receipts(config, session_ids):
     """Bounded private harness projection; never actor context or transcript export."""
     result = {"schema": "mneme.codex-recording.receipts.v1", "receipts": [],
               "truncated": False, "unknown": False}
-    if not enabled(config):
+    if "frozen_selection" not in config and not enabled(config):
         return result
     if not isinstance(session_ids, (list, tuple)) or len(session_ids) > MAX_LEDGERS:
         result.update(truncated=True, unknown=True)

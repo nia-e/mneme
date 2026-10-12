@@ -114,18 +114,19 @@ class BoundaryCuts:
     def __enter__(self):
         original_extract = library._extract
         original_copyfileobj = library.shutil.copyfileobj
-        original_copy2 = library.shutil.copy2
-        original_copytree = library.shutil.copytree
+        original_copy2 = library._copy_file
+        original_copytree = library._copy_tree
         original_fsync = library.os.fsync
-        original_sync_dir = library._sync_dir
-        original_rename = library.os.rename
+        original_sync_dir = library.host_files.sync_directory
+        original_rename = library.host_files.rename_no_replace
         original_replace = library.os.replace
         original_write = library._write_json
         original_validate = library.validate_bundle
         original_service = library._service_command
         original_rmtree = library.shutil.rmtree
         original_result = library._receive_result
-        original_open = Path.open
+        original_open = library.os.fdopen
+        original_write_stream = library._write_stream
 
         def extract(*args, **kwargs):
             self.phase = "extract"
@@ -134,8 +135,12 @@ class BoundaryCuts:
             finally:
                 self.phase = None
 
+        def write_stream(path, source):
+            if self.phase == "extract":
+                self.last_extracted = str(path)
+            return original_write_stream(path, source)
+
         def copyfileobj(source, dest, *args, **kwargs):
-            self.last_extracted = str(getattr(dest, "name", ""))
             if self.phase == "extract" and self.last_extracted.endswith("snapshot/database.db"):
                 return self.around("payload_write", original_copyfileobj,
                                    source, dest, *args, **kwargs)
@@ -205,10 +210,9 @@ class BoundaryCuts:
             def write(self, data):
                 return cuts.around("catalog_write", self.stream.write, data)
 
-        def open_path(path, *args, **kwargs):
-            stream = original_open(path, *args, **kwargs)
-            if (path.parent == self.catalog.parent
-                    and path.name.startswith(self.catalog.name + ".tmp-")):
+        def open_fd(fd, *args, **kwargs):
+            stream = original_open(fd, *args, **kwargs)
+            if self.phase == "catalog" and args and args[0] == "wb":
                 return CatalogFile(stream)
             return stream
 
@@ -246,11 +250,12 @@ class BoundaryCuts:
         for obj, name, wrapper in (
             (library, "_extract", extract),
             (library.shutil, "copyfileobj", copyfileobj),
-            (library.shutil, "copy2", copy2),
-            (library.shutil, "copytree", copytree),
-            (library.os, "fsync", fsync), (library, "_sync_dir", sync_dir),
-            (library.os, "rename", rename), (library.os, "replace", replace),
-            (library, "_write_json", write), (Path, "open", open_path),
+            (library, "_copy_file", copy2),
+            (library, "_copy_tree", copytree),
+            (library, "_write_stream", write_stream),
+            (library.os, "fsync", fsync), (library.host_files, "sync_directory", sync_dir),
+            (library.host_files, "rename_no_replace", rename), (library.os, "replace", replace),
+            (library, "_write_json", write), (library.os, "fdopen", open_fd),
             (library, "validate_bundle", validate),
             (library, "_service_command", service),
             (library.shutil, "rmtree", rmtree),
@@ -339,6 +344,7 @@ class AckCuts(BoundaryCuts):
         return self
 
 
+@unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
 class PublicationFaultTests(unittest.TestCase):
     def assert_coherent(self, fixture):
         entries = library.status(fixture.config)["entries"]

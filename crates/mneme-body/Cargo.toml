@@ -9,5 +9,8 @@ mneme-core.workspace = true
 async-trait.workspace = true
 ulid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+mneme-store-path.workspace = true
+
 [dev-dependencies]
 tokio.workspace = true

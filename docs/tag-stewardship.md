@@ -94,10 +94,11 @@ against the whole guide: later maintenance can reconsider it under changed polic
 
 **During idle work**, the same isolated model runtime examines bounded batches.
 Recently recorded or changed material and a resumable traversal of cold nodes
-share the maintenance allowance, with room reserved for cold progress. No-op and
-unresolved classifications advance examined coverage too. The initial classifier
-uses target summaries, not mutable external bodies; insufficient context warrants
-leaving tags alone.
+share the maintenance allowance. A durable hot/cold turn governs native-read
+and model-packing order across sessions, so a long cold prefix cannot consume
+every byte slot. No-op and unresolved classifications advance examined coverage
+too. The initial classifier uses target summaries, not mutable external bodies;
+insufficient context warrants leaving tags alone.
 
 Coverage means “examined against this content and guide revision,” not “correct
 forever.” Unchanged unresolved material does not need another model argument on
@@ -127,17 +128,28 @@ recording-off configurations do not run maintenance. Follow the
 new runtime. Do not edit a live bundle or reset usage ledgers to enable this work.
 
 Maintenance shares the parent session budget, protects foreground recall, and
-also accounts against one device-local owner allowance per UTC day. Multiple
-sessions using the same database must not multiply that allowance. Native reads,
-context bytes, inference and retries are bounded. Unknown provider usage retains
+also accounts inference against one device-local owner allowance per UTC day.
+Multiple sessions using the same database must not multiply that allowance.
+Native reads, context bytes, inference and retries are bounded. Unknown provider usage retains
 conservative spending evidence and fences model admission for that owner-day and
 the parent session; a new UTC day does not clear the session's uncertainty.
 The worker runs opportunistically through the existing lifecycle, not as an
 always-running scheduler. A bounded connection, catalog validation and owner-identity
-exchange precedes maintenance admission; exhausted allowances stop subsequent
-native work once the native-round allowance is spent. Exhausting the owner model
-allowance blocks inference and edits, but another eligible session can still make
-bounded scan-only progress.
+exchange precedes maintenance admission. Content batches then share a durable
+owner-wide cadence: at least the configured native I/O window between admissions
+(10/15/20 seconds for low/medium/high effort), with the existing aggregate byte
+and read/write time envelopes per batch. Thus even continuously active sessions
+using one effort admit at most `ceil(86400 / native_seconds) + 1` content batches
+per UTC day; at medium effort that is 5,761 batches with a 64 KiB decoded-byte
+envelope each.
+This rate bound does not include the preceding identity exchanges, and is an
+upper bound, not a promise of all-day operation. Idle guide probes back off up to
+the existing five-minute worker lifetime; queued work bypasses that idle backoff,
+not the shared cadence. Native rounds remain cumulative accounting, not a quota
+borrowed from model attempts. Exhausting the owner model allowance blocks
+inference and edits, but another eligible session can still make bounded
+scan-only progress. Inference retains the runtime's separate 45-second deadline;
+the native I/O window does not shorten it.
 
 These are admission and accounting limits, not hard provider billing caps. Prompt
 and answer bytes, attempts and deadlines are bounded; the provider can use more

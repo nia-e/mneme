@@ -10,14 +10,20 @@ import json
 import math
 import os
 from pathlib import Path
-import queue
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
+
+import host_files
+import host_process
+from host_platform import is_executable
+
+WINDOWS = os.name == "nt"
+MAX_AUTH_BYTES = 1024 * 1024
 
 from reader_contract import BASE_INSTRUCTIONS, OUTPUT_SCHEMA, prepare, validate_answer
 import recording_contract
@@ -125,8 +131,8 @@ class ReaderRuntime:
         self.cwd = None
         self._own_dir = None
         self._own_cwd = None
-        self._stdout = queue.Queue(maxsize=256)
-        self._overflow = threading.Event()
+        self._pipe = None
+        self._buffer = b""
         self._request_id = 0
         self._thread_id = None
         self._pending = []
@@ -160,7 +166,7 @@ class ReaderRuntime:
                 or self.budget is None or model != self.budget.model):
             raise TransportError("invalid_config")
         codex = Path(codex)
-        if not codex.is_file() or not os.access(codex, os.X_OK):
+        if not is_executable(codex):
             raise TransportError("unavailable")
         hasher = hashlib.sha256()
         with codex.open("rb") as stream:
@@ -176,59 +182,40 @@ class ReaderRuntime:
             raise TransportError("unavailable")
         return codex, auth
 
-    def _drain_stdout(self, process, output, overflow):
-        try:
-            while True:
-                # The process survives changes of role. Read with the largest
-                # envelope here; _next enforces the active role's smaller cap.
-                raw = process.stdout.readline(MAX_RECORDING_FRAME_BYTES + 1)
-                if not raw:
-                    break
-                if len(raw) > MAX_RECORDING_FRAME_BYTES or not raw.endswith(b"\n"):
-                    overflow.set()
-                    break
-                try:
-                    output.put_nowait(raw)
-                except queue.Full:
-                    overflow.set()
-                    break
-        finally:
-            try:
-                output.put_nowait(None)
-            except queue.Full:
-                overflow.set()
-
-    def _drain_stderr(self, process):
-        # Authentication and provider details must not be persisted or surfaced.
-        for _ in iter(lambda: process.stderr.read(4096), b""):
-            pass
-
-    def _send(self, message):
-        if self.process is None or self.process.poll() is not None:
+    def _send(self, message, deadline):
+        if self.process is None or self.process.poll() is not None or self._pipe is None:
             raise TransportError("transport_error")
         try:
             raw = json.dumps(message, separators=(",", ":")).encode() + b"\n"
             if len(raw) > self._max_frame_bytes:
                 raise TransportError("frame_cap")
-            self.process.stdin.write(raw)
-            self.process.stdin.flush()
+            self._pipe.write(raw, deadline)
+        except TimeoutError as exc:
+            raise TransportError("timeout") from exc
         except OSError as exc:
             raise TransportError("transport_error") from exc
 
     def _next(self, deadline):
-        if self._overflow.is_set():
-            raise TransportError("frame_cap")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TransportError("timeout")
-        try:
-            raw = self._stdout.get(timeout=remaining)
-        except queue.Empty as exc:
-            raise TransportError("frame_cap" if self._overflow.is_set() else "timeout") from exc
-        if self._overflow.is_set():
-            raise TransportError("frame_cap")
-        if raw is None:
-            raise TransportError("transport_error")
+        # Backpressure stays in the bounded OS pipe. There are no blocking I/O
+        # threads to outlive a deadline, role switch or retired process.
+        while True:
+            if time.monotonic() >= deadline:
+                raise TransportError("timeout")
+            pos = self._buffer.find(b"\n")
+            if pos >= 0:
+                raw, self._buffer = self._buffer[:pos + 1], self._buffer[pos + 1:]
+                break
+            if len(self._buffer) >= self._max_frame_bytes:
+                raise TransportError("frame_cap")
+            try:
+                block = self._pipe.read(min(8192, self._max_frame_bytes - len(self._buffer)), deadline)
+            except TimeoutError as exc:
+                raise TransportError("timeout") from exc
+            except OSError as exc:
+                raise TransportError("transport_error") from exc
+            if not block:
+                raise TransportError("transport_error")
+            self._buffer += block
         if len(raw) > self._max_frame_bytes:
             raise TransportError("frame_cap")
         self._frames += 1
@@ -244,6 +231,33 @@ class ReaderRuntime:
         if "method" in message and "id" in message:
             raise TransportError("tool_activity")
         return message
+
+    def _handoff_auth(self, auth):
+        target = self.home / "auth.json"
+        if not WINDOWS:
+            target.symlink_to(auth)
+            return
+        # Windows symlinks need an optional privilege. Copy one bounded, private
+        # regular-file edition instead; never follow a reparse/hard-link source.
+        # Read and metadata verification retain the same opened source handle.
+        with os.fdopen(host_files.open_regular(auth), "rb") as source:
+            host_files.check_private_fd(source.fileno())
+            before = os.fstat(source.fileno())
+            if before.st_size > MAX_AUTH_BYTES:
+                raise TransportError("unavailable")
+            raw = source.read(MAX_AUTH_BYTES + 1)
+            after = os.fstat(source.fileno())
+            identity = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                                      value.st_mtime_ns, value.st_ctime_ns)
+            if len(raw) > MAX_AUTH_BYTES or identity(before) != identity(after):
+                raise TransportError("unavailable")
+            # A pathname replacement during the copy is not the reviewed source.
+            with os.fdopen(host_files.open_regular(auth), "rb") as current:
+                host_files.check_private_fd(current.fileno())
+                if identity(os.fstat(current.fileno())) != identity(after):
+                    raise TransportError("unavailable")
+            host_files.atomic_write(target, raw)
+        host_files.check_private(target)
 
     @staticmethod
     def _activity(message):
@@ -263,7 +277,7 @@ class ReaderRuntime:
             raise TransportError("timeout")
         self._request_id += 1
         request_id = self._request_id
-        self._send({"method": method, "id": request_id, "params": params})
+        self._send({"method": method, "id": request_id, "params": params}, deadline)
         while True:
             message = self._next(deadline)
             if self._activity(message):
@@ -280,35 +294,48 @@ class ReaderRuntime:
 
     def _start(self, deadline, *, base_instructions=BASE_INSTRUCTIONS, service_name="mneme_reader"):
         codex, auth = self._check_config()
-        self.scratch_dir.mkdir(parents=True, exist_ok=True)
-        self._own_dir = Path(tempfile.mkdtemp(prefix="reader-", dir=self.scratch_dir))
+        if WINDOWS:
+            host_files.ensure_private_directory(self.scratch_dir)
+        else:
+            # Existing Unix scratch roots were created with the caller's umask;
+            # privacy belongs to each exclusive 0700 child, as before.
+            self.scratch_dir.mkdir(parents=True, exist_ok=True)
+        own_dir = self.scratch_dir / ("reader-" + uuid.uuid4().hex)
+        host_files.ensure_private_directory(own_dir, parents=False, exist_ok=False)
+        self._own_dir = own_dir
         self.home = self._own_dir / "home"
         # The caller's scratch may live under the project. The model's cwd must
         # not: project config/rules can be inherited from ancestors.
-        self._own_cwd = Path(tempfile.mkdtemp(prefix="mneme-reader-cwd-"))
+        own_cwd = Path(tempfile.gettempdir()) / ("mneme-reader-cwd-" + uuid.uuid4().hex)
+        host_files.ensure_private_directory(own_cwd, parents=False, exist_ok=False)
+        self._own_cwd = own_cwd
         self.cwd = self._own_cwd
-        self.home.mkdir(mode=0o700)
-        (self.home / "auth.json").symlink_to(auth)
+        host_files.ensure_private_directory(self.home, parents=False, exist_ok=False)
+        self._handoff_auth(auth)
         env = os.environ.copy()
         for key in tuple(env):
             if key == "MNEME_DB" or key.startswith(("CODEX_", "OPENAI_", "ANTHROPIC_", "XDG_")):
                 env.pop(key, None)
         env.update({"HOME": str(self.home), "CODEX_HOME": str(self.home), "GIT_CEILING_DIRECTORIES": str(self.cwd.parent),
                     "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+        if WINDOWS:
+            # Libraries using native Windows home conventions must see the same
+            # isolated root, not the user's profile/configuration directories.
+            env.update({"USERPROFILE": str(self.home), "APPDATA": str(self.home / "AppData/Roaming"),
+                        "LOCALAPPDATA": str(self.home / "AppData/Local"),
+                        "HOMEDRIVE": self.home.drive, "HOMEPATH": str(self.home)[len(self.home.drive):]})
         command = [str(codex), "app-server", "--disable", "hooks", "--disable", "memories",
                    "--disable", "multi_agent", "--disable", "shell_tool",
                    "--disable", "plugins", "--disable", "apps",
                    "--disable", "browser_use", "--disable", "computer_use",
                    "--disable", "skill_search", "-c", "project_doc_max_bytes=0"]
-        self.process = subprocess.Popen(command, cwd=self.cwd, env=env,
-                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, start_new_session=True)
-        threading.Thread(target=self._drain_stdout,
-                         args=(self.process, self._stdout, self._overflow), daemon=True).start()
-        threading.Thread(target=self._drain_stderr, args=(self.process,), daemon=True).start()
+        self.process = host_process.spawn(command, cwd=self.cwd, env=env, tree=True,
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, bufsize=0)
+        self._pipe = host_process.BoundedPipe(self.process)
         initialized = self._request("initialize", {"clientInfo": {"name": "mneme_reader",
                                               "title": "Mneme memory reader", "version": "1.0.0"}}, deadline)
-        self._send({"method": "initialized", "params": {}})
+        self._send({"method": "initialized", "params": {}}, deadline)
         if not isinstance(initialized, dict):
             raise TransportError("provider_error")
         self._start_thread(deadline, base_instructions=base_instructions, service_name=service_name)
@@ -467,7 +494,7 @@ class ReaderRuntime:
 
     def assess(self, observation, overlap_cards=None, *, timeout=TURN_SECONDS,
                recording_scope="project", expected_db_id=None, global_preferences_enabled=False,
-               project_focus=None, tag_context=None) -> dict:
+               project_focus=None, tag_context=None, selected_stores=None) -> dict:
         """Assess one complete public projection, never perform a native write.
 
         A fresh recording-contract thread is used for every admitted assessment,
@@ -480,6 +507,7 @@ class ReaderRuntime:
             lambda: recording_contract.prepare(observation, overlap_cards, budget=self.budget,
                 recording_scope=recording_scope, expected_db_id=expected_db_id,
                 global_preferences_enabled=global_preferences_enabled, project_focus=project_focus,
+                **({"selected_stores": selected_stores} if selected_stores is not None else {}),
                 **({"tag_context": tag_context} if tag_context is not None else {})),
             instructions=recording_contract.instructions_for, schema=recording_contract.schema_for,
             validator=recording_contract.validate_answer, field="assessment", service_name="mneme_recorder",
@@ -609,28 +637,27 @@ class ReaderRuntime:
         self.process = None
         self._thread_id = None
         self._pending.clear()
+        pipe, self._pipe = self._pipe, None
         if process is not None:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
             try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                pass
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
+                host_process.terminate_tree(process, timeout=3)
+            finally:
+                if pipe is not None:
+                    pipe.close()
+                else:
+                    for stream in (process.stdin, process.stdout):
+                        if stream is not None:
+                            stream.close()
         if self._own_dir is not None:
-            shutil.rmtree(self._own_dir, ignore_errors=True)
+            # A Windows home contains a credential copy, not just a symlink.
+            # Cleanup failure must stay visible and retain the path for retry.
+            shutil.rmtree(self._own_dir, ignore_errors=not WINDOWS)
             self._own_dir = None
         if self._own_cwd is not None:
-            shutil.rmtree(self._own_cwd, ignore_errors=True)
+            shutil.rmtree(self._own_cwd, ignore_errors=not WINDOWS)
             self._own_cwd = None
         self.home = self.cwd = None
-        self._stdout = queue.Queue(maxsize=256)
-        self._overflow.clear()
+        self._buffer = b""
 
     def close(self):
         with self._lock:

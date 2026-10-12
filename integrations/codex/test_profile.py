@@ -141,5 +141,57 @@ class ProfileTests(unittest.TestCase):
         self.assertFalse(receipt.exists())
 
 
+    def test_v2_named_store_allowlist_is_explicit_and_immutable(self):
+        (self.project / ".mneme/profile.json").write_text(json.dumps({
+            "schema": profile.SCHEMA_V2, "mode": "private", "stores": ["company"]}))
+        selected = profile.select_for_cwd(self.cwd)
+        self.assertEqual(selected["stores"], ("company",))
+        with self.assertRaisesRegex(ValueError, "checked selected binding"):
+            profile.permit_service(selected, "company", "/remote/company.db")
+        with self.assertRaisesRegex(ValueError, "checked selected binding"):
+            profile.permit_service(selected, "user", "/remote/personal.db")
+
+    def test_profile_v1_cannot_smuggle_new_allowlist(self):
+        self.write_profile("default", stores=["company"])
+        with self.assertRaisesRegex(ValueError, "v2"):
+            profile.select_for_cwd(self.cwd)
+
+    def test_profile_v2_rejects_duplicate_names_null_and_mixed_library(self):
+        for extra in ({"stores": ["company", "company"]}, {"stores": None},
+                      {"stores": ["company"], "library_config": str(self.root / "library.json")}):
+            (self.project / ".mneme/profile.json").write_text(json.dumps({
+                "schema": profile.SCHEMA_V2, "mode": "default", **extra}))
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                profile.select_for_cwd(self.cwd)
+
+    def test_arbitrary_legacy_alias_never_bypasses_isolated_profile(self):
+        self.write_profile("isolated")
+        selected = profile.select_for_cwd(self.cwd)
+        with self.assertRaisesRegex(ValueError, "checked selected binding"):
+            profile.permit_service(selected, "renamed-personal", "/remote/personal.db")
+
+    def test_lexical_profile_cannot_be_bypassed_by_symlink_to_unconfigured_work(self):
+        self.write_profile("isolated")
+        elsewhere = self.root / "outside"
+        elsewhere.mkdir()
+        alias = self.project / "alias"
+        alias.symlink_to(elsewhere, target_is_directory=True)
+        selected = profile.select_for_cwd(alias)
+        self.assertEqual(selected["mode"], "isolated")
+        with self.assertRaisesRegex(ValueError, "forbids personal"):
+            profile.permit_service(selected, "user", "/remote/personal.db")
+
+    def test_conflicting_lexical_and_canonical_profiles_fail_closed(self):
+        self.write_profile("isolated")
+        outside = self.root / "outside"
+        (outside / ".mneme").mkdir(parents=True)
+        (outside / ".mneme/profile.json").write_text(json.dumps({
+            "schema": profile.SCHEMA, "mode": "default"}))
+        alias = self.project / "alias"
+        alias.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "profiles disagree"):
+            profile.select_for_cwd(alias)
+
+
 if __name__ == "__main__":
     unittest.main()

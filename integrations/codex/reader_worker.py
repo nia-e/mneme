@@ -7,7 +7,6 @@ never call Mneme, Codex, or wait for a worker. A failed optional transaction ski
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -16,11 +15,13 @@ import re
 import secrets
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Any
+import host_files
+import host_process
+from rollout_primitives import read_regular
 from reader_contract import plan as reader_plan, prepare as reader_prepare
-from librarian_policy import resolve, LibrarianBudget
+from librarian_policy import resolve, LibrarianBudget, IDLE_SECONDS
 from touchstone_contract import delivery_cache_fingerprint
 from target_policy import (target_kwargs, global_preferences_policy,
                            GLOBAL_PREFERENCE_CUE)
@@ -36,7 +37,6 @@ MAX_FRAGMENT = 360
 MAX_ATTEMPTS = LibrarianBudget().attempts
 MAX_INPUT = LibrarianBudget().input_tokens
 MAX_OUTPUT = LibrarianBudget().output_tokens
-IDLE_SECONDS = 300
 MAX_WORKERS = 2
 
 
@@ -72,7 +72,7 @@ def _new() -> dict[str, Any]:
             "inflight": None, "reservation": None, "ready": None, "fence": "",
             "prior": "", "emitted": [], "attempts": 0, "input_tokens": 0,
             "output_tokens": 0, "cached_input_tokens": 0, "reasoning_output_tokens": 0,
-            "unknown_usage": False, "worker_pid": None,
+            "unknown_usage": False, "worker_pid": None, "worker_identity": None,
             "counts": {name: 0 for name in ("selected", "ready", "emitted", "dropped", "failed", "abstained", "capacity")},
             "touched": time.time()}
 
@@ -145,35 +145,19 @@ def _write(path: Path, data: dict[str, Any]) -> None:
             raw = encode()
     if len(raw) > MAX_STATE:
         raise ValueError("reader state too large")
-    fd, name = tempfile.mkstemp(prefix=".reader-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        try:
-            os.unlink(name)
-        except FileNotFoundError:
-            pass
+    host_files.atomic_write(path, raw)
 
 
 def _fence(config: dict[str, Any], session_id: str) -> str | None:
     try:
         path, _ = _paths(config, session_id)
         marker = path.with_suffix(".fence")
-        if not marker.exists():
-            return ""
-        raw = marker.read_bytes()
+        raw = read_regular(marker, 32)
         token = raw.decode("ascii")
         return token if len(token) == 32 and all(c in "0123456789abcdef" for c in token) else None
-    except (OSError, UnicodeError):
+    except FileNotFoundError:
+        return ""
+    except (OSError, ValueError, UnicodeError):
         return None
 
 
@@ -181,53 +165,35 @@ def _context_token(config: dict[str, Any], session_id: str) -> str | None:
     try:
         path, _ = _paths(config, session_id)
         marker = path.with_suffix(".context")
-        if not marker.exists():
-            return ""
-        token = marker.read_bytes().decode("ascii")
+        token = read_regular(marker, 32).decode("ascii")
         return token if len(token) == 32 and all(c in "0123456789abcdef" for c in token) else None
-    except (OSError, UnicodeError):
+    except FileNotFoundError:
+        return ""
+    except (OSError, ValueError, UnicodeError):
         return None
 
 
 def _invalidate(config: dict[str, Any], session_id: str) -> bool:
     try:
         directory = _directory(config)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        host_files.ensure_state_directory(directory)
         path, _ = _paths(config, session_id)
         marker = path.with_suffix(".fence")
-        fd, name = tempfile.mkstemp(prefix=".fence-", dir=directory)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(secrets.token_hex(16).encode("ascii"))
-            os.replace(name, marker)
-        finally:
-            try:
-                os.unlink(name)
-            except FileNotFoundError:
-                pass
+        host_files.atomic_write(marker, secrets.token_hex(16).encode("ascii"))
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
 def _rotate_context(config: dict[str, Any], session_id: str) -> bool:
     try:
         directory = _directory(config)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        host_files.ensure_state_directory(directory)
         path, _ = _paths(config, session_id)
         marker = path.with_suffix(".context")
-        fd, name = tempfile.mkstemp(prefix=".context-", dir=directory)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(secrets.token_hex(16).encode("ascii"))
-            os.replace(name, marker)
-        finally:
-            try:
-                os.unlink(name)
-            except FileNotFoundError:
-                pass
+        host_files.atomic_write(marker, secrets.token_hex(16).encode("ascii"))
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -237,7 +203,10 @@ def _looks_replayed(config: dict[str, Any], session_id: str, turn: str, digest: 
         path, _ = _paths(config, session_id)
         if not path.is_file() or path.stat().st_size > MAX_STATE:
             return False
-        data = json.loads(path.read_bytes())
+        raw = read_regular(path, MAX_STATE)
+        if len(raw) > MAX_STATE:
+            return False
+        data = json.loads(raw)
         active = (data.get("active") if _valid(data) and
                   data.get("config_pin") == _config_current(config) else None)
         return isinstance(active, dict) and active.get("turn") == turn and active.get("request") == digest
@@ -265,15 +234,18 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
             return False, None
         directory = _directory(config)
         if create:
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            host_files.ensure_state_directory(directory)
         path, lock = _paths(config, session_id)
-        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600) if create else os.open(lock, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        fd = host_files.open_regular(lock, os.O_RDWR | (os.O_CREAT if create else 0))
         with os.fdopen(fd, "rb+") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            host_files.lock_file(stream, blocking=False)
             if path.exists():
                 if path.is_symlink() or path.stat().st_size > MAX_STATE:
                     return False, None
-                data = json.loads(path.read_bytes())
+                raw = read_regular(path, MAX_STATE)
+                if len(raw) > MAX_STATE:
+                    return False, None
+                data = json.loads(raw)
                 if not _valid(data):
                     return False, None
             elif create:
@@ -350,13 +322,22 @@ def _was_emitted(card, emitted):
     key = _cache_key(card)
     # Old single-store packets had no per-card owner. They can suppress only
     # project cards, never independently owned global preference identities.
-    return (key in emitted or card.get("scope") != "global_preference" and
+    return (key in emitted or card.get("scope") not in ("global_preference", "named") and
             (card["id"], key[2]) in emitted)
 
 
 def _emitted_keys(values):
     return {tuple(v) for v in values if isinstance(v, list) and len(v) in (2, 3)
             and all(isinstance(x, str) or x is None for x in v)}
+
+
+def _partial_coverage(value):
+    # Host-generated owner counts, not a model claim or corpus-completeness flag.
+    return (isinstance(value, dict) and value.get("complete") is False
+            and type(value.get("selected")) is int and value["selected"] > 0
+            and all(type(value.get(key)) is int and value[key] >= 0
+                    for key in ("attempted", "unavailable", "budget_omitted"))
+            and value["unavailable"] + value["budget_omitted"] > 0)
 
 
 def consume(config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
@@ -386,14 +367,17 @@ def consume(config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
         from hooks import _pack_async_delivery
         cards = []
         seen = _emitted_keys(data["emitted"])
-        case_endpoints = {i for c in ready.get("concerns", []) for i in c["displayed_endpoint_ids"]}
+        case_endpoints = {(c.get("db_id", ready.get("db_id")), i)
+                          for c in ready.get("concerns", []) for i in c["displayed_endpoint_ids"]}
         for card in ready.get("cards", []):
             if isinstance(card, dict) and (not _was_emitted(card, seen) or
-                    card.get("scope") != "global_preference" and card.get("id") in case_endpoints):
+                    card.get("scope") != "global_preference" and
+                    (card.get("db_id", ready.get("db_id")), card.get("id")) in case_endpoints):
                 cards.append(card)
                 seen.add(_cache_key(card))
         packed = _pack_async_delivery(cards, session, turn, ready.get("db_id"),
-                                      concerns=ready.get("concerns"))
+                                      concerns=ready.get("concerns"),
+                                      **({"read_coverage": ready["read_coverage"]} if "read_coverage" in ready else {}))
         cards = packed["cards"]
         for card in cards:
             key = list(_cache_key(card)) if "db_id" in card else [card["id"], delivery_cache_fingerprint(card)]
@@ -410,13 +394,16 @@ def consume(config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
                                  "concern_omitted_count": packed["concern_omitted_count"],
                                  "concern_count": len(packed["concerns"]),
                                  "registered_concern_count": sum(c["expected_row"] is not None for c in packed["concerns"])}
-        outcome = "emitted" if cards else "omitted" if packed["budget_omitted_count"] else "duplicate"
+        outcome = ("emitted" if cards else "omitted" if packed["budget_omitted_count"]
+                   or _partial_coverage(packed.get("read_coverage")) else "duplicate")
         return (outcome, cards, db_id, packed), True
     ok, result = _state(config, session, claim, create=False)
     outcome, cards, db_id = result[:3] if ok else ("busy", [], None)
     response = {"outcome": outcome, "cards": cards}
     if ok and len(result) == 4:
         response.update({key: result[3][key] for key in ("context", "displayed", "budget_omitted_count", "concerns", "concern_omitted_count")})
+        if "read_coverage" in result[3]:
+            response["read_coverage"] = result[3]["read_coverage"]
     if isinstance(db_id, str) and re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", db_id):
         response["db_id"] = db_id
     return response
@@ -441,6 +428,7 @@ def reset(config: dict[str, Any], session_id: str) -> None:
         if was_ended:
             data["generation"] = secrets.token_hex(16)
             data["worker_pid"] = None
+            data["worker_identity"] = None
         data["fence"] = _fence(config, session_id)
         return None, True
     _state(config, session_id, clear)
@@ -485,14 +473,16 @@ def end_session(config: dict[str, Any], session_id: str) -> None:
     # in-flight old worker cannot resurrect cards after SessionEnd.
 
 
-def _alive(pid: Any) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
+def _alive(pid: Any, identity=None) -> bool:
+    # Unknown liveness is not proof that the old worker is gone. The worker's
+    # held file lease remains the authoritative concurrency guard on every host.
+    if host_process.process_alive(pid) is False:
         return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    if identity is not None:
+        current = host_process.process_identity(pid)
+        if current is not None and current != identity:
+            return False  # PID reuse is not the worker we launched.
+    return True
 
 
 def background(config: dict[str, Any], event: dict[str, Any]):
@@ -519,24 +509,27 @@ def background(config: dict[str, Any], event: dict[str, Any]):
                            and (closing or (active.get("turn") == turn and active.get("request") == digest)))
             if not recording_work and not reader_work:
                 return "not_ready", False
-            if _alive(data.get("worker_pid")):
+            if _alive(data.get("worker_pid"), data.get("worker_identity")):
                 return "running", False
             config_path = config.get("_config_path")
             if not isinstance(config_path, Path) or not config_path.is_absolute():
                 return "no_config", False
             try:
                 command = [sys.executable, str(Path(__file__).resolve()), "--serve", "--config", str(config_path), "--session-id", session]
-                if config.get("memory_scope") == "misc":
+                if config.get("memory_scope") in ("misc", "registry"):
                     binding = json.dumps(config["workspace_binding"], ensure_ascii=False, separators=(",", ":"))
                     if len(binding.encode()) > MAX_WORKSPACE_BINDING:
                         return "no_config", False
                     command.extend(["--workspace-binding", binding])
-                child = subprocess.Popen(command,
+                if "frozen_selection" in config:
+                    command.extend(["--selection-cwd", str(config["selection_cwd"])])
+                child = host_process.spawn(command, detached=True,
                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+                                         stderr=subprocess.DEVNULL, close_fds=True)
             except (OSError, ValueError, TypeError, KeyError):
                 return "unavailable", False
             data["worker_pid"] = child.pid
+            data["worker_identity"] = host_process.spawned_identity(child)
             return "launched", True
         ok, result = _state(config, session, launch, create=False)
         if ok and result != "not_ready":
@@ -546,17 +539,20 @@ def background(config: dict[str, Any], event: dict[str, Any]):
 
 
 def _slot(config: dict[str, Any]):
-    """Cross-session cap; flock releases on crash without a stale PID lease."""
+    """Cross-session cap; held file locks release on crash, not by PID guess."""
     directory = _directory(config)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    host_files.ensure_state_directory(directory)
     for number in range(MAX_WORKERS):
         path = directory / f"slot-{number}.lock"
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fd = host_files.open_regular(path, os.O_CREAT | os.O_RDWR)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            host_files.lock_file(fd, blocking=False)
             return fd
         except BlockingIOError:
             os.close(fd)
+        except BaseException:
+            os.close(fd)
+            raise
     return None
 
 
@@ -621,7 +617,10 @@ def _match_routing(config, cue, runtime, reserve, account):
 
 
 def _execute(config: dict[str, Any], cue: str, runtime, reserve,
-             emitted: set[tuple[str, str]], *, routing=None) -> dict[str, Any]:
+             emitted: set[tuple[str, str]], *, routing=None, start_owner=None) -> dict[str, Any]:
+    if "frozen_selection" in config:
+        from registry_reader import execute
+        return execute(config, cue, runtime, reserve, emitted, start_owner=start_owner)
     from hook_recall import collect_reader, _bounded_discovery, _unknown_discovery
     # Private, last-completed diagnostic only. These are POSTPACK candidates,
     # not the native retrieval universe; no summaries, cue or graph paths.
@@ -667,7 +666,7 @@ def _execute(config: dict[str, Any], cue: str, runtime, reserve,
                          for c in project_cards]
         remaining = shared["deadline"] - time.monotonic()
         global_result = {"outcome": "budget", "cards": []}
-        if remaining > 0 and shared["decoded_bytes"] < budget.native_read_bytes:
+        if remaining > 0 and not shared.get("accounting_unknown") and shared["decoded_bytes"] < budget.native_read_bytes:
             global_result = collect_reader(Path(preference_policy.service_config), GLOBAL_PREFERENCE_CUE,
                 config["project_root"], timeout=min(remaining, budget.native_seconds),
                 budget=budget, read_plan=read_plan, store_target=preference_policy, shared_work=shared)
@@ -685,17 +684,27 @@ def _execute(config: dict[str, Any], cue: str, runtime, reserve,
                 selection["global_preference_budget_omitted"] = selection.get("global_preference_budget_omitted", 0) + 1
         native = {**native, "cards": combined,
                   "outcome": "ok" if combined else native.get("outcome", "unavailable"),
-                  "native_work": {"decoded_bytes": shared["decoded_bytes"],
+                  "native_work": {"decoded_bytes": None if shared.get("accounting_unknown") else shared["decoded_bytes"],
                       "read_allowance_bytes": budget.native_read_bytes,
-                      "read_allowance_exhausted": shared["decoded_bytes"] >= budget.native_read_bytes}}
+                      "read_allowance_exhausted": bool(shared.get("accounting_unknown")) or shared["decoded_bytes"] >= budget.native_read_bytes,
+                      **({"known_decoded_bytes": shared["decoded_bytes"], "accounting_unknown": True}
+                         if shared.get("accounting_unknown") else {})}}
     if not isinstance(native, dict):
         return done({"outcome": "unavailable", "cards": [], "provider_attempt": False, **routing_meta})
     selection["discovery"] = _bounded_discovery(native.get("discovery"))
     work = native.get("native_work")
-    if (isinstance(work, dict) and set(work) == {"decoded_bytes", "read_allowance_bytes", "read_allowance_exhausted"}
-            and all(type(work[k]) is int and 0 <= work[k] <= 1_000_000 for k in ("decoded_bytes", "read_allowance_bytes"))
-            and type(work["read_allowance_exhausted"]) is bool):
-        selection["native_work"] = dict(work)
+    if isinstance(work, dict):
+        base = {"decoded_bytes", "read_allowance_bytes", "read_allowance_exhausted"}
+        known = (set(work) == base and type(work.get("decoded_bytes")) is int
+                 and 0 <= work["decoded_bytes"] <= 1_000_000)
+        unknown = (set(work) == base | {"known_decoded_bytes", "accounting_unknown"}
+                   and work.get("decoded_bytes") is None and work.get("accounting_unknown") is True
+                   and type(work.get("known_decoded_bytes")) is int
+                   and 0 <= work["known_decoded_bytes"] <= 1_000_000)
+        if ((known or unknown) and type(work.get("read_allowance_bytes")) is int
+                and 0 <= work["read_allowance_bytes"] <= 1_000_000
+                and type(work.get("read_allowance_exhausted")) is bool):
+            selection["native_work"] = dict(work)
     selection["requested_effort"] = budget.effort
     if native.get("concern_lookup") in ("unknown", "bounded_pages_complete"):
         selection["concern_lookup"] = native["concern_lookup"]
@@ -857,10 +866,10 @@ def _selection_diagnostic(result, origin, publish_current):
         if isinstance(result.get("outcome"), str):
             record["outcome"] = _short(result["outcome"], 64)
         required = {"pool_stage", "pool", "stage", "selected_ids"}
-        counts = {"postpack_count", "invalid_count", "seen_count", "prompt_omitted_count", "path_omitted_count", "entry_omitted_count", "global_preference_budget_omitted"}
-        labels = {"native_outcome", "selector_reason", "concern_lookup", "requested_effort", "global_preference_outcome"}
+        counts = {"postpack_count", "invalid_count", "seen_count", "prompt_omitted_count", "path_omitted_count", "entry_omitted_count", "global_preference_budget_omitted", "content_omitted_count", "owner_outcomes_omitted"}
+        labels = {"native_outcome", "selector_reason", "concern_lookup", "requested_effort", "global_preference_outcome", "routing_mode", "concern_mode"}
         if (not isinstance(details, dict) or not required <= details.keys()
-                or details.keys() - required - counts - labels - {"postpack_truncated", "discovery", "native_work", "routing_discovery", "global_preference_discovery", "selected_keys"}
+                or details.keys() - required - counts - labels - {"postpack_truncated", "discovery", "native_work", "routing_discovery", "global_preference_discovery", "selected_keys", "owners"}
                 or details["pool_stage"] != "postpack_unseen"
                 or details["stage"] not in ("unknown", "routing", "native", "filter", "selector")):
             raise ValueError("invalid diagnostic shape")
@@ -895,6 +904,20 @@ def _selection_diagnostic(result, origin, publish_current):
                     or len({tuple(k) for k in keys}) != len(keys)
                     or not {tuple(k) for k in keys} <= {(c.get("db_id"), c["id"]) for c in pool or []}):
                 raise ValueError("invalid scoped selection")
+        if "owners" in complete:
+            owners = complete["owners"]
+            if not isinstance(owners, list) or any(
+                    not isinstance(owner, dict) or set(owner) != {"name", "db_id", "outcome"}
+                    or not isinstance(owner["name"], str) or len(owner["name"].encode()) > 128
+                    or not isinstance(owner["outcome"], str) or len(owner["outcome"].encode()) > 64
+                    or owner["db_id"] is not None and (not isinstance(owner["db_id"], str)
+                        or not re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", owner["db_id"]))
+                    for owner in owners):
+                raise ValueError("invalid owner outcomes")
+            complete["owners"] = list(owners)
+            while complete["owners"] and len(json.dumps(complete, ensure_ascii=False, separators=(",", ":")).encode()) > MAX_SELECTION_BYTES:
+                complete["owners"].pop()
+                complete["owner_outcomes_omitted"] = complete.get("owner_outcomes_omitted", 0) + 1
         if "routing_discovery" in complete:
             from hook_recall import _bounded_routing_discovery
             complete["routing_discovery"] = _bounded_routing_discovery(complete["routing_discovery"])
@@ -1005,6 +1028,48 @@ def _stewardship_reserve(config, session_id, key, expected=None):
     return bool(ok and admitted)
 
 
+def _registry_read_start(config, session_id):
+    """Rotate the first reader owner without multiplying any work allowance."""
+    if "frozen_selection" not in config:
+        return None
+    try:
+        from registry_runtime import selection
+        stores = selection(config).readable
+        if not stores:
+            return None
+        keys = [store.db_id or "project:" + store.name for store in stores]
+        def advance(data):
+            previous = data.get("read_cursor")
+            index = (keys.index(previous) + 1) % len(keys) if previous in keys else 0
+            data["read_cursor"] = keys[index]
+            return stores[index].name, True
+        ok, name = _state(config, session_id, advance, create=False)
+        return name if ok else None
+    except (ValueError, OSError, TypeError, KeyError):
+        return None
+
+
+def _maintenance_config(config, session_id):
+    if "frozen_selection" not in config:
+        return config
+    try:
+        from registry_runtime import selection, config_for_store
+        selected = selection(config)
+        stores = selected.maintainable
+        if not stores:
+            return None
+        keys = [store.db_id or "project:" + store.name for store in stores]
+        def advance(data):
+            prior = data.get("maintenance_cursor")
+            index = (keys.index(prior) + 1) % len(keys) if prior in keys else 0
+            data["maintenance_cursor"] = keys[index]
+            return index, True
+        ok, index = _state(config, session_id, advance, create=False)
+        return config_for_store(config, stores[index]) if ok else None
+    except (ValueError, OSError, TypeError, KeyError):
+        return None
+
+
 def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle_seconds: float = IDLE_SECONDS) -> None:
     """Worker loop. Tests inject a fake runtime; production imports it lazily."""
     if not isinstance(session_id, str) or not ID.fullmatch(session_id):
@@ -1012,9 +1077,13 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
     path, _ = _paths(config, session_id)
     lease = path.with_suffix(".worker.lock")
     try:
-        fd = os.open(lease, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (OSError, BlockingIOError):
+        fd = host_files.open_regular(lease, os.O_CREAT | os.O_RDWR)
+        try:
+            host_files.lock_file(fd, blocking=False)
+        except BaseException:
+            os.close(fd)
+            raise
+    except (OSError, ValueError):
         return
     slot = None
     runtime = None
@@ -1102,17 +1171,18 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                         if job == "end" and recording_jobs.has_work(config, session_id):
                             time.sleep(.05)
                             continue
-                if time.monotonic() >= next_stewardship and config.get("tag_stewardship") is True:
+                if time.monotonic() >= next_stewardship and ("frozen_selection" in config or config.get("tag_stewardship") is True):
                     import stewardship
                     next_stewardship = time.monotonic() + resolve(config).native_seconds
                     maintenance_fence = _stewardship_snapshot(config, session_id)
-                    if stewardship.enabled(config) and maintenance_fence is not None:
+                    maintenance_config = _maintenance_config(config, session_id) if maintenance_fence is not None else None
+                    if maintenance_config is not None and stewardship.enabled(maintenance_config) and maintenance_fence is not None:
                         if runtime is None:
                             scratch = _directory(config) / ("scratch-" + hashlib.sha256(session_id.encode()).hexdigest()[:16])
                             runtime = runtime_factory(config, scratch)
                         # Opportunistic existing lifecycle only; no daemon and
                         # maintenance does not extend the worker's idle lifetime.
-                        stewardship.step(config, session_id, runtime,
+                        stewardship.step(maintenance_config, session_id, runtime,
                             lambda key: _stewardship_reserve(config, session_id, key, maintenance_fence),
                             lambda key, result: _recording_account(config, session_id, key, result),
                             allowed=lambda: _stewardship_idle(config, session_id, maintenance_fence))
@@ -1182,14 +1252,16 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                 ok, settled = _state(config, session_id, settle, create=False, allow_stale=True)
                 return bool(ok and settled)
             routing = None
-            if config.get("recording_mode") == "automatic":
+            if config.get("recording_mode") == "automatic" and "frozen_selection" not in config:
                 if _baseline_routing(session_id, pending):
                     routing = lambda: {"hints": [], "mode": "baseline_exploration", "stop": False}
                 else:
                     routing = lambda: _match_routing(config, cue, runtime,
                                                      lambda: reserve(stage="routing"), account_routing)
             try:
-                result = _execute(config, cue, runtime, reserve, emitted, **({"routing": routing} if routing else {}))
+                result = _execute(config, cue, runtime, reserve, emitted,
+                                  **({"start_owner": _registry_read_start(config, session_id)} if "frozen_selection" in config else {}),
+                                  **({"routing": routing} if routing else {}))
             except Exception:
                 result = {"outcome": "unavailable", "cards": [], "provider_attempt": False}
             usage = _usage(result) if result.get("provider_attempt") else None
@@ -1264,15 +1336,21 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                               **pending, "fence": marker}
                     data["last_selection"] = _selection_diagnostic(result, origin, publish_current)
                     changed = True
-                if publish_current and result.get("outcome") == "selected" and usage is not None:
-                    cards = result.get("cards", [])
-                    if isinstance(cards, list) and cards:
+                selected = result.get("outcome") == "selected" and usage is not None
+                partial = _partial_coverage(result.get("read_coverage"))
+                if publish_current and (selected or partial):
+                    # Native failure/omission may have no candidates and need no
+                    # provider call. Deliver its bounded coverage notice without
+                    # inventing selected cards, provider usage or an empty store.
+                    cards = result.get("cards", []) if selected else []
+                    if isinstance(cards, list) and (cards or partial):
                         from hooks import _valid_card
                         if (all(_valid_card(card) for card in cards)
                                 and len({(card.get("db_id"), card["id"]) for card in cards}) == len(cards)):
                             db_id = result.get("db_id")
                             data["ready"] = {**pending, "cards": cards, "fence": marker,
-                                             "concerns": result.get("concerns", []),
+                                             "concerns": result.get("concerns", []) if cards else [],
+                                             **({"read_coverage": result["read_coverage"]} if "read_coverage" in result else {}),
                                              **({"db_id": db_id} if isinstance(db_id, str)
                                                 and re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", db_id)
                                                 else {})}
@@ -1301,6 +1379,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
         def exited(data):
             if data.get("worker_pid") == os.getpid() or handoff:
                 data["worker_pid"] = None
+                data["worker_identity"] = None
                 return None, True
             return None, False
         _state(config, session_id, exited, create=False)
@@ -1320,6 +1399,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--workspace-binding")
+    parser.add_argument("--selection-cwd", type=Path)
     args = parser.parse_args(argv)
     if not args.serve:
         return 2
@@ -1333,8 +1413,15 @@ def main(argv: list[str] | None = None) -> int:
             binding = decode_json(args.workspace_binding.encode())
             if not isinstance(binding, dict):
                 return 2
-        config = _config(args.config, workspace_binding=binding) if binding is not None else _config(args.config)
-        if args.workspace_binding is not None and config.get("memory_scope") != "misc":
+        kwargs = {"workspace_binding": binding} if binding is not None else {}
+        if args.selection_cwd is not None:
+            if not args.selection_cwd.is_absolute():
+                return 2
+            kwargs["cwd"] = args.selection_cwd
+        config = _config(args.config, **kwargs)
+        if args.workspace_binding is not None and config.get("memory_scope") not in ("misc", "registry"):
+            return 2
+        if args.selection_cwd is not None and "frozen_selection" not in config:
             return 2
         serve(config, args.session_id)
     except Exception:

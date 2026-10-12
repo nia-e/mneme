@@ -2216,6 +2216,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mneme-core",
+ "mneme-store-path",
  "tokio",
  "ulid",
 ]
@@ -2365,6 +2366,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "ulid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2456,6 +2458,7 @@ dependencies = [
  "libc",
  "log",
  "miette",
+ "mneme-store-path",
  "ndarray 0.15.6",
  "num-traits",
  "ordered-float",

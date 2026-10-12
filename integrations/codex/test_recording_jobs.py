@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import copy
-import fcntl
+import host_files
 import hashlib
 import json
 from pathlib import Path
@@ -49,11 +49,11 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         reader_worker.notice(config, self.event(), False)
         event = {"hook_event_name": "SessionEnd", "cwd": str(self.root), "session_id": SESSION}
         with patch.object(hooks, "_reader_worker", return_value=reader_worker), \
-             patch("reader_worker.subprocess.Popen", side_effect=OSError("fixture spawn failure")) as spawn, \
+             patch("reader_worker.host_process.spawn", side_effect=OSError("fixture spawn failure")) as spawn, \
              patch("reader_worker.serve", side_effect=AssertionError("inline assessment")):
             self.assertEqual(hooks.handle_event(event, config), {})
         spawn.assert_called_once()
-        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
+        self.assertTrue(spawn.call_args.kwargs["detached"])
         self.assertEqual(spawn.call_args.kwargs["stdin"], reader_worker.subprocess.DEVNULL)
         self.assertEqual(spawn.call_args.kwargs["stdout"], reader_worker.subprocess.DEVNULL)
         self.assertEqual(spawn.call_args.kwargs["stderr"], reader_worker.subprocess.DEVNULL)
@@ -64,7 +64,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         # A later bounded wake can detach the same retained work, without a new
         # allowance or resurrecting reader cards after the session ended.
         with patch.object(hooks, "_reader_worker", return_value=reader_worker), \
-             patch("reader_worker.subprocess.Popen") as spawn, patch("reader_worker._alive", return_value=False):
+             patch("reader_worker.host_process.spawn") as spawn, patch("reader_worker._alive", return_value=False):
             spawn.return_value.pid = 12345
             self.assertEqual(hooks.handle_event(event, config), {})
         spawn.assert_called_once()
@@ -195,7 +195,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
 
     def interrupt_with_queue_lock(self, turn="turn-1"):
         with (jobs._directory(self.config) / ".lock").open("r+") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            host_files.lock_file(stream, blocking=False)
             started = REAL_MONOTONIC()
             jobs.close_turn(self.config, SESSION, turn, cancel=True)
             return {"elapsed": REAL_MONOTONIC() - started,
@@ -1371,7 +1371,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         self.begin()
         lock_path = jobs._directory(self.config) / ".lock"
         with lock_path.open("r+") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            host_files.lock_file(stream, blocking=False)
             started = REAL_MONOTONIC()
             result = jobs.drain_status(self.config, [SESSION])
             elapsed = REAL_MONOTONIC() - started
@@ -1685,7 +1685,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         self.startup()
         lock_path = jobs._directory(self.config) / ".lock"
         with lock_path.open("r+") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            host_files.lock_file(stream, blocking=False)
             started = REAL_MONOTONIC()
             result = jobs.export_receipts(self.config, [SESSION])
             elapsed = REAL_MONOTONIC() - started

@@ -32,11 +32,24 @@ enum FixtureMutation {
     WrongNodeAccess,
 }
 
+#[cfg(not(windows))]
 fn fixture_path(label: &str) -> PathBuf {
     let parent = fs::canonicalize(std::env::temp_dir()).expect("canonical temp directory");
     parent.join(format!("mneme-existing-open-{label}-{}.db", Ulid::new()))
 }
 
+#[cfg(windows)]
+fn fixture_path(label: &str) -> PathBuf {
+    let root = mneme_store_path::windows::Directory::create(
+        &std::env::temp_dir().join(format!("mneme-existing-open-{label}-{}", Ulid::new())),
+    )
+    .expect("create protected Windows opening fixture directory");
+    root.require_private_children()
+        .expect("SQLite fixture children must inherit private ACLs");
+    root.path().join("memory.db")
+}
+
+#[cfg(not(windows))]
 fn remove_fixture(path: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let mut name = path.as_os_str().to_os_string();
@@ -45,6 +58,25 @@ fn remove_fixture(path: &Path) {
     }
     if let Ok(lock) = mneme_store_path::store_lock_path(path) {
         let _ = fs::remove_file(lock);
+    }
+}
+
+#[cfg(windows)]
+fn remove_fixture(path: &Path) {
+    // Existing tests also call this immediately after allocating their path.
+    // Keep that pristine private parent for creation; remove it only once an
+    // actual fixture artifact has been removed. Never erase unknown residue.
+    let mut removed_artifact = false;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        removed_artifact |= fs::remove_file(PathBuf::from(name)).is_ok();
+    }
+    if let Ok(lock) = mneme_store_path::store_lock_path(path) {
+        removed_artifact |= fs::remove_file(lock).is_ok();
+    }
+    if removed_artifact {
+        let _ = fs::remove_dir(path.parent().expect("isolated Windows fixture parent"));
     }
 }
 
@@ -1452,4 +1484,309 @@ fn dropped_feedback_epoch_activation_transaction_restores_every_ledger_row() {
 
     drop(store);
     remove_fixture(&path);
+}
+
+// These exercise the actual Windows filesystem/admission/runtime composition,
+// not a cfg-forced Unix implementation. Run on local NTFS; cross-checking this
+// module alone establishes compilation, not ACL, sharing, or durability behavior.
+#[cfg(windows)]
+mod windows_native {
+    use std::ffi::{OsStr, OsString};
+
+    use mneme_core::ports::{StatusFilter, VectorIndex};
+    use mneme_core::{BodyRef, Node, NodeId, NodeStatus, Provenance};
+    use mneme_store_path::windows::{Directory, rename_no_replace};
+
+    use super::*;
+    use crate::CozoStore;
+
+    struct Fixture {
+        root: Directory,
+        target: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = Directory::create(
+                &std::env::temp_dir().join(format!("mneme-cozo-windows-{}", Ulid::new())),
+            )
+            .expect("create private local-NTFS fixture directory");
+            root.require_private_children()
+                .expect("SQLite children must inherit private ACLs");
+            let target = root.path().join("memory.db");
+            Self { root, target }
+        }
+
+        fn inventory(&self) -> std::collections::BTreeSet<OsString> {
+            fs::read_dir(self.root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect()
+        }
+
+        fn create_closed(&self) -> Ulid {
+            let lease = Arc::new(StoreLease::acquire(&self.target).unwrap());
+            let store = CozoStore::open_persistent(&self.target, 4, lease)
+                .expect("create actual current persistent store");
+            let id = store.db_id();
+            store.prepare_for_file_move().unwrap();
+            drop(store);
+            assert_family_absent(&self.target, false);
+            id
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(self.root.path());
+        }
+    }
+
+    fn assert_family_absent(path: &Path, include_main: bool) {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            if suffix.is_empty() && !include_main {
+                continue;
+            }
+            let mut member = path.as_os_str().to_os_string();
+            member.push(suffix);
+            assert_eq!(
+                fs::symlink_metadata(PathBuf::from(member))
+                    .expect_err("SQLite family member must be absent")
+                    .kind(),
+                std::io::ErrorKind::NotFound,
+                "unexpected SQLite family state for {suffix:?}"
+            );
+        }
+    }
+
+    fn node(id: u128, summary: &str) -> Node {
+        Node::try_new(
+            NodeId(Ulid::from(id)),
+            summary,
+            BodyRef::new("inline://windows-open-test").unwrap(),
+            ["windows", "round-trip"],
+            Provenance::derived_empty(),
+            0.75,
+            0.5,
+            NodeStatus::Active,
+            1,
+        )
+        .unwrap()
+    }
+
+    async fn assert_readable(store: &CozoStore, expected: &Node, vector: &[f32]) {
+        let stored = store.get_node(expected.id()).await.unwrap().unwrap();
+        assert_eq!(stored.summary(), expected.summary());
+        let hits = store.ann(vector, 1, StatusFilter::ACTIVE).await.unwrap();
+        assert_eq!(hits.first().map(|hit| hit.id), Some(expected.id()));
+    }
+
+    #[tokio::test]
+    async fn materialized_current_reopens_and_preserves_ordinary_graph_operations() {
+        let fixture = Fixture::new();
+        let source = crate::MemStore::new(4);
+        let imported = node(1, "imported into the Windows store");
+        source.put_node(&imported).await.unwrap();
+        source
+            .upsert(imported.id(), &[1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        CozoStore::materialize_fresh_current(&fixture.target, Ulid::new(), &source)
+            .await
+            .expect("publish and close current Windows store");
+        assert_family_absent(&fixture.target, false);
+
+        let lease = Arc::new(StoreLease::acquire(&fixture.target).unwrap());
+        let store = CozoStore::open_existing_persistent(&fixture.target, 99, lease)
+            .expect("consume real Windows current-admission permit");
+        assert_eq!(store.db_id(), source.db_id());
+        assert_eq!(store.dim, 4, "the persisted dimension owns admission");
+        assert_readable(&store, &imported, &[1.0, 0.0, 0.0, 0.0]).await;
+        let added = node(2, "written after Windows admission");
+        store.put_node(&added).await.unwrap();
+        store
+            .upsert(added.id(), &[0.0, 1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        assert_readable(&store, &added, &[0.0, 1.0, 0.0, 0.0]).await;
+        assert_eq!(
+            StoreLease::acquire(&fixture.target).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        store.prepare_for_file_move().unwrap();
+        drop(store);
+        assert_family_absent(&fixture.target, false);
+
+        let lease = StoreLease::acquire(&fixture.target).expect("release after runtime close");
+        let reopened = CozoStore::open_existing_current(&fixture.target, lease).unwrap();
+        assert_eq!(reopened.db_id(), source.db_id());
+        assert_readable(&reopened, &added, &[0.0, 1.0, 0.0, 0.0]).await;
+        reopened.prepare_for_file_move().unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_creation_reopens_and_shared_lease_outlives_each_handle() {
+        let fixture = Fixture::new();
+        let lease = Arc::new(StoreLease::acquire(&fixture.target).unwrap());
+        let created = CozoStore::open_persistent(&fixture.target, 4, Arc::clone(&lease))
+            .expect("ordinary Windows creation");
+        let id = created.db_id();
+        let value = node(3, "created through the persistent router");
+        created.put_node(&value).await.unwrap();
+        created
+            .upsert(value.id(), &[1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        created.prepare_for_file_move().unwrap();
+        drop(created);
+        assert_eq!(Arc::strong_count(&lease), 1);
+        assert_eq!(
+            StoreLease::acquire(&fixture.target).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the caller still owns the lease between sequential opens"
+        );
+
+        let reopened = CozoStore::open_existing_persistent(&fixture.target, 99, Arc::clone(&lease))
+            .expect("ordinary creation must produce a current-admissible catalog");
+        assert_eq!(reopened.db_id(), id);
+        assert_readable(&reopened, &value, &[1.0, 0.0, 0.0, 0.0]).await;
+        drop(lease);
+        assert_eq!(
+            StoreLease::acquire(&fixture.target).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the store must retain the caller's exact lease"
+        );
+        reopened.prepare_for_file_move().unwrap();
+        drop(reopened);
+        assert_family_absent(&fixture.target, false);
+        drop(StoreLease::acquire(&fixture.target).expect("final handle releases ownership"));
+    }
+
+    #[test]
+    fn existing_only_absence_creates_neither_parent_nor_sqlite_family() {
+        let fixture = Fixture::new();
+        let missing_parent = fixture.root.path().join("absent-parent");
+        let missing_target = missing_parent.join("memory.db");
+        let before = fixture.inventory();
+        assert!(StoreLease::acquire(&missing_target).is_err());
+        assert_eq!(fixture.inventory(), before);
+        assert!(!missing_parent.exists());
+
+        let lease = Arc::new(StoreLease::acquire(&fixture.target).unwrap());
+        let before = fixture.inventory(); // The adjacent lease is deliberate, not a database.
+        let error = expect_refusal(
+            CozoStore::open_existing_persistent(&fixture.target, 4, Arc::clone(&lease)),
+            "existing-only admission must not create an absent Windows store",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("existing_store_admission_failed")
+        );
+        assert_eq!(Arc::strong_count(&lease), 1);
+        assert_eq!(fixture.inventory(), before);
+        assert_family_absent(&fixture.target, true);
+        assert_eq!(
+            StoreLease::acquire(&fixture.target).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "refusal must not release the caller's retained authority"
+        );
+    }
+
+    #[test]
+    fn hardlink_added_after_lease_refuses_before_database_mutation() {
+        let fixture = Fixture::new();
+        fixture.create_closed();
+        let before = fs::read(&fixture.target).unwrap();
+        let lease = Arc::new(StoreLease::acquire(&fixture.target).unwrap());
+        let alias = fixture.root.path().join("alias.db");
+        fs::hard_link(&fixture.target, &alias).expect("unprivileged NTFS hardlink fixture");
+        let inventory = fixture.inventory();
+        assert!(StoreLease::acquire(&alias).is_err());
+        let error = expect_refusal(
+            CozoStore::open_existing_persistent(&fixture.target, 4, Arc::clone(&lease)),
+            "new hardlinks must invalidate retained open authority",
+        );
+        assert!(error.to_string().contains("store_source_changed"));
+        assert_eq!(fs::read(&fixture.target).unwrap(), before);
+        assert_eq!(fixture.inventory(), inventory);
+        assert_family_absent(&fixture.target, false);
+        assert_eq!(Arc::strong_count(&lease), 1);
+    }
+
+    #[test]
+    fn directory_at_database_name_refuses_without_writing_children() {
+        let fixture = Fixture::new();
+        let lease = Arc::new(StoreLease::acquire(&fixture.target).unwrap());
+        let directory = fixture
+            .root
+            .create_directory(OsStr::new("memory.db"))
+            .unwrap();
+        let before = fixture.inventory();
+        let error = expect_refusal(
+            CozoStore::open_existing_persistent(&fixture.target, 4, Arc::clone(&lease)),
+            "a directory cannot become a Windows database",
+        );
+        assert!(error.to_string().contains("not a regular file"));
+        assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
+        assert_eq!(fixture.inventory(), before);
+        assert_family_absent(&fixture.target, false);
+        assert_eq!(Arc::strong_count(&lease), 1);
+    }
+
+    #[test]
+    fn replaced_lock_identity_refuses_without_mutating_current_store() {
+        let fixture = Fixture::new();
+        fixture.create_closed();
+        let before = fs::read(&fixture.target).unwrap();
+        let lease = Arc::new(StoreLease::acquire(&fixture.target).unwrap());
+        let lock = mneme_store_path::store_lock_path(&fixture.target).unwrap();
+        let old = fixture
+            .root
+            .open_file(lock.file_name().unwrap(), true)
+            .unwrap();
+        rename_no_replace(&old, &fixture.root, OsStr::new("retained-old-lock")).unwrap();
+        let replacement = fixture.root.create_file(lock.file_name().unwrap()).unwrap();
+        let inventory = fixture.inventory();
+        let error = expect_refusal(
+            CozoStore::open_existing_persistent(&fixture.target, 4, Arc::clone(&lease)),
+            "replaced lock identity must invalidate open authority",
+        );
+        assert!(error.to_string().contains("store_source_changed"));
+        assert_eq!(fs::read(&fixture.target).unwrap(), before);
+        assert_eq!(fixture.inventory(), inventory);
+        assert_family_absent(&fixture.target, false);
+        assert_eq!(Arc::strong_count(&lease), 1);
+        drop((replacement, old, lease));
+    }
+
+    #[test]
+    fn reparse_database_refuses_without_touching_its_target() {
+        let fixture = Fixture::new();
+        fixture.create_closed();
+        let actual = fixture.root.path().join("actual.db");
+        fs::rename(&fixture.target, &actual).unwrap();
+        let before = fs::read(&actual).unwrap();
+        let lease = Arc::new(StoreLease::acquire(&fixture.target).unwrap());
+        if let Err(error) = std::os::windows::fs::symlink_file(&actual, &fixture.target) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!(
+                    "SKIPPED reparse fixture: Developer Mode or symlink privilege unavailable"
+                );
+                return;
+            }
+            panic!("cannot construct Windows reparse fixture: {error}");
+        }
+        let inventory = fixture.inventory();
+        expect_refusal(
+            CozoStore::open_existing_persistent(&fixture.target, 4, Arc::clone(&lease)),
+            "a reparse database name must refuse",
+        );
+        assert!(StoreLease::acquire(&fixture.target).is_err());
+        assert_eq!(fs::read(&actual).unwrap(), before);
+        assert_eq!(fixture.inventory(), inventory);
+        assert_family_absent(&fixture.target, false);
+        assert_family_absent(&actual, false);
+        assert_eq!(Arc::strong_count(&lease), 1);
+    }
 }

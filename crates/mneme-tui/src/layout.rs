@@ -1,6 +1,8 @@
 //! Bounded loaded-link groups and a settled, warm-started display composition.
 //! Repaints, selection, activity and edge lenses never run the solver.
 
+mod districts;
+
 use crate::clusters::{DisplayGroups, DisplayLink, DisplayTopology};
 use crate::model::Graph;
 
@@ -61,6 +63,14 @@ pub(crate) struct LayoutCache {
 impl LayoutCache {
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Deliberate local recomposition; late topology never moves an established
+    /// field by itself. Retain group identity, but drop warm-start geometry.
+    pub(crate) fn recompose(&mut self) {
+        self.field = None;
+        self.world = None;
+        self.camera = Camera::default();
     }
 
     fn update_groups(&mut self, topology: DisplayTopology) {
@@ -488,61 +498,14 @@ fn anchors(key: &LayoutKey, groups: &DisplayGroups) -> Vec<Point> {
     }
     units.sort_by_key(|unit| unit.0);
     let mut points = vec![center; key.ids.len()];
-    let columns = ((units.len().max(1) as f64 * width.max(1.0) / height.max(1.0))
-        .sqrt()
-        .ceil() as usize)
-        .clamp(1, units.len().max(1));
-    let rows = units.len().max(1).div_ceil(columns);
-    let step_x = width * 0.88 / columns as f64;
-    let step_y = height * 0.88 / rows as f64;
+    let centers = districts::centers(key, &units);
     let focus_unit = key.focus.and_then(|focus| {
         units
             .iter()
             .position(|(_, members)| members.contains(&focus))
     });
     for (unit_index, (_, members)) in units.iter().enumerate() {
-        let row = unit_index / columns;
-        let row_count = (units.len() - row * columns).min(columns);
-        let origin = if units.len() > 6 {
-            if focus_unit == Some(unit_index) {
-                center
-            } else {
-                Point {
-                    x: center.x + (unit_index % columns) as f64 * step_x
-                        - (row_count - 1) as f64 * step_x * 0.5
-                        + (fraction(units[unit_index].0) - 0.5) * step_x * 0.32,
-                    y: center.y + row as f64 * step_y - (rows - 1) as f64 * step_y * 0.5
-                        + (fraction(units[unit_index].0 ^ 0x9e3779b97f4a7c15) - 0.5)
-                            * step_y
-                            * 0.32,
-                }
-            }
-        } else if let Some(focused) = focus_unit {
-            if focused == unit_index || units.len() == 1 {
-                center
-            } else {
-                let index = unit_index - usize::from(unit_index > focused);
-                let angle = std::f64::consts::TAU * index as f64 / (units.len() - 1) as f64
-                    + if width < height {
-                        std::f64::consts::FRAC_PI_2
-                    } else {
-                        0.0
-                    };
-                let spread = if units.len() == 2 { 0.24 } else { 0.34 };
-                Point {
-                    x: center.x + angle.cos() * width * spread,
-                    y: center.y + angle.sin() * height * spread,
-                }
-            }
-        } else {
-            Point {
-                x: center.x + (unit_index % columns) as f64 * step_x
-                    - (row_count - 1) as f64 * step_x * 0.5
-                    + (fraction(units[unit_index].0) - 0.5) * step_x * 0.32,
-                y: center.y + row as f64 * step_y - (rows - 1) as f64 * step_y * 0.5
-                    + (fraction(units[unit_index].0 ^ 0x9e3779b97f4a7c15) - 0.5) * step_y * 0.32,
-            }
-        };
+        let origin = centers[unit_index];
         let radius =
             spacing(key.width, key.height, key.ids.len()) * (members.len() as f64).sqrt() * 0.27;
         for &index in members {
@@ -581,11 +544,9 @@ fn anchors(key: &LayoutKey, groups: &DisplayGroups) -> Vec<Point> {
             y: center.y,
         };
     }
-    let average = if key.focus.is_some() {
-        center
-    } else {
-        mean(points.iter().copied())
-    };
+    // The quotient layout owns the origin. A node-weighted recenter here
+    // would turn a large peripheral district into the hub again.
+    let average = center;
     let margin_x = 3.0_f64.min(width * 0.2);
     let margin_y = 3.0_f64.min(height * 0.2);
     let extent_x = points
@@ -799,32 +760,6 @@ fn settle(
                 let scale = (movement_cap / dx.hypot(dy).max(f64::EPSILON)).min(1.0);
                 point.x = origin.x + dx * scale;
                 point.y = origin.y + dy * scale;
-            }
-        }
-    }
-    if key.focus.is_none() {
-        // Balance initial composition without stretching distances. Explicit
-        // focus stays centered; shift only the other nodes by a common vector.
-        let average = mean(
-            points
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| key.focus != Some(*i))
-                .map(|(_, p)| *p),
-        );
-        let mut dx = center.x - average.x;
-        let mut dy = center.y - average.y;
-        for (i, point) in points.iter().enumerate() {
-            if key.focus == Some(i) {
-                continue;
-            }
-            dx = dx.clamp(margin_x - point.x, width - margin_x - point.x);
-            dy = dy.clamp(margin_y - point.y, height - margin_y - point.y);
-        }
-        for (i, point) in points.iter_mut().enumerate() {
-            if key.focus != Some(i) {
-                point.x += dx;
-                point.y += dy;
             }
         }
     }
@@ -1214,6 +1149,77 @@ mod tests {
             .collect(),
             ..Graph::default()
         }
+    }
+
+    #[test]
+    fn explicit_recompose_applies_late_links_once_and_keeps_group_identity() {
+        let mut graph = pockets();
+        let links = std::mem::take(&mut graph.edges);
+        let mut cache = LayoutCache::default();
+        let initial = cache.world_positions(&graph);
+        graph.edges = links;
+        assert_eq!(cache.world_positions(&graph), initial);
+        let groups = cache.groups(&graph);
+        cache.camera.center = Some(Point {
+            x: -100.0,
+            y: -100.0,
+        });
+        cache.recompose();
+        assert_eq!(cache.camera.center, None);
+        let recomposed = cache.world_positions(&graph);
+        assert_ne!(recomposed, initial);
+        assert_eq!(cache.groups(&graph), groups);
+        assert_eq!(cache.world_positions(&graph), recomposed);
+        assert_eq!(cache.solves, 2);
+    }
+
+    #[test]
+    fn settling_does_not_recenter_the_world_on_a_large_peripheral_district() {
+        use crate::clusters::{DisplayGroup, DisplayGroupId};
+        let graph = Graph {
+            nodes: (0..46)
+                .map(|i| Node {
+                    id: format!("node-{i:03}"),
+                    ..Node::default()
+                })
+                .collect(),
+            edges: [(40, 0), (40, 42), (40, 44)]
+                .into_iter()
+                .map(|(a, b)| Edge {
+                    from: format!("node-{a:03}"),
+                    to: format!("node-{b:03}"),
+                    weight: 0.4,
+                    kind: "supports".into(),
+                })
+                .collect(),
+            ..Graph::default()
+        };
+        let groups = DisplayGroups {
+            groups: [(0, 40), (40, 42), (42, 44), (44, 46)]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (a, b))| DisplayGroup {
+                    id: DisplayGroupId(i as u64),
+                    members: graph.nodes[a..b].iter().map(|n| n.id.clone()).collect(),
+                    label: None,
+                })
+                .collect(),
+            lookup: Default::default(),
+        };
+        let points = settle(&LayoutKey::new(&graph, 240, 80), &groups, None);
+        let distances: Vec<_> = [(0, 40), (40, 42), (42, 44), (44, 46)]
+            .into_iter()
+            .map(|(a, b)| {
+                let center = mean(points[a..b].iter().copied());
+                (center.x - 120.0).hypot(center.y - 80.0)
+            })
+            .collect();
+        assert!(
+            distances[1] < distances[0]
+                && distances[1] < distances[2]
+                && distances[1] < distances[3],
+            "district distances from center: {distances:?}"
+        );
     }
 
     #[test]

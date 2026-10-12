@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, c_void};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -53,6 +55,13 @@ use crate::runtime::relation::{
 };
 use crate::storage::{Storage, StoreTx, park_before_deadline, read_sharded_before_deadline};
 use crate::utils::swap_option_result;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use self::windows::*;
+#[cfg(windows)]
+pub use self::windows::{ManagedSqliteClosedMainFileIdentityV1, ManagedSqliteClosedResidualMetadataV1};
 
 pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 250;
 
@@ -238,17 +247,20 @@ const MANAGED_CLOSED_CATALOG_FENCE_POLICY_DESCRIPTION_V1: &str = concat!(
     "lifecycle=one progress handler spans catalog and assertions; reconcile tracked/live transaction, rollback when either active, require autocommit, strict sqlite3_close, then full main/residual/main source bracket before evidence\n",
     "composition=managed snapshot selector, catalog policy, closed source policy, and light assertion policy remain separately exposed\n",
 );
+#[cfg(not(windows))]
 const MANAGED_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     162, 40, 41, 176, 139, 255, 193, 176, 196, 193, 88, 125, 168, 149, 230, 47, 104, 81, 247, 121,
     184, 236, 178, 28, 34, 240, 12, 124, 90, 177, 87, 235,
 ];
 
+#[cfg(not(windows))]
 const MANAGED_CLOSED_SOURCE_IDENTITY_DOMAIN_V1: &[u8] =
     b"mnestic.managed-sqlite-closed-source-identity.transcript.v1\0";
 #[cfg(test)]
 const MANAGED_CLOSED_SOURCE_POLICY_FINGERPRINT_DOMAIN_V1: &[u8] =
     b"mnestic.managed-sqlite-closed-source-policy-fingerprint.transcript.v1\0";
 const MANAGED_SNAPSHOT_POLICY_V1_IDENTITY_BYTES: &[u8] = b"mnestic.managed-snapshot-policy.v1";
+#[cfg(not(windows))]
 const MANAGED_CLOSED_SOURCE_POLICY_DESCRIPTION_V1: &str = concat!(
     "mnestic.managed-sqlite-closed-source-policy.v1\n",
     "authority=owned historical evidence of one managed SQLite observation and pathname/descriptor/residual bracketing checks in one consuming operation; not an attestation or main-file seal\n",
@@ -266,6 +278,7 @@ const MANAGED_CLOSED_SOURCE_POLICY_DESCRIPTION_V1: &str = concat!(
 );
 // SHA-256 of the independently framed source-policy transcript. The literal is
 // repinned only through the independent test oracle below.
+#[cfg(not(windows))]
 const MANAGED_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     196, 62, 40, 190, 206, 23, 138, 178, 241, 29, 93, 139, 70, 3, 194, 169, 218, 247, 88, 214, 192,
     121, 7, 229, 80, 220, 204, 131, 121, 109, 100, 154,
@@ -454,10 +467,12 @@ const MANAGED_EPISODE_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     185, 223, 9, 190, 143, 225, 216, 254, 36, 221, 13, 64, 252, 149, 145, 133, 200, 133, 183, 203,
     76, 51, 107, 76, 157, 47, 183, 145, 17, 254, 33, 233,
 ];
+#[cfg(not(windows))]
 const MANAGED_EPISODE_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     229, 208, 243, 171, 239, 125, 35, 224, 71, 248, 242, 22, 240, 199, 105, 39, 58, 131, 33, 142,
     223, 148, 183, 95, 211, 223, 80, 63, 167, 209, 216, 86,
 ];
+#[cfg(not(windows))]
 const MANAGED_EPISODE_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     151, 212, 248, 90, 157, 124, 92, 192, 22, 33, 67, 107, 133, 123, 176, 31, 199, 39, 86, 65, 138,
     105, 69, 254, 201, 121, 224, 226, 189, 174, 229, 209,
@@ -476,10 +491,12 @@ const MANAGED_SINGLE_GRAPH_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     13, 92, 233, 204, 58, 46, 48, 103, 24, 12, 92, 91, 234, 105, 138, 37, 127, 184, 150, 232, 89,
     188, 166, 236, 38, 167, 224, 203, 82, 83, 133, 51,
 ];
+#[cfg(not(windows))]
 const MANAGED_SINGLE_GRAPH_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     66, 226, 254, 49, 184, 240, 210, 118, 223, 68, 48, 5, 27, 62, 206, 139, 153, 187, 136, 14, 183,
     216, 50, 212, 189, 255, 24, 12, 220, 7, 78, 116,
 ];
+#[cfg(not(windows))]
 const MANAGED_SINGLE_GRAPH_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     51, 137, 166, 205, 77, 224, 53, 168, 115, 236, 152, 172, 225, 230, 254, 65, 212, 109, 179, 156,
     4, 123, 162, 84, 94, 232, 112, 28, 151, 170, 54, 180,
@@ -498,10 +515,12 @@ const MANAGED_CONCERN_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     195, 109, 242, 83, 9, 8, 92, 151, 201, 154, 106, 55, 6, 35, 29, 189, 97, 30, 29, 196, 125, 7,
     38, 207, 121, 167, 12, 24, 182, 96, 182, 92,
 ];
+#[cfg(not(windows))]
 const MANAGED_CONCERN_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     37, 171, 178, 229, 11, 201, 75, 183, 35, 165, 111, 225, 51, 45, 102, 30, 156, 71, 71, 154, 175,
     216, 16, 112, 92, 175, 61, 241, 244, 200, 90, 218,
 ];
+#[cfg(not(windows))]
 const MANAGED_CONCERN_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     246, 7, 157, 232, 94, 146, 19, 97, 238, 155, 152, 253, 56, 193, 218, 65, 83, 111, 213, 159,
     245, 40, 69, 143, 202, 75, 38, 65, 228, 30, 196, 100,
@@ -520,10 +539,12 @@ const MANAGED_TOUCHSTONES_PHYSICAL_POLICY_FINGERPRINT_V1: [u8; 32] = [
     80, 93, 29, 230, 128, 115, 116, 48, 51, 96, 63, 139, 97, 99, 176, 74,
     144, 181, 39, 13, 107, 175, 95, 125, 141, 85, 172, 219, 156, 69, 1, 90,
 ];
+#[cfg(not(windows))]
 const MANAGED_TOUCHSTONES_CLOSED_SOURCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     19, 76, 30, 182, 127, 106, 108, 19, 164, 202, 74, 228, 175, 91, 40, 94,
     239, 85, 129, 143, 143, 193, 189, 173, 34, 132, 243, 66, 197, 236, 157, 6,
 ];
+#[cfg(not(windows))]
 const MANAGED_TOUCHSTONES_CLOSED_CATALOG_FENCE_POLICY_FINGERPRINT_V1: [u8; 32] = [
     133, 104, 39, 217, 108, 57, 8, 236, 176, 214, 161, 47, 92, 38, 52, 170,
     13, 192, 34, 69, 166, 174, 28, 91, 147, 29, 160, 26, 72, 251, 79, 109,
@@ -1114,10 +1135,11 @@ impl ManagedSqliteRecordVisitEvidenceV1 {
     }
 }
 
-/// Frozen Unix main-file identity retained after the held descriptor is closed.
+/// Frozen platform-native main-file identity retained after the held descriptor is closed.
 ///
 /// This is historical pathname/descriptor identity evidence, not a content
 /// digest, authentication claim, freshness proof, or anti-rollback token.
+#[cfg(not(windows))]
 pub struct ManagedSqliteClosedMainFileIdentityV1 {
     device: u64,
     inode: u64,
@@ -1133,6 +1155,7 @@ pub struct ManagedSqliteClosedMainFileIdentityV1 {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+#[cfg(not(windows))]
 impl ManagedSqliteClosedMainFileIdentityV1 {
     pub const fn device(&self) -> u64 {
         self.device
@@ -1180,6 +1203,7 @@ impl ManagedSqliteClosedMainFileIdentityV1 {
 }
 
 /// Frozen durable metadata for one present WAL or SHM residual.
+#[cfg(not(windows))]
 pub struct ManagedSqliteClosedResidualMetadataV1 {
     length: u64,
     device: u64,
@@ -1198,6 +1222,7 @@ pub struct ManagedSqliteClosedResidualMetadataV1 {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+#[cfg(not(windows))]
 impl ManagedSqliteClosedResidualMetadataV1 {
     pub const fn length(&self) -> u64 {
         self.length
@@ -1281,7 +1306,7 @@ impl ManagedSqliteClosedResidualV1 {
 
 /// Descriptor-free historical source evidence from one consuming close.
 ///
-/// The identity fingerprint binds exact frozen Unix identity, supplied path
+/// The identity fingerprint binds exact frozen platform-native identity, supplied path
 /// spelling, residual state, snapshot policy, and the source-policy fingerprint.
 /// It deliberately does not bind the main file's contents and does not prove
 /// authentication, freshness, ownership, or anti-rollback. Path checks do not
@@ -1773,7 +1798,11 @@ fn closed_main_identity_matches_frozen(
     expected: &ManagedSqliteClosedMainFileIdentityV1,
     observed: &FrozenSourceMainFile,
 ) -> bool {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::closed_main_identity_matches_frozen(expected, observed)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (expected, observed);
         false
@@ -1799,7 +1828,11 @@ fn closed_residual_matches_frozen(
     expected: &ManagedSqliteClosedResidualV1,
     observed: &FrozenResidualFile,
 ) -> bool {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::closed_residual_matches_frozen(expected, observed)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (expected, observed);
         false
@@ -3047,9 +3080,10 @@ impl<S> ManagedRecordVisitScanOutputV1<S> {
 /// read-only.
 /// Aggregate SQLite schema parsing is fused before database open by requiring the
 /// schema b-tree root to be one leaf page containing at most 64 records.
-/// Non-Unix targets currently fail closed because portable Rust metadata does not expose an
-/// equivalent stable file identity. The caller still owns canonical ancestor validation and a
-/// lease excluding same-authority rename ABA between checks; a host needing an atomic binding
+/// Windows uses checked local NTFS handles, full volume/file IDs and creation/write/change
+/// times instead; reparse paths and hard links are refused. Other targets fail closed.
+/// The caller still owns canonical ancestor validation and a lease excluding
+/// same-authority rename ABA between checks; a host needing an atomic binding
 /// between this descriptor and SQLite's separately opened handle must supply an fd-backed VFS or
 /// an OS snapshot.
 pub struct ExistingSqliteSnapshotSource {
@@ -3588,7 +3622,7 @@ impl ExistingSqliteSnapshotSource {
         let retained_backup_destination = created.duplicate_retained_backup_identity()?;
         let main_file = FrozenSourceMainFile::open(&created.path)?;
 
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if main_file.identity != retained_backup_destination.identity {
             bail!(
                 "private backup read-only and retained custody descriptors named different files: {:?}",
@@ -7410,9 +7444,9 @@ fn ensure_absolute_path(path: &Path, role: &str) -> Result<()> {
 }
 
 struct FrozenSourceMainFile {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     file: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     identity: FrozenMainFileIdentity,
 }
 
@@ -7428,15 +7462,19 @@ struct FrozenSourceMainFile {
 /// provenance, the independent read-only descriptor, and the current pathname, but
 /// does not bind SQLite's path-opened handle or close the same-authority rename-ABA gap.
 struct RetainedBackupDestinationIdentity {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     file: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     identity: FrozenMainFileIdentity,
 }
 
 impl RetainedBackupDestinationIdentity {
     fn verify(&self, path: &Path, role: &str) -> Result<()> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::verify_frozen_file(&self.file, self.identity, path, role)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (path, role);
             bail!(
@@ -7480,7 +7518,11 @@ impl RetainedBackupDestinationIdentity {
 
 impl FrozenSourceMainFile {
     fn open(path: &Path) -> Result<Self> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::open_source(path)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = path;
             bail!(
@@ -7546,7 +7588,11 @@ impl FrozenSourceMainFile {
     }
 
     fn len(&self) -> Result<u64> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Ok(self.identity.identity.len)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             bail!("managed SQLite physical census requires Unix descriptor identity");
         }
@@ -7562,14 +7608,18 @@ impl FrozenSourceMainFile {
     /// table plus its primary-key autoindex), so a multi-page schema b-tree is
     /// outside this fixed snapshot boundary. SQLite performs the authoritative
     /// structural and semantic checks after this allocation-independent fuse.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn validate_bounded_schema_root(&self, path: &Path) -> Result<()> {
         const PREFIX_LEN: usize = 108;
         const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
         const LEAF_TABLE_PAGE: u8 = 0x0d;
 
         let mut prefix = [0_u8; PREFIX_LEN];
-        self.file.read_exact_at(&mut prefix, 0).map_err(|error| {
+        #[cfg(unix)]
+        let read = self.file.read_exact_at(&mut prefix, 0);
+        #[cfg(windows)]
+        let read = windows::read_exact_at(&self.file, &mut prefix, 0);
+        read.map_err(|error| {
             miette!(
                 "cannot read bounded SQLite header from snapshot source {:?}: {error}",
                 path
@@ -7588,7 +7638,8 @@ impl FrozenSourceMainFile {
         if !(512..=65_536).contains(&page_size) || !page_size.is_power_of_two() {
             bail!("snapshot source declared an invalid SQLite page size");
         }
-        if self.identity.len < page_size || self.identity.len % page_size != 0 {
+        let length = self.len()?;
+        if length < page_size || length % page_size != 0 {
             bail!("snapshot source length did not match its SQLite page size");
         }
         if prefix[100] != LEAF_TABLE_PAGE {
@@ -7613,7 +7664,11 @@ impl FrozenSourceMainFile {
     fn verify(&self, path: &Path, role: &str) -> Result<()> {
         #[cfg(test)]
         MANAGED_SOURCE_MAIN_VERIFY_CALLS.with(|calls| calls.set(calls.get() + 1));
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::verify_frozen_file(&self.file, self.identity, path, role)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (path, role);
             bail!(
@@ -7851,6 +7906,7 @@ enum FrozenResidualFile {
 }
 
 impl FrozenResidualFile {
+    #[cfg(not(windows))]
     fn capture(path: &Path, maximum_bytes: u64, role: &str) -> Result<Self> {
         let named_metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
@@ -7923,6 +7979,8 @@ impl FrozenResidualFile {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DurableFileMetadata {
+    #[cfg(windows)]
+    revision: mneme_store_path::windows::FileRevision,
     len: u64,
     readonly: bool,
     modified: Option<SystemTime>,
@@ -7955,6 +8013,7 @@ struct DurableFileMetadata {
 }
 
 impl DurableFileMetadata {
+    #[cfg(not(windows))]
     fn from_metadata(metadata: &fs::Metadata) -> Self {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -7999,7 +8058,11 @@ fn build_closed_source_evidence_v1(
     main_file: FrozenSourceMainFile,
     residuals: FrozenSourceResiduals,
 ) -> Result<ManagedSqliteClosedSourceEvidenceV1> {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::closed_source(supplied_path, managed_snapshot_policy, main_file, residuals)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (supplied_path, managed_snapshot_policy, main_file, residuals);
         bail!("managed SQLite closed source evidence requires Unix raw path and file identity");
@@ -8129,7 +8192,7 @@ fn managed_closed_source_identity_fingerprint_v1(
     Ok(hasher.finalize().into())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn managed_closed_source_named_frame_v1(
     hasher: &mut Sha256,
     name: &[u8],
@@ -8293,7 +8356,10 @@ fn immutable_source_uri(path: &Path) -> Result<CString> {
         let text = path
             .to_str()
             .ok_or_else(|| miette!("snapshot source path is not representable as SQLite UTF-8"))?;
+        mneme_store_path::windows::validate_absolute_path(path).into_diagnostic()?;
         let normalized = text.replace('\\', "/");
+        // Only a validated verbatim drive prefix may be removed; UNC/device paths remain refused.
+        let normalized = normalized.strip_prefix("//?/").unwrap_or(&normalized);
         let bytes = normalized.as_bytes();
         if normalized.starts_with("//") {
             bail!("UNC snapshot source paths are not supported by this SQLite URI boundary");
@@ -8436,6 +8502,10 @@ fn named_destination_identity(
 
 #[derive(Debug)]
 struct IncompleteDestination {
+    #[cfg(windows)]
+    parent: mneme_store_path::windows::Directory,
+    #[cfg(windows)]
+    identity: Option<mneme_store_path::windows::FileIdentity>,
     path: PathBuf,
     file: Option<File>,
     #[cfg(unix)]
@@ -8476,11 +8546,15 @@ impl IncompleteDestination {
         })
     }
 
-    fn create_impl<F>(path: &Path, mut setup_hook: F) -> Result<Self>
+    fn create_impl<F>(path: &Path, setup_hook: F) -> Result<Self>
     where
         F: FnMut(DestinationSetupPhase) -> Result<()>,
     {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::create_destination(path, setup_hook)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (path, setup_hook);
             bail!(
@@ -8492,6 +8566,7 @@ impl IncompleteDestination {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let mut setup_hook = setup_hook;
 
             let mut options = OpenOptions::new();
             options
@@ -8574,12 +8649,16 @@ impl IncompleteDestination {
     }
 
     fn verify_owned_path(&self, role: &str) -> Result<()> {
+        #[cfg(windows)]
+        {
+            windows::verify_destination(self, role)
+        }
         #[cfg(unix)]
         {
             self.verify_bound_path(role, DestinationIdentityPolicy::Publication)
         }
 
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = role;
             bail!(
@@ -8655,7 +8734,11 @@ impl IncompleteDestination {
     }
 
     fn duplicate_retained_backup_identity(&self) -> Result<RetainedBackupDestinationIdentity> {
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::duplicate_destination(self)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             bail!(
                 "existing-only SQLite backup custody requires Unix lstat/fstat file identity; \
@@ -8780,7 +8863,16 @@ impl IncompleteDestination {
         #[cfg(not(unix))]
         let ownership = self.verify_owned_path("incomplete snapshot destination cleanup");
         match ownership {
-            Ok(()) => match fs::remove_file(&self.path) {
+            Ok(()) => match {
+                #[cfg(windows)]
+                {
+                    windows::remove_destination(self)
+                }
+                #[cfg(not(windows))]
+                {
+                    fs::remove_file(&self.path)
+                }
+            } {
                 Ok(()) => {}
                 Err(error) => failures.push(format!(
                     "owned destination {:?} could not be removed: {error}",
@@ -8946,6 +9038,11 @@ enum SqliteOpenMode {
 
 impl SqliteStorage {
     fn open_connection(&self) -> Result<ConnectionThreadSafe> {
+        #[cfg(windows)]
+        let guard = windows::RuntimeMainGuard::open(
+            &self.name,
+            matches!(self.open_mode, SqliteOpenMode::CreateIfMissing),
+        )?;
         let conn = match self.open_mode {
             SqliteOpenMode::CreateIfMissing => {
                 Connection::open_thread_safe(&self.name).into_diagnostic()?
@@ -8957,6 +9054,8 @@ impl SqliteStorage {
             .into_diagnostic()?,
         };
         configure_connection(&conn, false)?;
+        #[cfg(windows)]
+        guard.verify()?;
         Ok(conn)
     }
 
@@ -9048,9 +9147,16 @@ impl SqliteStorage {
 /// You must provide a disk-based path: `:memory:` is not OK.
 /// If you want a pure memory storage, use [`new_cozo_mem`](crate::new_cozo_mem).
 pub fn new_cozo_sqlite(path: impl AsRef<Path>) -> Result<crate::Db<SqliteStorage>> {
-    if path.as_ref().to_str() == Some("") {
+    let path = path.as_ref();
+    if path.to_str() == Some("") {
         bail!("empty path for sqlite storage")
     }
+    #[cfg(windows)]
+    let absolute_path = std::path::absolute(path).into_diagnostic()?;
+    #[cfg(windows)]
+    let path = absolute_path.as_path();
+    #[cfg(windows)]
+    let guard = windows::RuntimeMainGuard::open(path, true)?;
     let conn = Connection::open_thread_safe(&path).into_diagnostic()?;
     // WAL lets readers continue while a writer publishes a bounded batch;
     // busy_timeout keeps transient cross-instance lock races inside SQLite
@@ -9067,12 +9173,14 @@ pub fn new_cozo_sqlite(path: impl AsRef<Path>) -> Result<crate::Db<SqliteStorage
 
     let ret = crate::Db::new(SqliteStorage {
         lock: Default::default(),
-        name: PathBuf::from(path.as_ref()),
+        name: path.to_path_buf(),
         pool: Default::default(),
         open_mode: SqliteOpenMode::CreateIfMissing,
     })?;
 
     ret.initialize()?;
+    #[cfg(windows)]
+    guard.verify()?;
     Ok(ret)
 }
 
@@ -9092,6 +9200,8 @@ pub fn new_cozo_sqlite_existing(
     let guarded_source = permit.into_guarded_source()?;
     let name = guarded_source.path.clone();
     let operation = (|| {
+        #[cfg(windows)]
+        let guard = windows::RuntimeMainGuard::open(&name, false)?;
         if name.to_str().is_none() {
             bail!(
                 "existing-only SQLite runtime path is not valid UTF-8 and sqlite 0.36 cannot open it"
@@ -9121,6 +9231,8 @@ pub fn new_cozo_sqlite_existing(
             bail!("injected existing-only SQLite runtime initialization failure");
         }
         ret.initialize_existing()?;
+        #[cfg(windows)]
+        guard.verify()?;
         Ok(ret)
     })();
     combine_with_postcondition(
@@ -10329,7 +10441,7 @@ mod existing_snapshot_tests {
         assert_no_sidecars(path);
     }
 
-    fn create_populated_managed_cozo_source(path: &Path) {
+    pub(super) fn create_populated_managed_cozo_source(path: &Path) {
         let database = new_cozo_sqlite(path).unwrap();
         for index in 0..super::MANAGED_CATALOG_RELATION_COUNT {
             let schema = if index == 0 {

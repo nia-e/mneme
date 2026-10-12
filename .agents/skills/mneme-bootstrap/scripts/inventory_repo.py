@@ -112,7 +112,10 @@ def resolve_sidecar_path(root: Path, value: str, context: str) -> tuple[Path, st
     resolved = candidate.resolve(strict=False)
     if resolved == root or root not in resolved.parents:
         raise InventoryError(f"{context} must remain inside the repository root")
-    relative = PurePosixPath(os.path.relpath(resolved, root)).as_posix()
+    # Keep native path parsing until after relativization. PurePosixPath does
+    # not interpret Windows backslashes; using it around os.path.relpath would
+    # collapse the entire .mneme\bootstrap path into one component.
+    relative = resolved.relative_to(root).as_posix()
     parts = PurePosixPath(relative).parts
     if len(parts) < 3 or parts[:2] != (".mneme", "bootstrap"):
         raise InventoryError(f"{context} must be under .mneme/bootstrap")
@@ -715,6 +718,15 @@ def pretty_json_bytes(value: object) -> bytes:
 def publish_json_no_clobber(path: Path, value: object, context: str) -> None:
     """Atomically publish a sidecar without ever replacing an existing target."""
 
+    if os.name == "nt":
+        # This authoring publisher still uses Unix directory descriptors for
+        # durability. Never publish bytes and only then discover that Windows
+        # cannot open that barrier. Native mnemed init does not use this route.
+        raise InventoryError(
+            "bootstrap sidecar --output publication is not supported on native "
+            "Windows yet; use a verified Unix bootstrap-authoring workflow. "
+            "No output directory or file was created."
+        )
     payload = pretty_json_bytes(value)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor: int | None = None

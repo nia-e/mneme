@@ -14,6 +14,7 @@ You need Codex with lifecycle hooks and app-server support, Python **3.11+**,
 and matching `mnemed` and `mneme-mcp` binaries with persistent storage and HTTP
 support. Background reader/recorder calls need
 Codex authentication in `auth.json` under `CODEX_HOME` (normally `~/.codex`).
+For native Windows, first read the [port status and limitations](../../docs/windows.md).
 From the Mneme checkout, install the package defaults:
 
 ```sh

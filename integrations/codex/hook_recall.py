@@ -15,13 +15,14 @@ import sys
 import time
 
 from mcp_client import McpClient, McpError
+_DEFAULT_CLIENT = McpClient
 from recording_contract import AssociationTarget
 from reader_contract import plan as reader_plan
 from reader_contract import (EPISODE_FIELDS, EPISODE_OPTIONAL_FIELDS,
                              validate_episode_projection_fields, validate_recording_session)
 from librarian_policy import LibrarianBudget
 from touchstone_contract import validate_touchstone_view, validate_touchstone_retrieval
-from service import ConnectConfig, MAX_CONFIG_BYTES, load_config
+from service import ConnectConfig, MAX_CONFIG_BYTES, load_config, client_for_service
 from target_policy import (policy_for, GLOBAL_PREFERENCE_TAG, GLOBAL_PREFERENCE_NAMESPACE,
                            GLOBAL_PREFERENCE_CUE)
 
@@ -43,6 +44,14 @@ MAX_OVERLAP_SUMMARY_BYTES = 512
 
 class _IdentityMismatch(ValueError):
     pass
+
+
+def _service_client(config, *, token, timeout):
+    # Keep the injectable legacy client seam; production always dispatches from
+    # the parsed service mode, never an inferred URL scheme or remote path.
+    if McpClient is not _DEFAULT_CLIENT:
+        return McpClient(config.url, token=token, timeout=timeout)
+    return client_for_service(config, token=token, timeout=timeout)
 
 
 def _result(outcome, cards=None, elapsed_ms=0, observation=None):
@@ -381,7 +390,7 @@ _TAGGED_WORK_FIELDS = ("query_dimension", "raw_memberships", "unique_exact_ids",
 _ADAPTER_COUNTS = ("observed_unique_window", "readbacks_attempted", "work_budget_unread",
                    "readback_skipped", "byte_budget_omitted", "graph_readback_omitted",
                    "graph_byte_omitted", "returned")
-_UNKNOWN_REASONS = ("absent", "malformed", "byte_cap", "diagnostic_byte_cap", "state_byte_cap")
+_UNKNOWN_REASONS = ("absent", "malformed", "byte_cap", "diagnostic_byte_cap", "state_byte_cap", "multiple_owners")
 _REFERENCE_COUNTS = ("anchors_total", "anchors_examined", "raw_edges_scanned", "raw_edge_limit",
                      "endpoint_reads", "endpoint_read_limit", "indexed_seeks", "edge_point_reads",
                      "body_anchor_point_reads", "missing", "non_episode", "cache_hits", "unread_anchors")
@@ -562,6 +571,9 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
     deadline = (shared_work["deadline"] if shared_work is not None else
                 time.monotonic() + timeout if reader else None)
     decoded_bytes = shared_work["decoded_bytes"] if shared_work is not None else 0
+    if reader and (decoded_bytes >= budget.native_read_bytes
+                   or shared_work is not None and shared_work.get("accounting_unknown")):
+        raise TimeoutError("prior native read allowance is exhausted or unknown")
     preference = getattr(store_target, "scope", None) == "global_preference"
     if preference and (not reader or prompt != GLOBAL_PREFERENCE_CUE or routing_hints is not None):
         raise ValueError("invalid global preference read")
@@ -583,17 +595,26 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
         raise TimeoutError("reader deadline exceeded")
     # Native transport pins its ceiling on connect: background reads must start
     # with the whole remaining allowance, not a foreground per-RPC ceiling.
-    with McpClient(config.url, token=token, timeout=startup_seconds) as client, _cleanup_deadline(client, deadline):
+    with _service_client(config, token=token, timeout=startup_seconds) as client, _cleanup_deadline(client, deadline):
         def read(name, args):
             nonlocal decoded_bytes
-            if reader and decoded_bytes >= budget.native_read_bytes:
-                raise TimeoutError("reader decoded-read allowance exhausted")
+            if reader and (decoded_bytes >= budget.native_read_bytes
+                           or shared_work is not None and shared_work.get("accounting_unknown")):
+                raise TimeoutError("reader decoded-read allowance exhausted or unknown")
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("reader deadline exceeded")
                 client.timeout = remaining
-            value = client.call_tool(name, args)
+            try:
+                value = client.call_tool(name, args)
+            except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
+                if reader and shared_work is not None:
+                    # A partially decoded failed response cannot buy another
+                    # owner's fresh allowance. Preserve the known count rather
+                    # than pretending the maximum was observed.
+                    shared_work["accounting_unknown"] = True
+                raise
             if reader:
                 decoded_bytes += _bytes(value)
                 if shared_work is not None:
@@ -769,9 +790,14 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
                                 complete = False
                                 break
                             client.timeout = min(remaining / 2, .5)
-                            response = client.concern_checked(config.database_name, {
-                                "action": "list", "endpoint": endpoint,
-                                **({"after": after} if after is not None else {})}, expected_db_id=db_id)
+                            try:
+                                response = client.concern_checked(config.database_name, {
+                                    "action": "list", "endpoint": endpoint,
+                                    **({"after": after} if after is not None else {})}, expected_db_id=db_id)
+                            except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
+                                if shared_work is not None:
+                                    shared_work["accounting_unknown"] = True
+                                raise
                             decoded_bytes += _bytes(response)
                             if shared_work is not None:
                                 shared_work["decoded_bytes"] = decoded_bytes
@@ -838,7 +864,9 @@ def collect_reader(service_config_path: Path, cue: str, project_root: Path,
             or not isinstance(project_root, Path) or not project_root.is_absolute()
             or type(timeout) not in (int, float) or not 0 < timeout <= budget.native_seconds
             or shared_work is not None and (not isinstance(shared_work, dict)
-                or set(shared_work) != {"deadline", "decoded_bytes"}
+                or not {"deadline", "decoded_bytes"} <= set(shared_work)
+                or set(shared_work) - {"deadline", "decoded_bytes", "accounting_unknown"}
+                or type(shared_work.get("accounting_unknown", False)) is not bool
                 or type(shared_work["deadline"]) not in (int, float)
                 or not 0 < shared_work["deadline"] < float("inf")
                 or type(shared_work["decoded_bytes"]) is not int or shared_work["decoded_bytes"] < 0)):
@@ -859,9 +887,11 @@ def collect_reader(service_config_path: Path, cue: str, project_root: Path,
         result = _result("timeout" if time.monotonic() - started >= timeout else "unavailable")
     result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     if shared_work is not None:
-        result["native_work"] = {"decoded_bytes": shared_work["decoded_bytes"],
+        unknown = shared_work.get("accounting_unknown", False)
+        result["native_work"] = {"decoded_bytes": None if unknown else shared_work["decoded_bytes"],
                                  "read_allowance_bytes": budget.native_read_bytes,
-                                 "read_allowance_exhausted": shared_work["decoded_bytes"] >= budget.native_read_bytes}
+                                 "read_allowance_exhausted": unknown or shared_work["decoded_bytes"] >= budget.native_read_bytes,
+                                 **({"known_decoded_bytes": shared_work["decoded_bytes"], "accounting_unknown": True} if unknown else {})}
     result["discovery"] = _bounded_discovery(result.get("discovery"))
     return result
 
@@ -921,15 +951,19 @@ def _background_project_read(service_config_path, project_root, timeout, *, cue=
     started = time.monotonic()
     result = _result("unavailable")
     decoded_bytes = 0
+    accounting_known = False
     adapter = dict.fromkeys(_ADAPTER_COUNTS, 0)
     context = None
     policy = LibrarianBudget() if budget is None else budget
     try:
         budget = policy
         if (type(spent_native_bytes) is not int
-                or not 0 <= spent_native_bytes <= budget.native_read_bytes):
+                or spent_native_bytes < 0):
             raise ValueError("invalid prior native read charge")
         decoded_bytes = spent_native_bytes
+        accounting_known = True
+        if decoded_bytes >= budget.native_read_bytes:
+            raise ValueError("native decoded-read allowance exhausted")
         seconds_limit = 2 if cue is None else budget.native_seconds
         if (not isinstance(service_config_path, Path)
                 or not isinstance(project_root, Path) or not project_root.is_absolute()
@@ -952,15 +986,28 @@ def _background_project_read(service_config_path, project_root, timeout, *, cue=
             return budget
 
         config, snapshot, token = _project_config(service_config_path, project_root, store_target)
-        with McpClient(config.url, token=token, timeout=remaining()) as client:
+        with _service_client(config, token=token, timeout=remaining()) as client:
+            def measured_read(name, arguments):
+                nonlocal decoded_bytes, accounting_known
+                if decoded_bytes >= budget.native_read_bytes:
+                    raise ValueError("native decoded-read allowance exhausted")
+                try:
+                    value = client.call_tool(name, arguments)
+                    size = _bytes(value)
+                except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
+                    accounting_known = False
+                    raise
+                decoded_bytes += size
+                if decoded_bytes > budget.native_read_bytes:
+                    raise ValueError("native decoded-read allowance exceeded")
+                return value
+
             def read(name, arguments, *, hydration=False):
-                nonlocal decoded_bytes
                 seconds = (hydration_deadline if hydration else deadline) - time.monotonic()
                 if seconds <= 0:
                     raise TimeoutError("background project deadline exceeded")
                 client.timeout = seconds
-                value = client.call_tool(name, arguments)
-                decoded_bytes += _bytes(value)
+                value = measured_read(name, arguments)
                 remaining()
                 return value
 
@@ -1044,10 +1091,9 @@ def _background_project_read(service_config_path, project_root, timeout, *, cue=
                                 if optional_seconds <= 0 or decoded_bytes >= policy.native_read_bytes:
                                     break
                                 client.timeout = min(optional_seconds, remaining() / 2)
-                                node = client.call_tool("get", {"db": config.database_name, "id": card["id"],
+                                node = measured_read("get", {"db": config.database_name, "id": card["id"],
                                                        "body": True, "max_body_bytes": MAX_BODY_BYTES,
                                                        "edges": False, "expected_db_id": identifier})
-                                decoded_bytes += _bytes(node)
                                 if decoded_bytes > policy.native_read_bytes:
                                     break
                                 witness = decode_witness(node, expected_db_id=identifier)
@@ -1087,17 +1133,21 @@ def _background_project_read(service_config_path, project_root, timeout, *, cue=
     if cue is not None:
         adapter["returned"] = len(result["cards"])
         result["discovery"] = _discovery(context, adapter) if context is not None else _unknown_discovery(adapter=adapter)
-        result["native_work"] = {"decoded_bytes": decoded_bytes,
-                                 "read_allowance_bytes": policy.native_read_bytes}
-    else:
-        result["native_work"] = {"decoded_bytes": decoded_bytes}
+    result["native_work"] = {"decoded_bytes": decoded_bytes if accounting_known else None,
+                             "read_allowance_bytes": policy.native_read_bytes,
+                             "read_allowance_exhausted": decoded_bytes >= policy.native_read_bytes}
+    if not accounting_known:
+        # A failed/undecodable response is not evidence of zero native work.
+        # The absent aggregate prevents another owner resetting the allowance.
+        result["native_work"]["known_decoded_bytes"] = decoded_bytes
     return result
 
 
 def resolve_project_identity(service_config_path: Path, project_root: Path, *, timeout: float = 2,
-                             store_target=None) -> dict:
+                             store_target=None, budget=None, spent_native_bytes=0) -> dict:
     """Background-only initial identity sample from the native named catalog."""
     return _background_project_read(service_config_path, project_root, timeout,
+                                   budget=budget, spent_native_bytes=spent_native_bytes,
                                    **({"store_target": store_target} if store_target is not None else {}))
 
 
@@ -1164,7 +1214,7 @@ def collect_routing_witnesses(service_config_path: Path, cue: str, project_root:
         startup_seconds = deadline - time.monotonic()
         if startup_seconds <= 0:
             raise TimeoutError("routing phase deadline exceeded")
-        with McpClient(config.url, token=token, timeout=startup_seconds) as client:
+        with _service_client(config, token=token, timeout=startup_seconds) as client:
             def read(name, arguments, *, hydration=False):
                 nonlocal decoded_bytes
                 remaining = (hydration_deadline if hydration else deadline) - time.monotonic()
@@ -1266,14 +1316,32 @@ def collect_overlap(service_config_path: Path, cue: str, project_root: Path, *,
 
 def check_association_target(service_config_path: Path, project_root: Path,
                              target: AssociationTarget, *, expected_db_id: str,
-                             timeout: float, store_target=None) -> str:
+                             timeout: float, store_target=None, with_work=False,
+                             budget=None, spent_native_bytes=0) -> str | dict:
     """One guarded get of the retained semantic hint before capture is frozen.
 
     Fresh overlap compares the bounded assessor summary. Historical delivery
     compares the full native-get fingerprint, not the truncated display. Neither
     is a body-version CAS; a later edit or deletion can still make capture fail.
     """
-    if (not isinstance(target, AssociationTarget) or target.kind != "semantic"
+    started = time.monotonic()
+    policy = LibrarianBudget() if budget is None else budget
+    accounting_known = type(spent_native_bytes) is int and spent_native_bytes >= 0
+    decoded_bytes = spent_native_bytes if accounting_known else 0
+
+    def result(outcome):
+        if not with_work:
+            return outcome
+        work = {"decoded_bytes": decoded_bytes if accounting_known else None,
+                "read_allowance_bytes": policy.native_read_bytes,
+                "read_allowance_exhausted": decoded_bytes >= policy.native_read_bytes}
+        if not accounting_known:
+            work["known_decoded_bytes"] = decoded_bytes
+        return {"outcome": outcome, "native_work": work}
+
+    if (type(with_work) is not bool or not accounting_known
+            or decoded_bytes >= policy.native_read_bytes
+            or not isinstance(target, AssociationTarget) or target.kind != "semantic"
             or not isinstance(target.native_id, str) or not NODE_ID_RE.fullmatch(target.native_id)
             or not isinstance(target.summary, str)
             or not target.summary or len(target.summary.encode("utf-8")) > (MAX_OVERLAP_SUMMARY_BYTES if target.origin == "overlap" else 803)
@@ -1285,8 +1353,7 @@ def check_association_target(service_config_path: Path, project_root: Path,
             or not isinstance(service_config_path, Path) or not isinstance(project_root, Path)
             or not project_root.is_absolute() or type(timeout) not in (int, float)
             or not 0 < timeout <= 2):
-        return "unavailable"
-    started = time.monotonic()
+        return result("unavailable")
 
     def remaining():
         value = started + timeout - time.monotonic()
@@ -1294,36 +1361,50 @@ def check_association_target(service_config_path: Path, project_root: Path,
             raise TimeoutError("association read deadline")
         return min(value, 1.5)
 
+    outcome = "unavailable"
     try:
         config, snapshot, token = _project_config(service_config_path, project_root, store_target)
-        with McpClient(config.url, token=token, timeout=remaining()) as client:
-            try:
+        with _service_client(config, token=token, timeout=remaining()) as client:
+            def read(name, arguments):
+                nonlocal decoded_bytes, accounting_known
+                if decoded_bytes >= policy.native_read_bytes:
+                    raise ValueError("association decoded-read allowance exhausted")
                 client.timeout = remaining()
-                _project_identity(client.call_tool("databases", {}), config, expected_db_id, store_target)
-                client.timeout = remaining()
-                node = client.call_tool("get", {"db": config.database_name, "id": target.native_id,
-                                                "body": False, "edges": False,
-                                                "expected_db_id": expected_db_id})
+                try:
+                    value = client.call_tool(name, arguments)
+                    size = _bytes(value)
+                except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
+                    accounting_known = False
+                    raise
+                decoded_bytes += size
+                if decoded_bytes > policy.native_read_bytes:
+                    raise ValueError("association decoded-read allowance exceeded")
                 remaining()
+                return value
+
+            try:
+                _project_identity(read("databases", {}), config, expected_db_id, store_target)
+                node = read("get", {"db": config.database_name, "id": target.native_id,
+                                    "body": False, "edges": False,
+                                    "expected_db_id": expected_db_id})
                 # This is an identity comparison, not a delivered card. No
                 # recall-time reference status/origin is invented by exact GET.
                 card = _card(node, target.native_id)
-                if card is None:
-                    return "stale"
-                if target.origin == "delivery":
-                    same = card["fingerprint"] == target.full_get_fingerprint
-                else:
-                    same = _short(card["summary"], MAX_OVERLAP_SUMMARY_BYTES) == target.summary
+                same = card is not None and (
+                    card["fingerprint"] == target.full_get_fingerprint
+                    if target.origin == "delivery" else
+                    _short(card["summary"], MAX_OVERLAP_SUMMARY_BYTES) == target.summary)
                 if not same:
-                    return "stale"
-                if _config_snapshot(service_config_path) != snapshot:
-                    return "unavailable"
-                remaining()
-                return "kept"
+                    outcome = "stale"
+                elif _config_snapshot(service_config_path) == snapshot:
+                    outcome = "kept"
             finally:
                 client.timeout = max(0.001, min(started + timeout - time.monotonic(), 1.5))
+        remaining()
     except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
-        return "unavailable"
+        outcome = "unavailable"
+    return result(outcome)
+
 
 def recall_cards(service_config_path: Path, prompt: str, project_root: Path,
                  timeout: float = 1.5, observe: bool = False) -> dict:
@@ -1393,7 +1474,7 @@ def register_reader_concerns(service_config_path, project_root, db_id, nominatio
     deadline = time.monotonic() + timeout
     try:
         config, snapshot, token = _project_config(service_config_path, project_root, store_target)
-        with McpClient(config.url, token=token, timeout=min(timeout, 1.5)) as client:
+        with _service_client(config, token=token, timeout=min(timeout, 1.5)) as client:
             if store_target is not None:
                 store_target.catalog_identity(client.call_tool("databases", {}), db_id)
             for nomination, warning in zip(nominations, warnings):

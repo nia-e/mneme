@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import copy
-import fcntl
+import host_files
 import hashlib
 import io
 import json
@@ -208,15 +208,23 @@ class HookTests(unittest.TestCase):
         context = hooks.handle_event(prompt, self.config)
         self.assertIn("session_id=session_1, turn_id=turn_1", context["hookSpecificOutput"]["additionalContext"])
         command = hooks._checkpoint_command(self.config, "session_1", "turn_1")
-        self.assertEqual(shlex.split(command), [sys.executable, str(Path(hooks.__file__).resolve()), "checkpoint",
-                                                "--config", str(self.config_path.resolve()), "--session-id", "session_1",
-                                                "--turn-id", "turn_1"])
+        expected = [sys.executable, str(Path(hooks.__file__).resolve()), "checkpoint",
+                    "--config", str(self.config_path.resolve()), "--session-id", "session_1", "--turn-id", "turn_1"]
+        if host_files.WINDOWS:
+            self.assertEqual(command, hooks.render_checkpoint_command(expected))
+            self.assertIn(" in PowerShell", context["hookSpecificOutput"]["additionalContext"])
+        else:
+            self.assertEqual(shlex.split(command), expected)
         self.assertIn(command + " --outcome none", context["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(hooks.handle_event(prompt, self.config), context)
         stop = self.event("Stop", stop_hook_active=False, last_assistant_message="secret result")
         continuation = hooks.handle_event(stop, self.config)
         self.assertEqual(continuation["decision"], "block")
-        self.assertIn(command + " --outcome none", continuation["reason"])
+        self.assertIn(command + " --outcome captured --id ACTUAL_ULID", continuation["reason"])
+        self.assertIn("`--outcome none` and no `--id`", continuation["reason"])
+        self.assertIn("`--outcome deferred` and no `--id`", continuation["reason"])
+        self.assertEqual(continuation["reason"].count(command), 1)
+        self.assertLessEqual(len(continuation["reason"].encode()), hooks.MAX_CONTEXT_BYTES)
         self.assertEqual(hooks.handle_event(stop, self.config), {})
         self.assertEqual(hooks.handle_event({**stop, "stop_hook_active": True}, self.config), {})
         synthetic = self.event("UserPromptSubmit", turn_id="turn_2", prompt=continuation["reason"])
@@ -248,15 +256,23 @@ class HookTests(unittest.TestCase):
     def test_crash_before_atomic_replace_keeps_old_state(self):
         hooks.handle_event(self.event("UserPromptSubmit", prompt="Design the new repository data model."), self.config)
         before = self.state_json()
-        original_replace = hooks.os.replace
+        original_replace = hooks.host_files._replace_synced_file
         def crash(_source, _target):
             raise OSError("simulated crash")
         try:
-            hooks.os.replace = crash
+            hooks.host_files._replace_synced_file = crash
             with self.assertRaises(OSError):
                 hooks.checkpoint(self.config, "session_1", "turn_1", "none", [])
         finally:
-            hooks.os.replace = original_replace
+            hooks.host_files._replace_synced_file = original_replace
+        self.assertEqual(self.state_json(), before)
+
+    def test_oversized_stop_guidance_preserves_unspent_continuation(self):
+        hooks.handle_event(self.event("UserPromptSubmit", prompt="Design the local parser."), self.config)
+        before = self.state_json()
+        with patch.object(hooks, "_checkpoint_command", return_value="x" * hooks.MAX_CONTEXT_BYTES):
+            with self.assertRaisesRegex(hooks.HookError, "context limit"):
+                hooks._stop_checkpoint(self.config, "session_1", "turn_1")
         self.assertEqual(self.state_json(), before)
 
     def test_corrupt_state_error_does_not_claim_checkpoint(self):
@@ -793,10 +809,10 @@ class HookTests(unittest.TestCase):
             self.assertEqual(stop["decision"], "block")
             self.assertEqual(hooks.handle_event(self.event("UserPromptSubmit", turn_id="synthetic", prompt=stop["reason"]), config), {})
         self.assertFalse(self.state_json()["turns"]["turn_1"]["checkpoint"])
-        def busy(_file, flags):
-            self.assertTrue(flags & hooks.fcntl.LOCK_NB)
+        def busy(_file, *, blocking=True):
+            self.assertFalse(blocking)
             raise BlockingIOError
-        with patch.object(hooks.fcntl, "flock", side_effect=busy):
+        with patch.object(hooks.host_files, "lock_file", side_effect=busy):
             with patch.object(hooks, "_reader_worker", return_value=worker):
                 self.assertEqual(hooks.handle_event(self.event("UserPromptSubmit", turn_id="turn_2", prompt="Review the parser"), config), {})
                 self.assertEqual(hooks.handle_event(self.event("Stop", stop_hook_active=False), config), {})
@@ -1275,6 +1291,7 @@ class ConditionalDisplayTests(unittest.TestCase):
         self.assertTrue(all("conditional_binding" not in row for row in packed["displayed"]))
 
 
+@unittest.skipIf(host_files.WINDOWS, "v1 had only a Unix writer; native Windows refuses predecessor migration")
 class LegacyHookStateUpgradeTests(unittest.TestCase):
     """Named installed v1 checkpoint shape, not a reader/recording-ledger reset.
 
@@ -1393,7 +1410,7 @@ class LegacyHookStateUpgradeTests(unittest.TestCase):
     def test_shared_lock_busy_then_latest_legacy_preimage_and_old_writer_refusal(self):
         lock = self.path.with_suffix(".lock")
         with lock.open("a+b") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            host_files.lock_file(stream, blocking=False)
             with self.assertRaisesRegex(hooks.HookError, "busy"):
                 self.admit()
             self.assertEqual(self.path.read_bytes(), self.raw)
@@ -1408,7 +1425,7 @@ class LegacyHookStateUpgradeTests(unittest.TestCase):
         self.assertEqual(self.backups()[0].read_bytes(), latest_raw)
         promoted = self.path.read_bytes()
         with lock.open("a+b") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            host_files.lock_file(stream)
             # Exact installed v1 reader/writer guard (reference hash above).
             data = hooks._bounded_json(self.path, hooks.MAX_STATE)
             with self.assertRaises(hooks.HookError):

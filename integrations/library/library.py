@@ -8,7 +8,7 @@ live Cozo database, and never rewrites a generation that a reader may hold.
 from __future__ import annotations
 
 import argparse
-import fcntl
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -22,6 +22,19 @@ import tarfile
 import time
 import uuid
 from urllib.parse import urlsplit
+
+# Installed helpers share lib/; the source/bundled tree has codex/ beside library/.
+# Resolve only those two layouts, not a machine-wide optional dependency.
+try:
+    import host_files
+except ModuleNotFoundError as error:
+    if error.name != "host_files":
+        raise
+    helper_dir = Path(__file__).resolve().parent.parent / "codex"
+    if not (helper_dir / "host_files.py").is_file():
+        raise
+    sys.path.insert(0, str(helper_dir))
+    import host_files
 
 MAX_JSON = 1024 * 1024
 MAX_FILES = 100_000
@@ -39,6 +52,17 @@ class LibraryError(Exception):
     pass
 
 
+def _require_relay_support():
+    # MoveFileEx WRITE_THROUGH is not a documented recursive tree/ancestor
+    # durability barrier. The relay's generation publication requires those
+    # barriers, unlike ordinary atomic local metadata. Do not silently weaken
+    # that contract or create stage/lock evidence before refusing it.
+    if host_files.WINDOWS:
+        raise LibraryError("snapshot relay is unsupported on Windows: durable directory "
+                           "generation publication is unavailable; local registration/status "
+                           "remain supported")
+
+
 def _pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -49,7 +73,7 @@ def _pairs(pairs):
 
 
 def _read_json(path, limit=MAX_JSON):
-    with Path(path).open("rb") as stream:
+    with _open_file(path, "rb") as stream:
         data = stream.read(limit + 1)
     if len(data) > limit:
         raise LibraryError(f"JSON exceeds {limit} bytes")
@@ -59,32 +83,77 @@ def _read_json(path, limit=MAX_JSON):
         raise LibraryError("invalid JSON") from error
 
 
+def _open_file(path, mode):
+    flags = {"rb": os.O_RDONLY, "xb": os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+             "a+b": os.O_RDWR | os.O_CREAT | os.O_APPEND}[mode]
+    try:
+        descriptor = host_files.open_regular(path, flags)
+    except ValueError as error:
+        raise LibraryError(f"unsafe library file: {error}") from error
+    return os.fdopen(descriptor, mode)
+
+
+def _open_directory(path):
+    try:
+        return host_files.open_directory(path)
+    except ValueError as error:
+        raise LibraryError(f"unsafe library directory: {error}") from error
+
+
+def _ensure_directory(path):
+    """Create private state; preserve safe, user-owned existing Unix modes."""
+    try:
+        host_files.ensure_state_directory(path)
+    except ValueError as error:
+        raise LibraryError(f"unsafe library directory: {error}") from error
+
+
 def _write_json(path, value):
     path = Path(path)
     encoded = (json.dumps(value, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False, allow_nan=False) + "\n").encode()
     if len(encoded) > MAX_JSON:
         raise LibraryError("catalog or message exceeds JSON bound")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+    _ensure_directory(path.parent)
     try:
-        with tmp.open("xb") as stream:
-            os.chmod(tmp, 0o600)
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-        _sync_dir(path.parent)
-    finally:
-        tmp.unlink(missing_ok=True)
+        host_files.atomic_write(path, encoded)
+    except ValueError as error:
+        raise LibraryError(f"unsafe library metadata: {error}") from error
 
 
 def _sync_dir(path):
-    fd = os.open(path, os.O_RDONLY)
+    host_files.sync_directory(path)
+
+
+def _write_stream(path, source):
+    """Flush private bytes before publishing their final name, on either host."""
+    path = Path(path)
+    _ensure_directory(path.parent)
+    temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
     try:
-        os.fsync(fd)
+        with _open_file(temporary, "xb") as stream:
+            shutil.copyfileobj(source, stream, 1024 * 1024)
+            stream.flush()
+            os.fsync(stream.fileno())
+        host_files.replace_file(temporary, path)
     finally:
-        os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def _copy_file(source, destination):
+    with _open_file(source, "rb") as stream:
+        _write_stream(destination, stream)
+
+
+def _copy_tree(source, destination):
+    for root, dirs, files in os.walk(source, followlinks=False):
+        relative = Path(root).relative_to(source)
+        _ensure_directory(Path(destination) / relative)
+        for name in dirs:
+            fd = _open_directory(Path(root) / name)
+            os.close(fd)
+        for name in files:
+            _copy_file(Path(root) / name, Path(destination) / relative / name)
 
 
 def _nonempty(value, field):
@@ -187,12 +256,16 @@ def _load(config_path):
     return config_path, config, catalog_path, catalog, publisher_path, publisher
 
 
+@contextmanager
 def _lock(config_path):
     path = Path(str(config_path) + ".lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    stream = path.open("a+b")
-    fcntl.flock(stream, fcntl.LOCK_EX)
-    return stream
+    _ensure_directory(path.parent)
+    with _open_file(path, "a+b") as stream:
+        host_files.lock_file(stream)
+        try:
+            yield stream
+        finally:
+            host_files.unlock_file(stream)
 
 
 def _entry(catalog, owner, project):
@@ -250,6 +323,7 @@ def serving_registry(config_path):
 
 def serve(config_path, mcp, http, token_env=None):
     """Exec a dedicated read-only host with generation-pinned DB aliases."""
+    _require_relay_support()
     mcp = _path(mcp, "mneme-mcp")
     if not isinstance(http, str) or not re.fullmatch(r"(?:127\.0\.0\.1|\[::1\]):[0-9]{1,5}", http):
         raise LibraryError("serve --http must bind numeric loopback")
@@ -546,6 +620,7 @@ def enroll_project(config_path, project_root, db_id=None, *, display_name=None, 
     Returns False for an unconfigured/private/isolated project. Never fabricates
     db_id from a filesystem path; a later call can enroll once it is verified.
     """
+    _require_relay_support()
     config_path = Path(config_path)
     if not config_path.exists() or db_id is None or not _eligible(project_root):
         return False
@@ -665,7 +740,7 @@ def validate_bundle(bundle, db_id):
         if file.is_symlink() or not file.is_file() or file.stat().st_size != size:
             raise LibraryError("snapshot file absent, symlinked, or wrong size")
         hasher = hashlib.sha256()
-        with file.open("rb") as stream:
+        with _open_file(file, "rb") as stream:
             while chunk := stream.read(1024 * 1024):
                 hasher.update(chunk)
         if hasher.hexdigest() != digest:
@@ -678,6 +753,9 @@ def validate_bundle(bundle, db_id):
             path = Path(root) / name
             if path.is_symlink():
                 raise LibraryError("snapshot contains symlink")
+            if path.is_dir():
+                fd = _open_directory(path)
+                os.close(fd)
             if path.is_file():
                 actual.add(path.relative_to(bundle).as_posix())
     if actual != expected:
@@ -706,7 +784,11 @@ def _make_archive(descriptor, bundle, delivery_id=None):
             manifest = message["snapshot"]
             names = ["manifest.json"] + [x["path"] for x in manifest["files"]]
             for name in names:
-                archive.add(Path(bundle) / name, arcname="snapshot/" + name, recursive=False)
+                with _open_file(Path(bundle) / name, "rb") as stream:
+                    # Preserve the existing member metadata/bytes: pending
+                    # delivery IDs must not conflict merely after an upgrade.
+                    info = archive.gettarinfo(fileobj=stream, arcname="snapshot/" + name)
+                    archive.addfile(info, stream)
     data = output.getvalue()
     if len(data) > MAX_BUNDLE + MAX_JSON + 1024 * 1024:
         raise LibraryError("archive exceeds bound")
@@ -717,23 +799,22 @@ def _peer_send(peer, data, delivery_id):
     transport = peer.get("transport")
     if transport == "local_directory":
         inbox = _path(peer.get("inbox"), "peer inbox")
-        inbox.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(inbox)
         destination = inbox / (delivery_id + ".tar")
         if destination.exists():
-            if destination.is_symlink() or destination.read_bytes() != data:
-                raise LibraryError("local delivery identity conflict")
+            with _open_file(destination, "rb") as stream:
+                if stream.read(len(data) + 1) != data:
+                    raise LibraryError("local delivery identity conflict")
             return None
         tmp = inbox / (delivery_id + ".part-" + uuid.uuid4().hex)
         try:
-            with tmp.open("xb") as stream:
-                os.chmod(tmp, 0o600)
+            with _open_file(tmp, "xb") as stream:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(tmp, destination)
+            host_files.rename_no_replace(tmp, destination)
         finally:
             tmp.unlink(missing_ok=True)
-        _sync_dir(inbox)
         return None
     elif transport == "ssh":
         host = _nonempty(peer.get("host"), "SSH host")
@@ -809,6 +890,7 @@ def _merge_ack(config, catalog, item, response):
 
 
 def sync(config_path):
+    _require_relay_support()
     # A project may become private after enrollment but before an offline
     # announcement is delivered. Supersede it with a withdrawal first.
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
@@ -885,11 +967,8 @@ def _extract(data, stage):
             if name != "message.json" and not name.startswith("snapshot/"):
                 raise LibraryError("unexpected archive member")
             dest = stage / name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with archive.extractfile(member) as source, dest.open("xb") as target:
-                shutil.copyfileobj(source, target, 1024 * 1024)
-                target.flush()
-                os.fsync(target.fileno())
+            with archive.extractfile(member) as source:
+                _write_stream(dest, source)
         if "message.json" not in seen:
             raise LibraryError("missing message")
     message = _read_json(stage / "message.json")
@@ -937,15 +1016,16 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
     authenticated_peer is supplied by a trusted local inbox or a fixed SSH
     receiver wrapper, never by the incoming message itself.
     """
+    _require_relay_support()
     with _lock(config_path):
         cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
         peer = next((p for p in publisher["peers"] if p.get("device_id") == authenticated_peer), None)
         if peer is None:
             raise LibraryError("untrusted peer")
         state = cp.parent / "library-replicas"
-        state.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(state)
         stage = state / (".stage-" + uuid.uuid4().hex)
-        stage.mkdir(mode=0o700)
+        host_files.ensure_private_directory(stage, parents=False, exist_ok=False)
         try:
             message = _extract(data, stage)
             delivery_id = message.get("delivery_id")
@@ -994,9 +1074,8 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
                     return _receive_result("stale", config, catalog, message, owner, project, include_ack)
                 generation = _component(manifest["generation"], "generation")
                 target_parent = state / owner / project
-                target_parent.mkdir(parents=True, exist_ok=True)
-                # On the first replica, durability of the nested parent names
-                # is separate from durability of the generation rename.
+                _ensure_directory(target_parent)
+                # Parent names and generation publication are distinct barriers.
                 _sync_dir(cp.parent)
                 _sync_dir(state)
                 _sync_dir(state / owner)
@@ -1011,20 +1090,21 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
                     # Keep the original bundle separately for retry proof.
                     incoming = stage / "snapshot"
                     prepared = stage / "prepared"
-                    prepared.mkdir()
-                    os.rename(incoming, prepared / "bundle")
+                    _ensure_directory(prepared)
+                    host_files.rename_no_replace(incoming, prepared / "bundle")
                     serving = prepared / "serve"
-                    serving.mkdir()
-                    shutil.copy2(prepared / "bundle" / "database.db", serving / "database.db")
+                    _ensure_directory(serving)
+                    _copy_file(prepared / "bundle" / "database.db", serving / "database.db")
                     bodies = prepared / "bundle" / "bodies"
                     if bodies.exists():
-                        shutil.copytree(bodies, serving / "database.bodies")
+                        _copy_tree(bodies, serving / "database.bodies")
                     for root, dirs, files in os.walk(prepared):
                         for name in files:
-                            with (Path(root) / name).open("rb") as stream:
-                                os.fsync(stream.fileno())
+                            # Flushing immutable evidence uses its checked
+                            # existing handle, never a replacement/rewrite.
+                            host_files.sync_file(Path(root) / name)
                         _sync_dir(root)
-                    os.rename(prepared, target)
+                    host_files.rename_no_replace(prepared, target)
                     _sync_dir(target_parent)
                 replica = {"source_device_id": config["device_id"],
                            "database": replica_alias(owner, project, generation),
@@ -1067,6 +1147,7 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
 
 
 def publish(config_path, project_id, bundle):
+    _require_relay_support()
     with _lock(config_path):
         cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
         descriptor = _entry(catalog, config["device_id"], project_id)
@@ -1082,6 +1163,7 @@ def publish(config_path, project_id, bundle):
 
 
 def _snapshot(config_path, project_id):
+    _require_relay_support()
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
     descriptor = _entry(catalog, config["device_id"], project_id)
     if not descriptor or descriptor.get("withdrawn") or project_id not in publisher["sources"]:
@@ -1135,6 +1217,7 @@ def _snapshot(config_path, project_id):
 
 
 def once(config_path):
+    _require_relay_support()
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
     now = int(time.time())
     due = []
@@ -1161,6 +1244,7 @@ def once(config_path):
 
 
 def receive_inbox(config_path):
+    _require_relay_support()
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
     accepted = rejected = 0
     for peer in publisher["peers"]:
@@ -1174,7 +1258,9 @@ def receive_inbox(config_path):
             try:
                 if file.is_symlink() or file.stat().st_size > MAX_BUNDLE + MAX_JSON + 1024 * 1024:
                     raise LibraryError("unsafe inbox archive")
-                response = receive(config_path, file.read_bytes(),
+                with _open_file(file, "rb") as stream:
+                    data = stream.read(MAX_BUNDLE + MAX_JSON + 1024 * 1024 + 1)
+                response = receive(config_path, data,
                                    authenticated_peer=peer["device_id"], include_ack=True)
                 if response["ack"]["delivery_id"] != file.stem:
                     raise LibraryError("inbox filename and delivery identity differ")

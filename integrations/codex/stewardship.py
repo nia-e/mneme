@@ -10,7 +10,6 @@ known overages halt further admission and unknown usage fences the whole epoch.
 from __future__ import annotations
 
 from contextlib import contextmanager, closing
-import fcntl
 import hashlib
 import json
 import os
@@ -20,7 +19,8 @@ import secrets
 import sqlite3
 import time
 
-from librarian_policy import resolve
+from librarian_policy import resolve, IDLE_SECONDS
+import host_files
 
 ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -38,9 +38,29 @@ def encoded(value):
 
 
 def enabled(config):
+    if config.get("memory_scope") == "registry":
+        try:
+            return _selected_owner(config) is not None
+        except Exception:
+            return False
     return (config.get("tag_stewardship") is True
             and config.get("recording_mode") == "automatic"
             and config.get("memory_mode", config.get("recall_mode")) == "async")
+
+
+def _selected_owner(config):
+    """Revalidate all selected owners; the projected display name is not authority."""
+    if config.get("memory_scope") != "registry":
+        return None
+    from registry_runtime import selection
+    current = selection(config)
+    store = current.named(config["selected_store"])
+    if (store not in current.maintainable
+            or config.get("memory_mode", config.get("recall_mode")) != "async"
+            or str(config["service_config"]) != store.service_config
+            or config.get("tag_guide_id") != store.maintenance.tag_guide_id):
+        raise ValueError("selected owner does not permit this maintenance pass")
+    return store
 
 
 def journal_root():
@@ -58,17 +78,19 @@ class Journal:
         root = journal_root() if root is None else Path(root)
         if not root.is_absolute() or root.is_symlink():
             raise ValueError("journal_path")
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        host_files.ensure_state_directory(root)
         root = root.resolve(strict=True)
         self.path = root / (db_id + ".sqlite3")
         if self.path.is_symlink() or self.path.exists() and (not self.path.is_file() or self.path.stat().st_nlink != 1):
             raise ValueError("journal_path")
-        self.fd = os.open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        self.fd = host_files.open_regular(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR)
         self.db = None
         created = False
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            host_files.lock_file(self.fd, blocking=False)
             if self.path.exists():
+                descriptor = host_files.open_regular(self.path)
+                os.close(descriptor)
                 # Positive current-schema classification before any SQL write.
                 self.db = sqlite3.connect(self.path.as_uri()+"?mode=rw", uri=True, timeout=0, isolation_level=None)
                 self.db.row_factory = sqlite3.Row
@@ -85,9 +107,11 @@ class Journal:
                 self.db.execute("SELECT token,epoch,targets,guide FROM reservations LIMIT 0")
                 self.db.execute("SELECT seq,id,fingerprint,guide,tags,status,created FROM intents LIMIT 0")
             else:
-                self.db = sqlite3.connect(self.path, timeout=0, isolation_level=None)
+                # Private permissions/DACL exist before SQLite sees the file.
+                descriptor = host_files.open_regular(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(descriptor)
                 created = True
-                os.chmod(self.path, 0o600)
+                self.db = sqlite3.connect(self.path.as_uri()+"?mode=rw", uri=True, timeout=0, isolation_level=None)
                 self.db.row_factory = sqlite3.Row
                 self.db.executescript("""
                     BEGIN IMMEDIATE;
@@ -184,10 +208,6 @@ class Journal:
         with self.transaction():
             for row in due:
                 self.db.execute("UPDATE work SET dirty=MAX(dirty,1),retry_after=0 WHERE id=?",(row[0],))
-        # Cold material gets a reserved half even under a perpetual dirty queue.
-        cold = self.db.execute("SELECT id FROM work WHERE cold=1 ORDER BY id LIMIT ?", ((limit+1)//2,)).fetchall()
-        # Explicit changed-node notifications outrank policy/technical rechecks.
-        dirty = self.db.execute("SELECT id FROM work WHERE dirty>0 ORDER BY dirty DESC,examined,id LIMIT ?", (limit,)).fetchall()
         # Policy invalidation is a separate bounded ID walk, not a table scan
         # for every unchanged node and never a reset of the cold-store cursor.
         with self.transaction():
@@ -202,15 +222,35 @@ class Journal:
                     self.db.execute("UPDATE work SET dirty=MAX(dirty,1) WHERE id=?",(row["id"],))
             if policy_rows:
                 self.put("policy_cursor",policy_rows[-1]["id"])
-        stale = [(row["id"],) for row in policy_rows if row["guide"] != guide]
-        more_cold = self.db.execute("SELECT id FROM work WHERE cold=1 ORDER BY id LIMIT ?", (limit,)).fetchall()
-        result = []
-        for row in (*cold, *dirty, *stale, *more_cold):
-            if row[0] not in result:
-                result.append(row[0])
-            if len(result) == limit:
-                break
+        # Interleave before native reads, not just inside the model's candidate
+        # pool. A cold-half prefix can otherwise consume every real byte slot.
+        # Explicit notifications belong to hot even if also discovered cold;
+        # policy rechecks of cold nodes stay cold, so the lanes are disjoint.
+        cold = self.db.execute("SELECT id FROM work WHERE cold=1 AND dirty<2 ORDER BY id LIMIT ?", (limit,)).fetchall()
+        hot = self.db.execute("SELECT id FROM work WHERE dirty>0 AND (cold=0 OR dirty=2) ORDER BY dirty DESC,examined,id LIMIT ?", (limit,)).fetchall()
+        lanes = (hot,cold) if self.get("next_lane") == "hot" else (cold,hot)
+        result=[]
+        for index in range(max(len(cold),len(hot))):
+            for lane in lanes:
+                if index<len(lane):
+                    result.append(lane[index][0])
+                    if len(result)==limit:
+                        return result
         return result
+
+    def served(self, identifier):
+        # Called once per batch after actual terminal scan work or model
+        # admission. Merely enumerating/reading a discarded suffix earns no
+        # turn, and the second policy walk cannot cancel this persisted choice.
+        row=self.db.execute("SELECT cold,dirty FROM work WHERE id=?",(identifier,)).fetchone()
+        self.put("next_lane","hot" if row and row["cold"] and row["dirty"]<2 else "cold")
+
+    def has_work(self):
+        return (self.needs_page()
+            or self.db.execute("SELECT 1 FROM work WHERE cold=1 LIMIT 1").fetchone() is not None
+            or self.db.execute("SELECT 1 FROM work WHERE dirty>0 LIMIT 1").fetchone() is not None
+            or self.db.execute("SELECT 1 FROM work WHERE retry_after>0 AND retry_after<=? LIMIT 1",(self.now,)).fetchone() is not None
+            or self.db.execute("SELECT 1 FROM work WHERE id>? LIMIT 1",(self.get("policy_cursor") or "",)).fetchone() is not None)
 
     def examined(self, identifier, fingerprint, guide):
         row = self.db.execute("SELECT fingerprint,guide,outcome FROM work WHERE id=?", (identifier,)).fetchone()
@@ -249,12 +289,19 @@ class Journal:
     def reserve_native(self, budget):
         epoch = int(self.now // DAY)
         with self.transaction():
-            self.db.execute("INSERT OR IGNORE INTO usage(epoch) VALUES(?)",(epoch,))
-            row = self.db.execute("SELECT native_rounds FROM usage WHERE epoch=?",(epoch,)).fetchone()
-            if (row[0] >= budget.attempts or self.now < float(self.get("next_batch") or 0)):
+            work=self.has_work()
+            if (self.now < float(self.get("next_batch") or 0)
+                    or not work and self.now < float(self.get("next_probe") or 0)):
                 return False
+            self.db.execute("INSERT OR IGNORE INTO usage(epoch) VALUES(?)",(epoch,))
+            # Accounting is never erased or refunded. Native work is rate/byte/
+            # time bounded, not rationed by the unrelated paid-model allowance.
             self.db.execute("UPDATE usage SET native_rounds=native_rounds+1 WHERE epoch=?",(epoch,))
             self.put("next_batch",self.now+budget.native_seconds)
+            delay=budget.native_seconds if work else min(IDLE_SECONDS,max(
+                budget.native_seconds,float(self.get("probe_delay") or 0)*2))
+            self.put("probe_delay",delay)
+            self.put("next_probe",self.now+delay)
         return True
 
     def reserve(self, targets, guide, budget):
@@ -311,12 +358,15 @@ def enqueue(config, db_id, ids):
     if not enabled(config):
         return False
     try:
+        selected = _selected_owner(config)
+        if selected is not None and selected.db_id is not None and selected.db_id != db_id:
+            return False
         if not isinstance(ids,(list,tuple)) or len(encoded(ids)) > resolve(config).native_read_bytes:
             return False
         with Journal(db_id) as journal:
             journal.enqueue(ids)
         return True
-    except (OSError,ValueError,TypeError,sqlite3.Error):
+    except Exception:
         return False
 
 
@@ -331,11 +381,11 @@ class NativeOwner:
         self.deadline = time.monotonic() + budget.native_seconds
         self.remaining_bytes = budget.native_read_bytes
         self.summary_bytes = min(16 * 1024,budget.native_read_bytes)
-        from mcp_client import McpClient
+        from service import client_for_service
         token = os.environ.get(service.token_env) if service.token_env else None
         if service.token_env and not token:
             raise ValueError("owner_unavailable")
-        self.client = McpClient(service.url, token=token, timeout=min(30,budget.native_seconds))
+        self.client = client_for_service(service, token=token, timeout=min(30,budget.native_seconds))
         self.db_id = None
 
     def __enter__(self):
@@ -360,6 +410,7 @@ class NativeOwner:
 
     def _admit(self):
         from hook_recall import _config_snapshot
+        _selected_owner(self.config)
         if _config_snapshot(Path(self.config["service_config"])) != self.snapshot:
             raise ValueError("owner_config_changed")
         self.policy.validate_workspace()
@@ -432,8 +483,13 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
     if not enabled(config) or not allowed():
         return False
     try:
+        # Freeze policy before opening the journal. Renaming an owner or editing
+        # its purpose never creates a fresh accounting identity or allowance.
+        selected = _selected_owner(config)
         budget=resolve(config)
         with NativeOwner(config,budget) as owner, Journal(owner.db_id) as journal, journal.lease():
+            if selected is not None and selected.db_id is not None and selected.db_id != owner.db_id:
+                raise ValueError("selected maintenance owner identity changed")
             journal.recover(budget)
             if not journal.reserve_native(budget):
                 return False
@@ -454,15 +510,23 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                 journal.page(ids,cursor)
             previous_guide=journal.get("guide") or ""
             pool=[]
+            served=False
+            def serve(identifier):
+                nonlocal served
+                if not served:
+                    journal.served(identifier)
+                    served=True
             for identifier in journal.candidates(previous_guide,max_nodes):
                 if not allowed() or time.monotonic()>=owner.deadline or owner.remaining_bytes-context_room<MIN_NODE_BYTES:
                     break
                 try:
                     target,fingerprint=owner.target(identifier)
                 except Exception:
+                    serve(identifier)
                     journal.defer(identifier,None,previous_guide,"read_deferred")
                     continue
                 if target is None or identifier==config.get("tag_guide_id"):
+                    serve(identifier)
                     journal.mark(identifier,fingerprint,previous_guide,"ineligible")
                     continue
                 pool.append(target)
@@ -485,11 +549,13 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
             for target in pool:
                 identifier,fingerprint=target["id"],target["content_fingerprint"]
                 if journal.examined(identifier,fingerprint,guide) or journal.deferred(identifier,fingerprint,guide):
+                    serve(identifier)
                     journal.db.execute("UPDATE work SET dirty=0,cold=0 WHERE id=?",(identifier,))
                     continue
                 prompt,_=stewardship_contract.prepare([*targets,target],context,budget=budget)
                 if prompt is None:
                     if not targets:
+                        serve(identifier)
                         journal.defer(identifier,fingerprint,guide,"resource_deferred")
                         continue
                     break
@@ -497,6 +563,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
             if not targets or not allowed():
                 journal.put("last_outcome","scan_only_or_interrupted")
                 return False
+            _selected_owner(config)
             token=journal.reserve(targets,guide,budget)
             if token is None:
                 journal.put("last_outcome","owner_provider_budget")
@@ -506,8 +573,11 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                 journal.settle(token,{"provider_attempt":False},budget)
                 journal.put("last_outcome","foreground_or_session_budget")
                 return False
+            serve(targets[0]["id"])
             try:
-                result=runtime.steward(targets,context,timeout=min(45,budget.native_seconds))
+                # The runtime owns its finite provider deadline (currently
+                # 45s); native I/O effort must not truncate the inference turn.
+                result=runtime.steward(targets,context)
             except Exception:
                 result={"provider_attempt":True,"usage":None,"decisions":None,"reason":"provider_error"}
             session_settled=account(key,result)
@@ -529,9 +599,19 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
             # unbounded retry period. One fresh bounded write window, no retry.
             owner.deadline=time.monotonic()+budget.native_seconds
             lookup={target["id"]:target for target in targets}
-            for decision in decisions:
+            for index, decision in enumerate(decisions):
                 if not allowed():
                     break
+                try:
+                    _selected_owner(config)
+                except Exception:
+                    # The paid assessment still belongs to both ledgers. Only
+                    # application is cancelled; no replay or budget reset.
+                    for remaining in decisions[index:]:
+                        pending=lookup[remaining["id"]]
+                        journal.defer(pending["id"],pending["content_fingerprint"],guide,"selection_changed")
+                    journal.put("last_outcome","selection_changed")
+                    return True
                 target=lookup[decision["id"]]
                 disposition=decision["disposition"]
                 if disposition!="retag":
@@ -580,6 +660,8 @@ def inspect(db_id, *, limit=16, root=None):
         return {"db_id":db_id,"outcome":"absent"}
     if path.is_symlink() or not path.is_file() or path.stat().st_nlink!=1:
         raise ValueError("journal_path")
+    descriptor = host_files.open_regular(path)
+    os.close(descriptor)
     with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=0)) as db:
         db.row_factory=sqlite3.Row
         db.execute("BEGIN")  # Read-only SQLite snapshot; never a second writer.

@@ -45,6 +45,7 @@ fn init_help_and_illegal_selectors_are_local_and_bounded() {
         "--mcp-binary",
         "--codex-binary",
         "--library-config",
+        "--store-registry",
     ] {
         assert!(help.contains(option));
     }

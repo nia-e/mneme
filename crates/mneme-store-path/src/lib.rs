@@ -10,12 +10,17 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(any(unix, windows))]
+use std::fs::File;
 #[cfg(unix)]
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 
 use ulid::Ulid;
 
 mod fresh;
+
+#[cfg(windows)]
+pub mod windows;
 
 pub use fresh::{
     FreshStoreNameObservationV1, FreshStorePublicationNeedsRecoveryV1,
@@ -36,17 +41,23 @@ const LEGACY_FILE: &str = "memory.json";
 /// so a normal frontend cannot create the conventional path during activation.
 #[derive(Debug)]
 pub struct StoreLease {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     file: File,
     #[cfg(unix)]
     parent: File,
+    #[cfg(windows)]
+    parent: windows::Directory,
     lock_path: PathBuf,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     parent_path: PathBuf,
     #[cfg(unix)]
     parent_identity: UnixIdentity,
     #[cfg(unix)]
     lock_identity: UnixIdentity,
+    #[cfg(windows)]
+    parent_identity: windows::FileIdentity,
+    #[cfg(windows)]
+    lock_identity: windows::FileIdentity,
 }
 
 impl StoreLease {
@@ -109,11 +120,16 @@ impl StoreLease {
             })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::acquire_lease(database, path)
+        }
+
+        #[cfg(not(any(unix, windows)))]
         {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "exclusive mneme store leases are currently supported only on Unix",
+                "exclusive mneme store leases require Unix or local NTFS on Windows",
             ))
         }
     }
@@ -141,6 +157,8 @@ impl StoreLease {
             require_parent_identity(&self.parent_path, &self.parent, self.parent_identity)?;
             require_named_lease_identity(&self.lock_path, &self.file, self.lock_identity)?;
         }
+        #[cfg(windows)]
+        windows::require_lease_guards(self)?;
         Ok(())
     }
 }
@@ -541,7 +559,18 @@ fn reject_multiply_linked_database(database: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn reject_multiply_linked_database(database: &Path) -> io::Result<()> {
+    windows::require_database_identity(database)
+}
+
+#[cfg(windows)]
+fn sync_retained_lease(parent: &windows::Directory, file: &File, _path: &Path) -> io::Result<()> {
+    file.sync_all()?;
+    parent.sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn reject_multiply_linked_database(_database: &Path) -> io::Result<()> {
     Ok(())
 }
@@ -562,13 +591,14 @@ pub fn default_store_path(directory: &Path) -> io::Result<PathBuf> {
 ///
 /// Only the conventional `memory.db` name participates in activation and
 /// legacy fallback. Custom filenames remain literal. When `current` exists it
-/// must be exactly a relative `generations/<ULID>` symlink selecting a real,
-/// non-symlink generation and regular database file. The returned activated
+/// must select exactly relative `generations/<ULID>`: a symlink on Unix or a
+/// protected versioned regular selector file on Windows. Generations and database
+/// files must be real, non-reparse objects. The returned activated
 /// path is canonicalized to the immutable generation, so a later activation
 /// switch cannot retarget an already-running process.
 pub fn resolve_configured_store_path(configured: &Path) -> io::Result<PathBuf> {
     reject_generation_local_configured_path(configured)?;
-    if configured.file_name() != Some(DATABASE_FILE.as_ref()) {
+    if !is_database_filename(configured.file_name()) {
         return match metadata_if_present(configured)? {
             Some(metadata) => canonical_existing_store(configured, &metadata, "custom database"),
             None => Ok(configured.to_path_buf()),
@@ -625,14 +655,27 @@ pub fn resolve_configured_store_path(configured: &Path) -> io::Result<PathBuf> {
         reject_unactivated_generation_catalog(directory)?;
         return Ok(configured.to_path_buf());
     };
+    #[cfg(not(windows))]
     if !current_metadata.file_type().is_symlink() {
         return Err(invalid_data(format!(
             "mneme activation {} is not a symlink",
             current.display()
         )));
     }
+    #[cfg(windows)]
+    if metadata_is_reparse(&current_metadata) || !current_metadata.is_file() {
+        return Err(invalid_data(format!(
+            "mneme activation {} is not a real regular Windows selector file",
+            current.display()
+        )));
+    }
 
+    #[cfg(not(windows))]
     let target = fs::read_link(&current)?;
+    #[cfg(windows)]
+    let selector = windows::ActivationSelector::open(&current)?;
+    #[cfg(windows)]
+    let target = selector.target().to_path_buf();
     let operation_id = activation_operation_id(&target).ok_or_else(|| {
         invalid_data(format!(
             "mneme activation {} must target relative generations/<ULID>, got {}",
@@ -663,15 +706,21 @@ pub fn resolve_configured_store_path(configured: &Path) -> io::Result<PathBuf> {
             ),
         )
     })?;
-    if database_metadata.file_type().is_symlink() || !database_metadata.is_file() {
+    if metadata_is_reparse(&database_metadata) || !database_metadata.is_file() {
         return Err(invalid_data(format!(
             "activated mneme database {} is not a real regular file",
             database.display()
         )));
     }
 
+    #[cfg(not(windows))]
     let canonical_generations = fs::canonicalize(&generations)?;
+    #[cfg(not(windows))]
     let canonical_generation = fs::canonicalize(&generation)?;
+    #[cfg(windows)]
+    let canonical_generations = canonical_real_windows_directory(&generations)?;
+    #[cfg(windows)]
+    let canonical_generation = canonical_real_windows_directory(&generation)?;
     if canonical_generation.parent() != Some(canonical_generations.as_path()) {
         return Err(invalid_data(format!(
             "activated mneme generation {} escapes catalog {}",
@@ -679,9 +728,13 @@ pub fn resolve_configured_store_path(configured: &Path) -> io::Result<PathBuf> {
             canonical_generations.display()
         )));
     }
+    #[cfg(not(windows))]
     let canonical_database = fs::canonicalize(&database)?;
+    #[cfg(windows)]
+    let canonical_database =
+        canonical_existing_store(&database, &database_metadata, "activated database")?;
     if canonical_database.parent() != Some(canonical_generation.as_path())
-        || canonical_database.file_name() != Some(DATABASE_FILE.as_ref())
+        || !is_database_filename(canonical_database.file_name())
     {
         return Err(invalid_data(format!(
             "activated mneme database {} escapes generation {}",
@@ -693,6 +746,7 @@ pub fn resolve_configured_store_path(configured: &Path) -> io::Result<PathBuf> {
     // Detect a concurrent selector swap across validation. Returning the
     // canonical generation makes later swaps harmless, but accepting a path
     // assembled from two different selector observations would be misleading.
+    #[cfg(not(windows))]
     if fs::read_link(&current)? != target {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -702,7 +756,21 @@ pub fn resolve_configured_store_path(configured: &Path) -> io::Result<PathBuf> {
             ),
         ));
     }
+    #[cfg(windows)]
+    selector.require_unchanged()?;
     Ok(canonical_database)
+}
+
+fn is_database_filename(name: Option<&std::ffi::OsStr>) -> bool {
+    #[cfg(windows)]
+    {
+        name.and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(DATABASE_FILE))
+    }
+    #[cfg(not(windows))]
+    {
+        name == Some(DATABASE_FILE.as_ref())
+    }
 }
 
 fn reject_generation_local_configured_path(configured: &Path) -> io::Result<()> {
@@ -750,6 +818,8 @@ fn physical_path_from_existing_ancestor(path: &Path) -> io::Result<PathBuf> {
     loop {
         match fs::symlink_metadata(cursor) {
             Ok(_) => {
+                #[cfg(windows)]
+                windows::require_plain_existing_path(cursor)?;
                 let mut physical = fs::canonicalize(cursor).map_err(|error| {
                     io::Error::new(
                         error.kind(),
@@ -805,12 +875,24 @@ fn path_names_generation_catalog(path: &Path) -> bool {
             previous_was_mneme = false;
             continue;
         };
-        if previous_was_mneme && part == "generations" {
+        if previous_was_mneme && component_name_matches(part, "generations") {
             return true;
         }
-        previous_was_mneme = part == ".mneme";
+        previous_was_mneme = component_name_matches(part, ".mneme");
     }
     false
+}
+
+fn component_name_matches(name: &std::ffi::OsStr, expected: &str) -> bool {
+    #[cfg(windows)]
+    {
+        name.to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+    }
+    #[cfg(not(windows))]
+    {
+        name == expected
+    }
 }
 
 fn generation_local_config_error(configured: &Path) -> io::Error {
@@ -850,18 +932,24 @@ fn require_real_directory(path: &Path, label: &str) -> io::Result<()> {
             format!("cannot inspect mneme {label} {}: {error}", path.display()),
         )
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if metadata_is_reparse(&metadata) || !metadata.is_dir() {
         return Err(invalid_data(format!(
             "mneme {label} {} is not a real directory",
             path.display()
         )));
     }
+    #[cfg(windows)]
+    windows::require_plain_existing_path(path)?;
     Ok(())
 }
 
 fn require_real_directory_if_present(path: &Path, label: &str) -> io::Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => Ok(()),
+        Ok(metadata) if !metadata_is_reparse(&metadata) && metadata.is_dir() => {
+            #[cfg(windows)]
+            windows::require_plain_existing_path(path)?;
+            Ok(())
+        }
         Ok(_) => Err(invalid_data(format!(
             "mneme {label} {} is not a real directory",
             path.display()
@@ -878,7 +966,7 @@ fn reject_unactivated_generation_catalog(directory: &Path) -> io::Result<()> {
     let generations = directory.join("generations");
     match fs::symlink_metadata(&generations) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            if metadata_is_reparse(&metadata) || !metadata.is_dir() {
                 return Err(invalid_data(format!(
                     "mneme generation catalog {} exists without an activation and is not a real directory",
                     generations.display()
@@ -908,6 +996,16 @@ fn canonical_existing_store(
             path.display()
         )));
     }
+    #[cfg(windows)]
+    let retained = {
+        if metadata_is_reparse(lexical_metadata) {
+            return Err(invalid_data(format!(
+                "mneme {label} {} is a reparse alias",
+                path.display()
+            )));
+        }
+        windows::open_regular_checked(path, true)?
+    };
     let canonical = fs::canonicalize(path).map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -920,7 +1018,51 @@ fn canonical_existing_store(
             canonical.display()
         )));
     }
+    #[cfg(windows)]
+    {
+        let identity = windows::file_identity(&retained)?;
+        let named = windows::open_regular_checked(path, true)?;
+        let resolved = windows::open_regular_checked(&canonical, true)?;
+        if !windows::file_identity(&named)?.same_file(identity)
+            || !windows::file_identity(&resolved)?.same_file(identity)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Windows database changed identity while resolving",
+            ));
+        }
+    }
     Ok(canonical)
+}
+
+#[cfg(windows)]
+fn canonical_real_windows_directory(path: &Path) -> io::Result<PathBuf> {
+    let retained = windows::Directory::open_parent(path)?;
+    let canonical = fs::canonicalize(path)?;
+    let resolved = windows::Directory::open_parent(&canonical)?;
+    if !retained.identity().same_object(resolved.identity()) {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Windows directory changed identity while resolving",
+        ));
+    }
+    retained.require_named()?;
+    resolved.require_named()?;
+    Ok(canonical)
+}
+
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {

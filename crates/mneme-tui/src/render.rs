@@ -128,7 +128,7 @@ fn single(text: &str) -> String {
     clean(text).replace(['\n', '\t'], " ")
 }
 
-fn short(text: &str, columns: usize) -> String {
+pub(crate) fn short(text: &str, columns: usize) -> String {
     let text = single(text);
     if Line::raw(&text).width() <= columns {
         return text;
@@ -526,6 +526,7 @@ fn help(frame: &mut Frame<'_>, screen: Rect, app: &App) {
             Line::raw(" o              scenes: recorded / occurred chronology"),
             Line::raw(" esc / ⌫ / b    map: back · Esc closes panes / cancels search"),
             Line::raw(" tab / r        choose source / refresh current view"),
+            Line::raw(" R              map: recompose loaded links (no source read)"),
             Line::raw(" ↑↓ / j k       opened detail: scroll; otherwise choose"),
             Line::raw(" Wheel / PgUp/Dn scroll text / page; Home/End jumps"),
             Line::raw(" ? / esc        close this guide"),
@@ -987,9 +988,7 @@ mod tests {
         app.close_edge_lens();
         assert_eq!(app.scene_nodes().len(), 12);
     }
-    #[test]
-    #[ignore = "manual rendered-fixture capture; no live memory source"]
-    fn capture_large_world_visual_fixture() {
+    fn large_world_visual_fixture() -> App {
         let mut app = app();
         app.graph = crate::model::Graph {
             nodes: (0..240)
@@ -1012,8 +1011,86 @@ mod tests {
                 .collect(),
             ..crate::model::Graph::default()
         };
+        app
+    }
+
+    fn assert_large_fixture_district_bounds(app: &App) {
+        let points = app.layout.borrow_mut().world_positions(&app.graph);
+        let groups = app.layout.borrow_mut().groups(&app.graph);
+        assert_eq!(groups.groups.len(), 20);
+        let bounds: Vec<_> = groups
+            .groups
+            .iter()
+            .map(|group| {
+                assert_eq!(group.members.len(), 12);
+                let members: Vec<_> = group
+                    .members
+                    .iter()
+                    .map(|id| {
+                        points[app
+                            .graph
+                            .nodes
+                            .iter()
+                            .position(|node| &node.id == id)
+                            .unwrap()]
+                    })
+                    .collect();
+                (
+                    members
+                        .iter()
+                        .map(|point| point.x)
+                        .fold(f64::INFINITY, f64::min),
+                    members
+                        .iter()
+                        .map(|point| point.x)
+                        .fold(f64::NEG_INFINITY, f64::max),
+                    members
+                        .iter()
+                        .map(|point| point.y)
+                        .fold(f64::INFINITY, f64::min),
+                    members
+                        .iter()
+                        .map(|point| point.y)
+                        .fold(f64::NEG_INFINITY, f64::max),
+                )
+            })
+            .collect();
+        for (i, a) in bounds.iter().enumerate() {
+            for (j, b) in bounds.iter().enumerate().skip(i + 1) {
+                assert!(
+                    a.1 < b.0 || b.1 < a.0 || a.3 < b.2 || b.3 < a.2,
+                    "districts {i}/{j} overlap: {a:?} / {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disconnected_large_fixture_keeps_districts_visually_separate() {
+        assert_large_fixture_district_bounds(&large_world_visual_fixture());
+    }
+
+    #[test]
+    fn thin_connected_quotient_does_not_crush_district_interiors() {
+        let mut app = large_world_visual_fixture();
+        app.graph.edges.extend((1..20).map(|district| Edge {
+            from: format!("fixture-{:03}", district * 12 - 1),
+            to: format!("fixture-{:03}", district * 12),
+            kind: "associative".into(),
+            weight: 0.001,
+        }));
+        assert_large_fixture_district_bounds(&app);
+    }
+
+    #[test]
+    #[ignore = "manual rendered-fixture capture; no live memory source"]
+    fn capture_large_world_visual_fixture() {
         let path = std::env::var("MNEME_TUI_CAPTURE")
             .expect("set MNEME_TUI_CAPTURE for a disposable ANSI frame");
-        std::fs::write(path, preview(120, 36, &app).unwrap()).unwrap();
+        std::fs::write(
+            path,
+            preview(120, 36, &large_world_visual_fixture()).unwrap(),
+        )
+        .unwrap();
     }
 }

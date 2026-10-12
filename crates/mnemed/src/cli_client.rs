@@ -47,8 +47,64 @@ pub(crate) struct ClientArgs {
     #[arg(long, value_enum)]
     expected_server: ExpectedServer,
     /// Required to make the loopback-only policy explicit at the call site.
-    #[arg(long, required = true)]
+    #[arg(
+        long,
+        required_unless_present = "remote_owner",
+        conflicts_with = "remote_owner"
+    )]
     local_only: bool,
+    /// Explicit configured owner; use native HTTP, HTTPS, or SSH transport.
+    #[arg(
+        long,
+        required_unless_present = "local_only",
+        conflicts_with = "local_only"
+    )]
+    remote_owner: bool,
+    /// Remote loopback MCP port forwarded by the native SSH transport.
+    #[arg(long, requires = "remote_owner", conflicts_with = "local_only", value_parser = clap::value_parser!(u16).range(1..))]
+    ssh_mcp_port: Option<u16>,
+}
+
+fn owner_endpoint(endpoint: &str) -> Result<(), ClientFailure> {
+    if endpoint.len() > 4096
+        || endpoint
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return Err(ClientFailure::input(
+            "remote owner URL must be bounded and contain no whitespace",
+        ));
+    }
+    let url =
+        url::Url::parse(endpoint).map_err(|_| ClientFailure::input("invalid remote owner URL"))?;
+    if url.host_str().is_none()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port() == Some(0)
+    {
+        return Err(ClientFailure::input(
+            "remote owner URL requires a host and no password, query, or fragment",
+        ));
+    }
+    match url.scheme() {
+        "http" | "https" if url.username().is_empty() && !endpoint.contains('@') => Ok(()),
+        "ssh"
+            if matches!(url.path(), "" | "/")
+                && !url
+                    .host_str()
+                    .is_some_and(|h| h.starts_with('-') || h.contains('%'))
+                && url
+                    .username()
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)) =>
+        {
+            Ok(())
+        }
+        _ => Err(ClientFailure::input(
+            "remote owner requires HTTP/HTTPS without credentials or ssh://[user@]host[:ssh-port] without a path",
+        )),
+    }
 }
 
 fn frame<R: BufRead>(input: &mut R) -> io::Result<Option<Vec<u8>>> {
@@ -756,21 +812,24 @@ async fn handle(
             if client.is_some() {
                 return Err(ClientFailure::input("MCP session is already connected"));
             }
+            if args.remote_owner {
+                owner_endpoint(&args.endpoint)?;
+            }
             let options = ConnectionOptions {
                 url: args.endpoint.clone(),
-                ssh_mcp_port: 0,
+                ssh_mcp_port: args.ssh_mcp_port.unwrap_or(18766),
                 token_env: args.token_env.clone(),
             };
             let timeout = Duration::from_millis(args.timeout_ms.into());
-            let remote = RemoteClient::connect_local(
-                &options,
-                ClientTimeouts {
-                    connect: timeout,
-                    request: timeout,
-                },
-                args.expected_server.name(),
-            )
-            .await
+            let timeouts = ClientTimeouts {
+                connect: timeout,
+                request: timeout,
+            };
+            let remote = if args.remote_owner {
+                RemoteClient::connect_owner(&options, timeouts, args.expected_server.name()).await
+            } else {
+                RemoteClient::connect_local(&options, timeouts, args.expected_server.name()).await
+            }
             .map_err(|e| map_remote(e.as_ref()))?;
             let result = remote.initialize_result().clone();
             *client = Some(remote);
@@ -942,8 +1001,8 @@ async fn handle(
 }
 
 pub(crate) async fn run(args: ClientArgs) -> Result<(), AnyErr> {
-    if !args.local_only {
-        return Err("client requires --local-only".into());
+    if args.local_only == args.remote_owner {
+        return Err("client requires exactly one of --local-only or --remote-owner".into());
     }
     let stdin = io::stdin();
     let mut reader = io::BufReader::new(stdin.lock());

@@ -2,12 +2,11 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import shlex
 import sys
 
+from host_platform import hook_command, is_executable
 from tag_config import FIELDS as TAG_FIELDS, prepared_fields, validate as validate_tag_config
 from librarian_policy import resolve
 from misc_binding import canonical_path, validate_excluded_roots
@@ -62,8 +61,8 @@ def prepare(*, state_dir, service_config, database_path, db_id, reader_codex,
     interpreter = canonical_path(Path(python).resolve(strict=True))
     state = canonical_path(state_dir)
     destination = canonical_path(hook_config_path)
-    if (not service.is_file() or not reader.is_file() or not os.access(reader, os.X_OK)
-            or not program.is_file() or not interpreter.is_file() or not os.access(interpreter, os.X_OK)):
+    if (not service.is_file() or not is_executable(reader)
+            or not program.is_file() or not is_executable(interpreter)):
         raise ValueError("misc preparation requires existing service, hook program, executable reader and Python")
     config = {"schema": MISC_SCHEMA, "state_dir": str(state), "service_config": str(service),
               "memory_scope": "misc", "memory_mode": "async", "reader_model": "gpt-6.1-sol",
@@ -79,10 +78,13 @@ def prepare(*, state_dir, service_config, database_path, db_id, reader_codex,
     if owner.database_name != "project" or str(owner.database_path) != database_path:
         raise ValueError("misc target differs from service configuration")
     from install import PROGRAMS, hook_handlers
-    command = shlex.join([str(interpreter), str(program), "--config", str(destination)])
+    argv = [str(interpreter), str(program), "--config", str(destination)]
+    command = hook_command(argv)
+    background = hook_command([*argv, "--reader-background"])
     sources = Path(__file__).parent
     return {"schema": "mneme.codex-misc-prepare.v1", "hook_config": config,
-            "global_hooks": {"hooks": hook_handlers(command, async_mode=True, recording=recording_mode == "automatic")},
+            "global_hooks": {"hooks": hook_handlers(command, async_mode=True, recording=recording_mode == "automatic",
+                                                   background_command=background)},
             "hook_config_path": str(destination),
             "service_config_sha256": hashlib.sha256(service.read_bytes()).hexdigest(),
             "programs": [{"name": name, "sha256": hashlib.sha256((sources / name).read_bytes()).hexdigest()}
@@ -103,7 +105,7 @@ def main():
     parser.add_argument("--tag-stewardship", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--tag-guide-id")
     parser.add_argument("--reader-auth")
-    print(json.dumps(prepare(**vars(parser.parse_args())), ensure_ascii=False, indent=2))
+    print(json.dumps(prepare(**vars(parser.parse_args())), ensure_ascii=True, indent=2))
 
 
 if __name__ == "__main__":

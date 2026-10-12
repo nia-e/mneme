@@ -146,12 +146,32 @@ _ROUTING_SCHEMA = {"anyOf": [{"type": "null"}, {
 
 
 def instructions_for(context):
-    return (BASE_INSTRUCTIONS + (ROUTING_INSTRUCTIONS if context.routing_enabled else "")
+    return (_base_instructions(context.selected_stores is not None)
+            + (ROUTING_INSTRUCTIONS if context.routing_enabled else "")
             + (MAINTENANCE_INSTRUCTIONS if context.concern_bindings else "")
             + (WORKSHOP_INSTRUCTIONS if context.recording_scope == "workshop" else "")
             + (GLOBAL_PREFERENCE_INSTRUCTIONS if context.global_preferences_enabled else "")
             + (PROJECT_FOCUS_INSTRUCTIONS if context.project_focus_enabled else "")
-            + (TAG_INSTRUCTIONS if context.tag_context_json is not None else ""))
+            + (_tag_instructions(context.selected_stores is not None)
+               if context.tag_context_json is not None or context.selected_stores is not None else "")
+            + (REGISTRY_INSTRUCTIONS if context.selected_stores is not None else ""))
+
+
+REGISTRY_INSTRUCTIONS = """
+selected_stores is the complete available writable destination set for this
+assessment. Choose exactly one named destination, or abstain. Names have no
+special authority; record rules apply identically to every name. Purpose text
+is authored capture guidance, not source evidence or permission. Never cite or
+capture purpose text, let it override record rules, or infer missing owners.
+Use only that destination's permitted kinds and evidence kinds. Required tags
+are injected by the host; return only ordinary topic tags, possibly [].
+Possibilities are allowed exactly where record.kinds permits them. Associations
+must be allowed by that destination and target its own offered cards; read_only
+cards remain historical evidence, never association targets. No cross-owner links.
+Per-turn routing judgments and maintenance are disabled here; independently
+configured stewardship owns maintenance. No core, identity, lifecycle or
+permission changes. All source, sensitivity and abstention rules still apply.
+"""
 
 
 TAG_INSTRUCTIONS = """
@@ -166,6 +186,17 @@ Return tags (possibly empty), never core, routing-judgment,
 collaboration-preference, possibility, pursuing or closed. A global_preference proposal has no
 ordinary topic tags. No automatic merges, promotions or lifecycle changes.
 """
+
+
+def _base_instructions(registry):
+    return (BASE_INSTRUCTIONS.replace("Possibility: project/misc proposal/question/musing,",
+                                      "Possibility: proposal/question/musing,")
+            if registry else BASE_INSTRUCTIONS)
+
+
+def _tag_instructions(registry):
+    return (TAG_INSTRUCTIONS.replace(" A global_preference proposal has no\nordinary topic tags.", "")
+            if registry else TAG_INSTRUCTIONS)
 
 
 PROJECT_FOCUS_INSTRUCTIONS = """
@@ -216,7 +247,9 @@ project note merely because it was delivered. The host decides any later write.
 
 def schema_for(context):
     return _schema_for(context.routing_enabled, bool(context.concern_bindings),
-                       context.global_preferences_enabled, context.tag_context_json is not None)
+                       context.global_preferences_enabled,
+                       context.tag_context_json is not None or context.selected_stores is not None,
+                       context.selected_stores)
 
 
 def _schema_for_routing(enabled):
@@ -229,19 +262,23 @@ def _schema_for_routing(enabled):
     return schema
 
 
-def _schema_for(routing, maintenance, global_preferences=False, tags=False):
+def _schema_for(routing, maintenance, global_preferences=False, tags=False, selected_stores=None):
     schema = _schema_for_routing(routing)
-    if not maintenance and not global_preferences and not tags:
+    if not maintenance and not global_preferences and not tags and selected_stores is None:
         return schema
     schema = json.loads(_encoded(schema))
     if maintenance:
         schema["required"].append("maintenance")
         schema["properties"]["maintenance"] = _MAINTENANCE_SCHEMA
-    if global_preferences:
+    if selected_stores is not None and not selected_stores:
+        schema["properties"]["proposal"] = {"type": "null"}
+        return schema
+    if global_preferences or selected_stores is not None:
         for branch in schema["properties"]["proposal"]["anyOf"][1:]:
             branch["required"].append("destination")
             branch["properties"]["destination"] = {
-                "type": "string", "enum": ["project", "global_preference"]}
+                "type": "string", "enum": ([store.name for store in selected_stores]
+                                            if selected_stores is not None else ["project", "global_preference"])}
     if tags:
         from tag_context import PROTECTED_TAGS, MAX_TAG_BYTES
         for branch in schema["properties"]["proposal"]["anyOf"][1:]:
@@ -280,6 +317,80 @@ class ValidationContext:
     global_preferences_enabled: bool = False
     project_focus_enabled: bool = False
     tag_context_json: str | None = None
+    selected_stores: tuple[AssessorStore, ...] | None = None
+
+
+@dataclass(frozen=True)
+class AssessorStore:
+    """Immutable host-admitted recording rules; purpose cannot mint authority."""
+
+    name: str
+    db_id: str
+    purpose: str
+    kinds: tuple[str, ...]
+    evidence_kinds: tuple[str, ...]
+    required_tags: tuple[str, ...]
+    allow_associations: bool
+    max_summary_bytes: int
+    max_body_bytes: int
+
+    def packet(self):
+        # Native owner identities remain private host bindings.
+        return {"name": self.name, "purpose": self.purpose, "record": {
+            "enabled": True, "kinds": list(self.kinds),
+            "evidence_kinds": list(self.evidence_kinds),
+            "required_tags": list(self.required_tags),
+            "allow_associations": self.allow_associations,
+            "max_summary_bytes": self.max_summary_bytes, "max_body_bytes": self.max_body_bytes}}
+
+
+def _selected_stores(stores):
+    if stores is None:
+        return None
+    from store_registry import SelectedStore, MAX_REGISTRY_BYTES, MAX_PURPOSE_BYTES, NAME, ULID
+    from tag_context import ordinary_tags
+    _require(isinstance(stores, (list, tuple)), "invalid_selected_stores")
+    result, names, owners, size = [], set(), set(), 0
+    fields = {"enabled", "kinds", "evidence_kinds", "required_tags", "allow_associations",
+              "max_summary_bytes", "max_body_bytes"}
+    for store in stores:
+        value = store.to_dict() if isinstance(store, SelectedStore) else store
+        _require(isinstance(value, dict), "invalid_selected_store")
+        name, owner, purpose = value.get("name"), value.get("db_id"), value.get("purpose")
+        record = value.get("record")
+        _require(isinstance(name, str) and NAME.fullmatch(name)
+                 and isinstance(owner, str) and ULID.fullmatch(owner)
+                 and _bounded_text(purpose, MAX_PURPOSE_BYTES)
+                 and "\x00" not in purpose and name not in names and owner not in owners,
+                 "invalid_selected_store")
+        names.add(name)
+        owners.add(owner)
+        _require(isinstance(record, dict) and set(record) == fields
+                 and type(record["enabled"]) is bool
+                 and type(record["allow_associations"]) is bool, "invalid_store_record_rules")
+        for key, allowed in (("kinds", ("episode", "lesson", "possibility")),
+                             ("evidence_kinds", KINDS)):
+            values = record[key]
+            _require(isinstance(values, (list, tuple)) and all(isinstance(v, str) for v in values)
+                     and len(set(values)) == len(values) and set(values) <= set(allowed)
+                     and (bool(values) or not record["enabled"]), "invalid_store_record_rules")
+        required = record["required_tags"]
+        _require(isinstance(required, (list, tuple)) and len(required) <= MAX_CAPTURE_TAGS
+                 and all(isinstance(tag, str) for tag in required)
+                 and len(set(required)) == len(required), "invalid_store_required_tags")
+        # Only this host-authored special tag is meaningful capture policy.
+        ordinary_tags([tag for tag in required if tag != "collaboration-preference"],
+                      max_count=MAX_CAPTURE_TAGS)
+        for key, cap in (("max_summary_bytes", MAX_SUMMARY_BYTES), ("max_body_bytes", MAX_BODY_BYTES)):
+            _require(type(record[key]) is int and 1 <= record[key] <= cap, "invalid_store_record_rules")
+        selected = AssessorStore(name, owner, purpose, tuple(record["kinds"]),
+                                 tuple(record["evidence_kinds"]), tuple(required),
+                                 record["allow_associations"], record["max_summary_bytes"], record["max_body_bytes"])
+        size += len(_encoded(selected.packet())) + len(owner.encode())
+        _require(size <= MAX_REGISTRY_BYTES, "selected_stores_bytes_limit")
+        if record["enabled"]:
+            result.append(selected)
+    return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -564,21 +675,32 @@ def _evidence(observation, *, bind=True):
     return tuple(bindings), boundary_json, tuple(pairs)
 
 
-def _overlap(cards):
+def _overlap(cards, selected_stores=None):
     _require(isinstance(cards, list), "invalid_overlap_cards")
     projected, bindings, ids = [], [], set()
     for card in cards:
+        _require(isinstance(card, dict), "invalid_overlap_card")
+        identity = ((card.get("db_id"), card.get("id")) if selected_stores is not None
+                    else card.get("id"))
         _require(isinstance(card, dict) and _token(card.get("id"))
                  and card.get("kind") in ("semantic", "episode")
-                 and card["id"] not in ids
+                 and identity not in ids
                  and _bounded_text(card.get("summary"), MAX_OVERLAP_SUMMARY_BYTES, nonempty=True),
                  "invalid_overlap_card")
-        ids.add(card["id"])
+        ids.add(identity)
+        owner = None
+        if selected_stores is not None:
+            owner = next((store for store in selected_stores if store.db_id == card.get("db_id")), None)
+            _require(owner is not None, "invalid_overlap_owner")
         # Ordinary overlaps expose summaries only. Optional routing witnesses
         # were separately decoded from bounded guarded get by the host; retain
         # their bindings privately and project prose only for a matching route.
         opaque = f"overlap{len(projected) + 1:03d}"
         projected.append({"id": opaque, "summary": card["summary"], "kind": card["kind"]})
+        if owner is not None:
+            projected[-1]["destination"] = owner.name
+            if not owner.allow_associations:
+                projected[-1]["read_only"] = True
         touchstone = None
         if "touchstone" in card:
             _require(card["kind"] == "semantic", "invalid_overlap_card")
@@ -598,6 +720,7 @@ def _overlap(cards):
         except (ImportError, ValueError, TypeError, KeyError, UnicodeError):
             pass  # Optional learning failure never erases an ordinary overlap.
         bindings.append(AssociationTarget(opaque, card["id"], card["summary"], card["kind"],
+                                          db_id=owner.db_id if owner is not None else None,
                                           routing_witness_json=witness_json,
                                           touchstone_json=_encoded(touchstone).decode() if touchstone is not None else None))
     return projected, bindings
@@ -662,20 +785,20 @@ def _concerns(items, bindings):
 
 
 def overlap_plan(observation, *, budget=None, recording_scope="project", expected_db_id=None,
-                 global_preferences_enabled=False, project_focus=None):
+                 global_preferences_enabled=False, project_focus=None, selected_stores=None):
     """Nominate from room after exact evidence preparation, without a model query."""
     from librarian_policy import LibrarianBudget
     budget = LibrarianBudget() if budget is None else budget
     prompt, context = prepare(observation, budget=budget, recording_scope=recording_scope,
                               expected_db_id=expected_db_id, global_preferences_enabled=global_preferences_enabled,
-                              project_focus=project_focus)
+                              project_focus=project_focus, selected_stores=selected_stores)
     if prompt is None:
         return None, context
     return budget.overlap_window(MAX_AUTHORED_BYTES - context.authored_bytes), None
 
 
 def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="project", expected_db_id=None,
-                 global_preferences_enabled=False, project_focus=None, tag_context=None):
+                 global_preferences_enabled=False, project_focus=None, tag_context=None, selected_stores=None):
     """Return (fresh prompt, immutable host context), or (None, bounded reason).
 
     The 64KiB authored ceiling counts instructions + serialized schema + prefix +
@@ -686,6 +809,11 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
     from librarian_policy import LibrarianBudget
     budget = LibrarianBudget() if budget is None else budget
     try:
+        selected_stores = _selected_stores(selected_stores)
+        registry = selected_stores is not None
+        _require(not registry or (not global_preferences_enabled and project_focus is None
+                                 and recording_scope == "project" and tag_context is None),
+                 "mixed_recording_policy")
         _require(recording_scope in ("project", "workshop"), "invalid_recording_scope")
         project_focus = validate_project_focus(project_focus)
         _require(project_focus is None or recording_scope == "project", "invalid_project_focus_scope")
@@ -704,7 +832,11 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
         # Validate every observer-retained record before selecting again. An
         # invalid record must not become invisible merely because packing omits it.
         _evidence(observation, bind=False)
-        nominees, association_bindings = _overlap([] if overlap_cards is None else overlap_cards)
+        admitted_kinds = ({kind for store in selected_stores for kind in store.evidence_kinds}
+                          if registry else set(KINDS))
+        _require(not selected_stores or any(item["kind"] in admitted_kinds for item in observation["evidence"]),
+                 "no_admitted_recording_evidence")
+        nominees, association_bindings = _overlap([] if overlap_cards is None else overlap_cards, selected_stores)
         original_count = len(nominees)
         cards, offered_bindings = [], []
         selector = PublicEvidenceSelector(items=MAX_SOURCE_ITEMS,
@@ -717,15 +849,39 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
 
         def packed(items, *, routing=True, maintenance=True, fallback=True,
                    omission_count=None, authored_limit=None):
+            if registry:
+                routing = maintenance = False
             selected_observation = {**observation, "evidence": items}
             bindings, boundary_json, pairs = _evidence(selected_observation)
+            # Verify complete tool exchanges first, then expose only the union of
+            # configured evidence kinds. A tool_result-only policy need not send
+            # private task input just to preserve host-side source closure.
+            if "memory_delivery" in admitted_kinds:
+                delivered, delivered_targets, timing = _delivery(items, bindings, pairs)
+            else:
+                delivered, delivered_targets, timing = [], [], {}
+            admitted_items = [item for item in items if item["kind"] in admitted_kinds]
+            bindings = tuple(binding for binding in bindings if binding.kind in admitted_kinds)
+            retained_ids = {binding.evidence_id for binding in bindings}
+            pairs = tuple(pair for pair in pairs if set(pair) <= retained_ids)
             coverage = json.loads(coverage_json)
             coverage["public_evidence"] = {
-                "mode": "all" if observed_count == len(items) else "selected_suffix",
-                "observed_records": observed_count, "selected_records": len(items),
-                "omitted_records": observed_count - len(items)}
-            delivered, delivered_targets, timing = _delivery(items, bindings, pairs)
-            if expected_db_id is not None:
+                "mode": "all" if observed_count == len(admitted_items) else "selected_suffix",
+                "observed_records": observed_count, "selected_records": len(admitted_items),
+                "omitted_records": observed_count - len(admitted_items)}
+            if registry:
+                by_owner = {store.db_id: store for store in selected_stores}
+                permitted = set()
+                for card, target in zip(delivered, delivered_targets):
+                    owner = by_owner.get(target.db_id)
+                    if owner is not None:
+                        card["destination"] = owner.name
+                    if owner is not None and owner.allow_associations:
+                        permitted.add(target.opaque_id)
+                    else:
+                        card["read_only"] = True
+                delivered_targets = [target for target in delivered_targets if target.opaque_id in permitted]
+            elif expected_db_id is not None:
                 if recording_scope == "workshop":
                     _require(all(target.db_id == expected_db_id for target in delivered_targets),
                              "foreign_memory_delivery")
@@ -737,12 +893,13 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                         card["read_only"] = True
                 delivered_targets = [target for target in delivered_targets
                                      if target.opaque_id in permitted]
-            shown_ids = {target.native_id for target in delivered_targets}
+            shown_ids = {(target.db_id, target.native_id) if registry else target.native_id
+                         for target in delivered_targets}
             # A fresh-overlap alias must not downgrade a delivered target's
             # evidence or historical freshness requirements.
             visible_overlap = [(dict(card), target) for card, target in
                                zip(cards, offered_bindings)
-                               if target.native_id not in shown_ids]
+                               if ((target.db_id, target.native_id) if registry else target.native_id) not in shown_ids]
             if source_coverage["memory_delivery"] == "admitted_retained" and not delivered:
                 coverage["memory_delivery"] = "admitted_omitted"
             packet = {"coverage": coverage,
@@ -752,6 +909,10 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                       "overlap_cards": [card for card, _ in visible_overlap],
                       "omitted_overlap_cards": (original_count - len(visible_overlap)
                                                 if omission_count is None else omission_count)}
+            if registry:
+                packet["selected_stores"] = [store.packet() for store in selected_stores]
+                packet["operation_omissions"] = {"routing_judgment": "disabled_in_registry_assessment",
+                                                  "maintenance": "independent_stewardship"}
             if project_focus is not None:
                 packet["project_focus"] = project_focus
             if tag_enabled:
@@ -786,13 +947,15 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                         if prior.get("entry_kind") == "conditional":
                             card["prior_judgment"]["entry_kind"] = "conditional"
                         card["prior_judgment"]["delivered_cards"] = matches
-            static_bytes = len((BASE_INSTRUCTIONS + (ROUTING_INSTRUCTIONS if enabled else "")
+            static_bytes = len((_base_instructions(registry) + (ROUTING_INSTRUCTIONS if enabled else "")
                                 + (MAINTENANCE_INSTRUCTIONS if cases else "")
                                 + (WORKSHOP_INSTRUCTIONS if recording_scope == "workshop" else "")
                                 + (GLOBAL_PREFERENCE_INSTRUCTIONS if global_preferences_enabled else "")
                                 + (PROJECT_FOCUS_INSTRUCTIONS if project_focus is not None else "")
-                                + (TAG_INSTRUCTIONS if tag_enabled else "")).encode())
-            static_bytes += len(_encoded(_schema_for(enabled, bool(cases), global_preferences_enabled, tag_enabled)))
+                                + (_tag_instructions(registry) if tag_enabled or registry else "")
+                                + (REGISTRY_INSTRUCTIONS if registry else "")).encode())
+            static_bytes += len(_encoded(_schema_for(enabled, bool(cases), global_preferences_enabled,
+                                                     tag_enabled or registry, selected_stores)))
             # Charge the exact optional contract growth; old no-case ceiling unchanged.
             extra = (len(MAINTENANCE_INSTRUCTIONS.encode()) + len(_encoded(_MAINTENANCE_SCHEMA)) + 64) if cases else 0
             if global_preferences_enabled:
@@ -801,8 +964,10 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                 # Only this fixed contract grows the static guard. Policy text
                 # stays in the packet; the aggregate 64KiB ceiling never grows.
                 extra += len(PROJECT_FOCUS_INSTRUCTIONS.encode())
-            if tag_enabled:
+            if tag_enabled or registry:
                 extra += len(TAG_INSTRUCTIONS.encode()) + 2048
+            if registry:
+                extra += len(REGISTRY_INSTRUCTIONS.encode()) + sum(len(_encoded(store.name)) * 2 + 2 for store in selected_stores)
             _require(static_bytes + len(PROMPT_PREFIX.encode()) <= MAX_STATIC_BYTES + extra, "static_prefix_limit")
             prompt = PROMPT_PREFIX + _encoded(packet).decode("utf-8")
             authored = static_bytes + len(prompt.encode("utf-8"))
@@ -852,9 +1017,10 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
             else:
                 baseline = packed(selected, omission_count=0)
         hint_ceiling = min(MAX_AUTHORED_BYTES, baseline[-1] + budget.recording_hint_bytes)
-        shown_ids = {target.native_id for target in baseline[5] if target.origin == "delivery"}
+        shown_ids = {(target.db_id, target.native_id) if registry else target.native_id
+                     for target in baseline[5] if target.origin == "delivery"}
         for card, target in zip(nominees, association_bindings):
-            if target.native_id in shown_ids:
+            if ((target.db_id, target.native_id) if registry else target.native_id) in shown_ids:
                 continue
             cards.append(card)
             offered_bindings.append(target)
@@ -876,7 +1042,8 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                                     hashlib.sha256(prompt.encode()).hexdigest(), final_coverage_json,
                                     boundary_json, pairs, enabled, tuple(concern_targets), concern_source,
                                     recording_scope, global_preferences_enabled, project_focus is not None,
-                                    _encoded(tag_context.snapshot()).decode() if tag_enabled else None)
+                                    _encoded(tag_context.snapshot()).decode() if tag_enabled else None,
+                                    selected_stores)
         return prompt, context
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError) as error:
         reason = str(error)
@@ -947,22 +1114,34 @@ def _validate_proposal_answer(answer, context):
             return None
         _require(isinstance(proposal, dict) and proposal.get("kind") in ("episode", "lesson", "possibility"),
                  "invalid_proposal_shape")
-        if proposal["kind"] == "possibility":
+        registry = context.selected_stores is not None
+        if proposal["kind"] == "possibility" and not registry:
             _require(context.recording_scope in ("project", "misc"), "possibility_scope")
         fields = {"kind", "summary", "body", "evidence_ids"}
         if proposal["kind"] == "lesson":
             fields.add("associate_with")
-        if context.global_preferences_enabled:
+        selected_store = None
+        if registry:
+            fields.add("destination")
+            selected_store = next((store for store in context.selected_stores
+                                   if store.name == proposal.get("destination")), None)
+            _require(selected_store is not None, "invalid_proposal_destination")
+            _require(proposal["kind"] in selected_store.kinds, "destination_kind_denied")
+        elif context.global_preferences_enabled:
             fields.add("destination")
             _require(proposal.get("destination") in ("project", "global_preference"),
                      "invalid_proposal_destination")
-        if context.tag_context_json is not None:
+        if context.tag_context_json is not None or registry:
             fields.add("tags")
         _require(fields <= set(proposal) <= (fields | {"routing_judgment"}
-                                            if proposal["kind"] == "lesson" else fields),
+                                            if proposal["kind"] == "lesson" and not registry else fields),
                  "invalid_proposal_shape")
         _require(_bounded_text(proposal["summary"], MAX_SUMMARY_BYTES, nonempty=True)
                  and _bounded_text(proposal["body"], MAX_BODY_BYTES, nonempty=True), "invalid_proposal_text")
+        if selected_store is not None:
+            _require(_bounded_text(proposal["summary"], selected_store.max_summary_bytes, nonempty=True)
+                     and _bounded_text(proposal["body"], selected_store.max_body_bytes, nonempty=True),
+                     "destination_text_limit")
         evidence_ids = proposal["evidence_ids"]
         # Bound supplied work before canonicalizing repetition; validate every ID.
         _require(isinstance(evidence_ids, list) and 1 <= len(evidence_ids) <= MAX_EVIDENCE_IDS,
@@ -978,6 +1157,8 @@ def _validate_proposal_answer(answer, context):
             seen.add(evidence_id)
             citations.append(Citation(binding.evidence_id, binding.kind,
                                       binding.source_ref_json, binding.source_field, binding.rendering))
+        if selected_store is not None:
+            _require(all(c.kind in selected_store.evidence_kinds for c in citations), "destination_evidence_denied")
         if any(c.kind == "memory_delivery" for c in citations):
             _require(any(c.kind != "memory_delivery" for c in citations),
                      "delivery_source_evidence_missing")
@@ -989,24 +1170,31 @@ def _validate_proposal_answer(answer, context):
                                 if item.opaque_id == opaque), None)
             _require(association is not None, "invalid_association_reference")
             _require(association.kind == "semantic", "invalid_association_kind")
+            if selected_store is not None:
+                _require(selected_store.allow_associations, "destination_association_denied")
+                _require(association.db_id == selected_store.db_id, "association_owner_mismatch")
             if association.origin == "delivery":
                 _require(any(c.kind == "memory_delivery" for c in citations)
                          and any(c.kind != "memory_delivery" for c in citations),
                          "delivery_source_evidence_missing")
-        if proposal.get("destination") == "global_preference":
+        if not registry and proposal.get("destination") == "global_preference":
             _require(proposal.get("routing_judgment") is None, "global_preference_operation")
         judgment, reason = _routing_judgment(proposal.get("routing_judgment"), context, citations)
         tags = ()
-        if context.tag_context_json is not None:
+        if context.tag_context_json is not None or registry:
             from tag_context import ordinary_tags
             tags = ordinary_tags(proposal["tags"], max_count=MAX_CAPTURE_TAGS - (proposal["kind"] == "possibility"))
-            _require(proposal.get("destination") != "global_preference" or not tags,
-                     "global_preference_operation")
+            if not registry:
+                _require(proposal.get("destination") != "global_preference" or not tags,
+                         "global_preference_operation")
+        if selected_store is not None:
+            tags = tuple(sorted(set(tags) | set(selected_store.required_tags)))
+            _require(len(tags) <= MAX_CAPTURE_TAGS - (proposal["kind"] == "possibility"), "destination_tag_limit")
         result = Proposal(proposal["kind"], proposal["summary"], proposal["body"],
                           tuple(citations), association, judgment, reason,
                           proposal.get("destination", "project"), tags,
                           context.tag_context_json)
-        if result.destination == "global_preference":
+        if not registry and result.destination == "global_preference":
             validate_global_preference(result, context)
         return result
     except (TypeError, KeyError, UnicodeError, RecursionError) as error:

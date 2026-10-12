@@ -14,23 +14,22 @@ import os
 from pathlib import Path
 import re
 import shlex
-import shutil
-import stat
 import sys
-import tempfile
 try:
     import tomllib
 except ImportError:
     raise SystemExit("Mneme installer requires Python 3.11 or newer (for TOML parsing).")
 
 SCHEMA = "mneme.codex-install.v1"
-CONFIG_REVISION = 22
-EXISTING_SERVICE_REVISION = 23
-SUPPORTED_APPLY_REVISIONS = (20, 21, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
+HOST_PLATFORM = "windows" if os.name == "nt" else "posix"
+CONFIG_REVISION = 24
+EXISTING_SERVICE_REVISION = 25
+EXISTING_SERVICE_REVISIONS = (21, 23, EXISTING_SERVICE_REVISION)
+SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
 END = "# END mneme-codex-v1"
-PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py")
+PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py", "host_files.py", "host_process.py", "host_platform.py", "store_registry.py", "registry_config.py", "registry_runtime.py", "registry_reader.py", "registry_recording.py", "core_hook.py")
 LEGACY_TOOLS = ["recall_context", "get", "capture", "supersede", "status"]
 EPISODE_TOOLS = [*LEGACY_TOOLS, "episode"]
 SAVE_TOOLS = [*EPISODE_TOOLS, "save"]
@@ -51,11 +50,14 @@ V14_DESTINATIONS = (*V13_DESTINATIONS, ("lib/librarian_policy.py", False))
 V16_DESTINATIONS = (*V14_DESTINATIONS, ("lib/touchstone_contract.py", False))
 V19_DESTINATIONS = (*V16_DESTINATIONS, ("lib/target_policy.py", False))
 V20_DESTINATIONS = (*V19_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[21:24]))
-DESTINATIONS = (*V20_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[24:]))
+V22_DESTINATIONS = (*V20_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[24:28]))
+DESTINATIONS = (*V22_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[28:]))
 RECALL_MODES = ("reminder", "automatic", "shadow", "async")
 RECORDING_MODES = ("off", "automatic")
 SHADOW_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra")
 LEGACY_READER_MODELS = ("gpt-5.6-sol",)
+from host_files import atomic_write, ensure_private_directory, open_directory, open_regular
+from host_platform import hook_command, is_executable
 from librarian_policy import MODEL, EFFORTS, resolve as resolve_policy
 READER_MODELS = (MODEL,)
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -69,7 +71,7 @@ def read_optional(path):
     if path.is_symlink():
         raise ValueError(f"refusing a symlink config target: {path}")
     try:
-        with path.open("rb") as f:
+        with os.fdopen(open_regular(path), "rb") as f:
             value = f.read(MAX_CONFIG_BYTES + 1)
     except FileNotFoundError:
         return None
@@ -84,21 +86,29 @@ def fingerprint(path):
 
 
 def private_write(path, data):
-    fd, temporary = tempfile.mkstemp(prefix=".mneme-install-", dir=path.parent)
+    atomic_write(path, data)
+
+
+def config_directory(path):
+    """Create privately; preserve permissions of an existing real directory."""
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        ensure_private_directory(path, parents=False, exist_ok=False)
+    except FileExistsError:
+        os.close(open_directory(path))
+
+
+def plan_platform(plan):
+    # Original receipts are POSIX artifacts even when read on a newer host.
+    return plan.get("host_platform", "posix") if plan.get("config_revision", 1) >= 24 else "posix"
+
+
+def binary_destination(plan, name):
+    return "bin/" + name + (".exe" if plan_platform(plan) == "windows" else "")
+
+
+def current_destinations(platform):
+    return tuple((name + ".exe" if executable and platform == "windows" else name, executable)
+                 for name, executable in DESTINATIONS)
 
 
 def json_bytes(value):
@@ -115,16 +125,34 @@ def global_preferences_input(path):
     return validate_global_preferences(json.loads(read_optional(path)))
 
 
+def store_registry_input(path):
+    """Validate a bounded local registry without contacting or opening its owners."""
+    from store_registry import load_registry
+    path = Path(path)
+    if not path.is_absolute() or path.resolve() != path:
+        raise ValueError("store registry must be a canonical absolute regular file")
+    registry = load_registry(path)
+    # The strict loader validates and hashes one bounded byte snapshot. Service
+    # files remain runtime-selection inputs, not ambient installation authority.
+    return str(path), registry.digest
+
+
+def revalidate_store_registry(plan):
+    """Fence reviewed registry bytes before installation or native trust writes."""
+    if "store_registry" not in plan:
+        return
+    path, fingerprint = store_registry_input(plan["store_registry"])
+    if path != plan["store_registry"] or fingerprint != plan["store_registry_sha256"]:
+        raise ValueError("store registry changed since prepare; prepare a new plan")
+
+
 def existing_service_input(path):
     """One bounded, regular-file managed config read; never probe its owner."""
     from service import MAX_CONFIG_BYTES as limit, _unique_config_fields
     path = Path(path)
     if not path.is_absolute() or path.resolve() != path:
         raise ValueError("existing service config must be a canonical absolute regular file")
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise ValueError("existing service config must be a regular file")
+    fd = open_regular(path)
     with os.fdopen(fd, "rb") as stream:
         raw = stream.read(limit + 1)
     if len(raw) > limit:
@@ -156,7 +184,7 @@ def validate_existing_service(plan):
     if (config.database_name != "project" or str(config.database_path) != plan["project_db"]
             or str(config.working_directory) != plan["project_root"] or config.port != plan["port"]):
         raise ValueError("existing service does not match the exact project, database and port")
-    native = next(row for row in plan["files"] if row["destination"] == "bin/mneme-mcp")
+    native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mneme-mcp"))
     if str(config.binary) != native["source"]:
         raise ValueError("existing service binary must be the selected MCP source")
     return pin
@@ -169,9 +197,9 @@ def revalidate_existing_service(plan):
     pin = validate_existing_service(plan)
     if existing_service_input(pin["source"]) != pin:
         raise ValueError("existing service config changed; prepare a new plan")
-    native = next(row for row in plan["files"] if row["destination"] == "bin/mneme-mcp")
+    native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mneme-mcp"))
     binary = Path(native["source"])
-    if (binary.resolve() != binary or not binary.is_file() or not os.access(binary, os.X_OK)
+    if (binary.resolve() != binary or not is_executable(binary)
             or digest(binary.read_bytes()) != native["sha256"]):
         raise ValueError("existing service binary changed; prepare a new plan")
 
@@ -185,7 +213,7 @@ def validate_plan(plan):
     revision = plan.get("config_revision", 1)
     if type(revision) is not int or revision not in range(1, EXISTING_SERVICE_REVISION + 1):
         raise ValueError("unsupported planned configuration revision")
-    if revision in (21, EXISTING_SERVICE_REVISION):
+    if revision in EXISTING_SERVICE_REVISIONS:
         if "existing_service_config" not in plan:
             raise ValueError("existing-service revision requires existing service config pin")
     elif "existing_service_config" in plan:
@@ -274,6 +302,19 @@ def validate_plan(plan):
             raise ValueError("invalid global preference service pin")
     elif "global_preferences_service_sha256" in plan:
         raise ValueError("global preference service pin has no target")
+    if "store_registry" in plan:
+        if revision < 24 or plan["recall_mode"] != "async":
+            raise ValueError("store registry requires a new async install plan")
+        if "global_preferences" in plan:
+            raise ValueError("store registry and global preferences cannot be combined")
+        path, expected = plan["store_registry"], plan.get("store_registry_sha256")
+        if (not isinstance(path, str) or "\x00" in path or len(path.encode()) > 4096
+                or not Path(path).is_absolute() or str(Path(path)) != path
+                or ".." in Path(path).parts or path.startswith("//")
+                or not isinstance(expected, str) or not HEX_SHA256.fullmatch(expected)):
+            raise ValueError("invalid store registry pin")
+    elif "store_registry_sha256" in plan:
+        raise ValueError("store registry pin has no target")
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
     if not root.is_absolute() or not prefix.is_absolute() or not root.is_dir() or root.is_symlink():
         raise ValueError("plan paths must be absolute and project must be a real directory")
@@ -291,7 +332,10 @@ def validate_plan(plan):
     if revision < 22 and set(plan) & tag_config_fields:
         raise ValueError("old install plan cannot contain tag stewardship; prepare a new plan")
     validate_tag_config(plan)
-    expected_destinations = (DESTINATIONS if revision >= 22 else
+    if revision >= 24 and plan.get("host_platform") not in ("windows", "posix"):
+        raise ValueError("invalid planned host platform")
+    expected_destinations = (current_destinations(plan_platform(plan)) if revision >= 24 else
+                             V22_DESTINATIONS if revision >= 22 else
                              V20_DESTINATIONS if revision >= 20 else
                              V19_DESTINATIONS if revision >= 17 else
                              V16_DESTINATIONS if revision >= 16 else
@@ -319,12 +363,12 @@ def validate_plan(plan):
         for value in expected.values()
     ):
         raise ValueError("planned config fingerprints are invalid")
-    if revision in (21, EXISTING_SERVICE_REVISION):
+    if revision in EXISTING_SERVICE_REVISIONS:
         validate_existing_service(plan)
     return root, prefix
 
 
-def hook_handlers(command, *, async_mode, recording, revision=CONFIG_REVISION, recall_mode="async"):
+def hook_handlers(command, *, async_mode, recording, revision=CONFIG_REVISION, recall_mode="async", background_command=None):
     """One lifecycle shape for project installs and reviewed misc dispatchers."""
     events = {}
     names = (("SessionStart", "UserPromptSubmit", "Stop", "PostToolUse", "Interrupt", "SessionEnd")
@@ -346,14 +390,40 @@ def hook_handlers(command, *, async_mode, recording, revision=CONFIG_REVISION, r
         group.append({"hooks": [handler]})
         if async_mode and (name == "UserPromptSubmit" or
                            (recording and (name == "Stop" or (name == "SessionEnd" and revision < 18)))):
-            group.append({"hooks": [{"type": "command", "command": command + " --reader-background",
+            group.append({"hooks": [{"type": "command", "command": background_command if background_command is not None else command + " --reader-background",
                                       "timeout": 5, "async": True}]})
+    return events
+
+
+def planned_hook_handlers(plan):
+    """Regenerate only the lifecycle definitions bound to this reviewed plan."""
+    prefix = Path(plan["prefix"])
+    revision = plan.get("config_revision", 1)
+    argv = [plan["python"], str(prefix / "lib/hooks.py"), "--config", str(prefix / "config/hooks.json")]
+    windows = plan_platform(plan) == "windows"
+    command = hook_command(argv, windows=windows) if revision >= 24 else shlex.join(argv)
+    background = (hook_command([*argv, "--reader-background"], windows=windows)
+                  if revision >= 24 else command + " --reader-background")
+    async_mode = revision >= 9 and plan["recall_mode"] == "async"
+    recording = revision >= 10 and plan["recording_mode"] == "automatic"
+    events = hook_handlers(command, async_mode=async_mode, recording=recording,
+                           revision=revision, recall_mode=plan.get("recall_mode", "reminder"),
+                           background_command=background)
+    if revision >= 24 and async_mode and "store_registry" in plan:
+        core_argv = [plan["python"], str(prefix / "lib/core_hook.py"),
+                     "--hook-config", str(prefix / "config/hooks.json")]
+        # Startup core is a separate bounded read, not worker launch, learning
+        # evidence or permission to record. Preserve its complete checked output.
+        events["SessionStart"].append({"hooks": [{"type": "command",
+            "command": hook_command(core_argv, windows=windows), "timeout": 15,
+            "additionalContextLimit": 0}]})
     return events
 
 
 def config_outputs(plan, before):
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
     revision = plan.get("config_revision", 1)
+    toml_value = lambda value: json.dumps(value, ensure_ascii=revision < 24)
     existing = before["config.toml"]
     old = b"" if existing is None else existing
     parsed = tomllib.loads(old.decode())
@@ -361,8 +431,8 @@ def config_outputs(plan, before):
         raise ValueError("mneme_project configuration already exists; do not overwrite it")
     block = f"\n{BEGIN}\n[mcp_servers.{SERVER}]\n"
     if revision >= 3:
-        block += (f"command = {json.dumps(plan['python'])}\n"
-                  f"args = {json.dumps([str(prefix / 'lib/launcher.py'), '--service-config', str(prefix / 'config/service.json')])}\n"
+        block += (f"command = {toml_value(plan['python'])}\n"
+                  f"args = {toml_value([str(prefix / 'lib/launcher.py'), '--service-config', str(prefix / 'config/service.json')])}\n"
                   "startup_timeout_sec = 30\n")
     else:
         block += f"url = {json.dumps(plan['url'])}\n"
@@ -384,12 +454,7 @@ def config_outputs(plan, before):
     if not isinstance(hooks, dict) or not isinstance(hooks.get("hooks", {}), dict):
         raise ValueError("existing hooks.json must contain an object of event arrays")
     events = hooks.setdefault("hooks", {})
-    command = shlex.join([plan["python"], str(prefix / "lib/hooks.py"),
-                          "--config", str(prefix / "config/hooks.json")])
-    async_mode = revision >= 9 and plan["recall_mode"] == "async"
-    recording = revision >= 10 and plan["recording_mode"] == "automatic"
-    generated = hook_handlers(command, async_mode=async_mode, recording=recording,
-                              revision=revision, recall_mode=plan.get("recall_mode", "reminder"))
+    generated = planned_hook_handlers(plan)
     for name, handlers in generated.items():
         group = events.setdefault(name, [])
         if not isinstance(group, list):
@@ -402,7 +467,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
             program_root=None, library_helper=None, enroll_existing=False,
             shadow_model=None, shadow_codex=None, reader_model=None, reader_codex=None,
             recording_mode="off", librarian_effort=None, global_preferences=None,
-            existing_service_config=None, tag_stewardship=None, tag_guide_id=None):
+            store_registry=None, existing_service_config=None, tag_stewardship=None, tag_guide_id=None):
     project_root, prefix = Path(project_root).absolute(), Path(prefix).absolute()
     if not project_root.is_dir() or project_root.is_symlink():
         raise ValueError("project root must be an existing real directory")
@@ -420,6 +485,13 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
     tag_fields = prepared_fields(recording_mode, tag_stewardship, tag_guide_id)
     if recall_mode != "async" and tag_guide_id is not None:
         raise ValueError("tag guide requires --recall-mode async")
+    registry_pin = None
+    if store_registry is not None:
+        if global_preferences is not None:
+            raise ValueError("store registry and global preferences cannot be combined")
+        if recall_mode != "async":
+            raise ValueError("store registry requires --recall-mode async")
+        store_registry, registry_pin = store_registry_input(store_registry)
     preference_pin = None
     if global_preferences is not None:
         if recall_mode != "async":
@@ -437,7 +509,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         if shadow_codex is None or not Path(shadow_codex).is_absolute():
             raise ValueError("shadow mode requires absolute --shadow-codex")
         codex_source = Path(shadow_codex).resolve(strict=True)
-        if not codex_source.is_file() or not os.access(codex_source, os.X_OK):
+        if not is_executable(codex_source):
             raise ValueError("shadow Codex executable is not usable")
         shadow_pin = {"source": str(codex_source), "sha256": digest(codex_source.read_bytes())}
     elif shadow_model is not None or shadow_codex is not None:
@@ -451,7 +523,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         if reader_codex is None or not Path(reader_codex).is_absolute():
             raise ValueError("async mode requires absolute --reader-codex")
         codex_source = Path(reader_codex).resolve(strict=True)
-        if not codex_source.is_file() or not os.access(codex_source, os.X_OK):
+        if not is_executable(codex_source):
             raise ValueError("reader Codex executable is not usable")
         reader_pin = {"source": str(codex_source), "sha256": digest(codex_source.read_bytes())}
     elif reader_model is not None or reader_codex is not None or librarian_effort is not None:
@@ -475,20 +547,22 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         raise ValueError("project .codex must be a real directory or absent")
     programs = Path(program_root or Path(__file__).parent).resolve()
     files = []
+    platform = HOST_PLATFORM
+    extension = ".exe" if platform == "windows" else ""
     for source, destination, executable in [
-        (Path(mnemed), "bin/mnemed", True),
-        (Path(mcp), "bin/mneme-mcp", True),
+        (Path(mnemed), "bin/mnemed" + extension, True),
+        (Path(mcp), "bin/mneme-mcp" + extension, True),
         *[(programs / name, "lib/" + name, False) for name in PROGRAMS],
     ]:
         source = source.resolve(strict=True)
-        if not source.is_file() or (executable and not os.access(source, os.X_OK)):
+        if not source.is_file() or (executable and not is_executable(source)):
             raise ValueError(f"not a usable installation source: {source}")
         files.append({"source": str(source), "destination": destination,
                       "sha256": digest(source.read_bytes()), "executable": executable})
     if recall_mode != "async":
         tag_fields = {}
     before = {name: read_optional(dot_codex / name) for name in CONFIG_NAMES}
-    plan = {"schema": SCHEMA, "config_revision": CONFIG_REVISION,
+    plan = {"schema": SCHEMA, "config_revision": CONFIG_REVISION, "host_platform": platform,
             "recall_mode": recall_mode,
             "recording_mode": recording_mode,
             **tag_fields,
@@ -508,6 +582,10 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         plan["global_preferences"] = global_preferences
         plan["global_preferences_service_sha256"] = preference_pin
         plan["authority"] = "project operator with explicit personal collaboration preference lane; direct feedback disabled"
+    if store_registry is not None:
+        plan["store_registry"] = store_registry
+        plan["store_registry_sha256"] = registry_pin
+        plan["authority"] = "project operator with explicit named store registry; direct feedback disabled"
     if existing_service_config is not None:
         plan["config_revision"] = EXISTING_SERVICE_REVISION
         plan["existing_service_config"] = existing_service_input(existing_service_config)
@@ -570,7 +648,7 @@ def runtime_configs(plan):
     """Pure installer-owned runtime outputs; also binds exact hook-review scope."""
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
     shadow_codex, reader_codex = plan["shadow_codex"], plan["reader_codex"]
-    service = {"binary": str(prefix / "bin/mneme-mcp"), "project_db": plan["project_db"],
+    service = {"binary": str(prefix / binary_destination(plan, "mneme-mcp")), "project_db": plan["project_db"],
                "working_directory": str(root), "port": plan["port"], "state_dir": str(prefix / "run")}
     if "existing_service_config" in plan:
         service = dict(validate_existing_service(plan)["config"])
@@ -597,6 +675,8 @@ def runtime_configs(plan):
         if "global_preferences" in plan:
             hook.update(schema="mneme.codex-hooks.config.v10",
                         global_preferences=dict(plan["global_preferences"]))
+        if "store_registry" in plan:
+            hook.update(schema="mneme.codex-hooks.config.v12", store_registry=plan["store_registry"])
 
     return service, hook
 
@@ -605,7 +685,10 @@ def apply(plan):
     root, prefix = validate_plan(plan)
     if plan.get("config_revision", 1) not in SUPPORTED_APPLY_REVISIONS:
         raise ValueError("old install plan cannot be applied by this installer; prepare a new plan")
+    if plan_platform(plan) != HOST_PLATFORM:
+        raise ValueError("install plan targets a different host platform; prepare a new plan")
     revalidate_existing_service(plan)
+    revalidate_store_registry(plan)
     if "global_preferences" in plan:
         from target_policy import global_preferences_policy
         policy = global_preferences_policy({"schema": "mneme.codex-hooks.config.v10",
@@ -638,9 +721,9 @@ def apply(plan):
     if plan["library_enrollment"] == "existing" and not db_exists:
         raise ValueError("project store disappeared since prepare; prepare a new plan")
     after = config_outputs(plan, before)
-    prefix.mkdir(mode=0o700, parents=True, exist_ok=False)
+    ensure_private_directory(prefix, parents=True, exist_ok=False)
     for name in ("bin", "lib", "config", "run", "backups"):
-        (prefix / name).mkdir(mode=0o700)
+        ensure_private_directory(prefix / name, parents=False, exist_ok=False)
     # Leave a reviewable recovery record before touching any Codex configuration.
     private_write(prefix / "pending.json", json_bytes(plan))
     for name, data in before.items():
@@ -648,14 +731,12 @@ def apply(plan):
             private_write(prefix / "backups" / name, data)
     for row in plan["files"]:
         destination = prefix / row["destination"]
-        shutil.copyfile(row["source"], destination)
-        destination.chmod(0o700 if row["executable"] else 0o600)
+        atomic_write(destination, Path(row["source"]).read_bytes(), mode=0o700 if row["executable"] else 0o600)
         if digest(destination.read_bytes()) != row["sha256"]:
             raise ValueError("installed artifact does not match prepared source")
     if helper is not None:
         library_destination = prefix / "lib/library.py"
-        shutil.copyfile(helper["source"], library_destination)
-        library_destination.chmod(0o600)
+        private_write(library_destination, Path(helper["source"]).read_bytes())
         if digest(library_destination.read_bytes()) != helper["sha256"]:
             raise ValueError("installed library helper does not match prepared source")
         private_write(prefix / "config/enrollment.json", json_bytes({
@@ -665,7 +746,7 @@ def apply(plan):
 
     private_write(prefix / "config/service.json", json_bytes(service))
     private_write(prefix / "config/hooks.json", json_bytes(hook))
-    dot_codex.mkdir(mode=0o700, exist_ok=True)
+    config_directory(dot_codex)
     after_hashes = _output_hashes(after)
     receipt = {"schema": SCHEMA, "plan": plan,
                "installed_configs": after_hashes,
@@ -701,7 +782,7 @@ def apply(plan):
 
 
 def uninstall(receipt_path):
-    receipt = json.loads(Path(receipt_path).read_text())
+    receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
     if receipt.get("schema") != SCHEMA:
         raise ValueError("unsupported receipt")
     plan = receipt["plan"]
@@ -721,7 +802,7 @@ def uninstall(receipt_path):
 def recover(pending_path):
     """Finalize committed install or abort a pending one without erasing data."""
     pending_path = Path(pending_path).absolute()
-    plan = json.loads(pending_path.read_text())
+    plan = json.loads(pending_path.read_text(encoding="utf-8"))
     root, prefix = validate_plan(plan)
     if pending_path != prefix / "pending.json":
         raise ValueError("pending path does not match installation prefix")
@@ -730,7 +811,7 @@ def recover(pending_path):
     supported_hashes = _supported_output_hashes(plan, originals)
     receipt_path = prefix / "receipt.json"
     if receipt_path.exists():
-        receipt = json.loads(receipt_path.read_text())
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         if receipt.get("schema") != SCHEMA or receipt.get("plan") != plan or receipt.get("installed_configs") not in supported_hashes:
             raise ValueError("receipt does not match pending installation")
         after_hashes = receipt["installed_configs"]
@@ -784,6 +865,8 @@ def main():
                       help="async low/medium/high resource preset; default medium (not a spending cap)")
     prep.add_argument("--reader-codex", type=Path,
                       help="required absolute Codex executable for the async reader; its hash is pinned")
+    prep.add_argument("--store-registry", type=Path,
+                      help="explicit reviewed named-store registry; async only; not combined with global preferences")
     prep.add_argument("--global-preferences", type=Path,
                       help="explicit reviewed JSON owner binding for cross-project preferences; async only")
     prep.add_argument("--library-helper", type=Path,
@@ -808,6 +891,7 @@ def main():
                            recording_mode=args.recording_mode,
                            tag_stewardship=args.tag_stewardship, tag_guide_id=args.tag_guide_id,
                            existing_service_config=args.existing_service_config,
+                           store_registry=args.store_registry,
                            global_preferences=(global_preferences_input(args.global_preferences)
                                                if args.global_preferences is not None else None))
             args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -819,7 +903,7 @@ def main():
                       "library_enrollment": plan["library_enrollment"],
                       "does_not": plan["does_not"]}
         elif args.command == "apply":
-            result = apply(json.loads(args.plan.read_text()))
+            result = apply(json.loads(args.plan.read_text(encoding="utf-8")))
         elif args.command == "uninstall":
             result = uninstall(args.receipt)
         else:

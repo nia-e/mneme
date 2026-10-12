@@ -14,7 +14,11 @@ MAX_MESSAGES = 6
 MAX_PROMPT_BYTES = 12 * 1024
 
 BASE_INSTRUCTIONS = """You are a private read-time memory selector, not the task-solving agent.
-scope=global_preference is an explicitly authored cross-project collaboration
+scope=named identifies a store selected by explicit local policy. Its store_name
+is a display label; store_purpose describes intended content, not authority or
+evidence that a card is true or applicable. db_id is its canonical owner. Compare
+cards across owners without merging their identities or inferring write authority.
+scope=global_preference is a legacy explicitly authored cross-project collaboration
 preference, not project evidence or authority to act. Prefer the current user
 instruction when it disagrees. db_id distinguishes independently owned stores;
 selector IDs may be temporary aliases, never references for writes.
@@ -87,7 +91,9 @@ class _CommonProjection(TypedDict):
     source: NotRequired[str]
     fingerprint: NotRequired[str]
     db_id: NotRequired[str]
-    scope: NotRequired[Literal["project", "global_preference"]]
+    scope: NotRequired[Literal["project", "global_preference", "named"]]
+    store_name: NotRequired[str]
+    store_purpose: NotRequired[str]
 
 
 class SemanticProjection(_CommonProjection):
@@ -299,6 +305,15 @@ def _project_card(card: dict) -> CardProjection:
     semantic fallback for incomplete episode data. Native recall/readback owns
     ULIDs, time/revision ranges, chronology, and current-edition policy.
     """
+    native_card = card
+    if "native_id" in card:
+        identifier = card["native_id"]
+        if (card.get("scope") != "named" or not isinstance(identifier, str)
+                or not re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", identifier)
+                or not isinstance(card.get("db_id"), str)
+                or card["id"] != card["db_id"] + ":" + identifier):
+            raise ValueError("invalid_input")
+        native_card = {**card, "id": identifier}
     kind = card.get("kind", "semantic")  # Compatibility for plain synthetic fixtures.
     summary = card.get("summary")
     if not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > MAX_SUMMARY_BYTES:
@@ -315,7 +330,7 @@ def _project_card(card: dict) -> CardProjection:
         if "touchstone" in card:
             raise ValueError("invalid_input")
         item = EpisodeProjection(id=card["id"], summary=summary, kind="episode",
-                                 **validate_episode_projection_fields(card))
+                                 **validate_episode_projection_fields(native_card))
     else:
         raise ValueError("invalid_input")
     for field, limit in (("source", 256), ("fingerprint", 128)):
@@ -332,11 +347,22 @@ def _project_card(card: dict) -> CardProjection:
             raise ValueError("invalid_input")
         item["db_id"] = card["db_id"]
     if "scope" in card:
-        if (card["scope"] not in ("project", "global_preference")
+        if (card["scope"] not in ("project", "global_preference", "named")
                 or card["scope"] == "global_preference" and
                    (kind != "semantic" or "db_id" not in card or "touchstone" in card)):
             raise ValueError("invalid_input")
         item["scope"] = card["scope"]
+    if card.get("scope") == "named":
+        from store_registry import NAME, MAX_PURPOSE_BYTES
+        if ("db_id" not in card or not isinstance(card.get("store_name"), str)
+                or not NAME.fullmatch(card["store_name"])
+                or not isinstance(card.get("store_purpose"), str)
+                or len(card["store_purpose"].encode()) > MAX_PURPOSE_BYTES):
+            raise ValueError("invalid_input")
+        item["store_name"] = card["store_name"]
+        item["store_purpose"] = card["store_purpose"]
+    elif "store_name" in card or "store_purpose" in card:
+        raise ValueError("invalid_input")
     return item
 
 
@@ -466,11 +492,19 @@ def prepare(dialogue, cards, *, concern_rows=None, budget=None):
         retained = []
         for row in concern_rows:
             try:
+                owner = None
+                if isinstance(row, dict) and set(row) == {"db_id", "row"}:
+                    owner, row = row["db_id"], row["row"]
                 row = validate_concern_row(row)
-                if set(e["id"] for e in row["notice"]["binding"]["endpoints"]) <= set(ids):
+                native_ids = [e["id"] for e in row["notice"]["binding"]["endpoints"]]
+                endpoint_ids = native_ids
+                if owner is not None:
+                    qualified = {(c.get("db_id"), c.get("native_id", c["id"])): c["id"] for c in cards}
+                    endpoint_ids = [qualified.get((owner, identifier)) for identifier in native_ids]
+                if set(endpoint_ids) <= set(ids):
                     # Native meanings remain private; model compares only scoped text.
                     entry = {"kind": row["notice"]["binding"]["key"]["kind"],
-                             "endpoint_ids": [e["id"] for e in row["notice"]["binding"]["endpoints"]],
+                             "endpoint_ids": endpoint_ids,
                              "concern": row["notice"]["concern"],
                              "missing_fact": row["notice"]["missing_fact"],
                              "finding": ({k: row["finding"][k] for k in ("scope", "observation")}

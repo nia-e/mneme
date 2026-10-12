@@ -6,17 +6,51 @@ never replayed.
 """
 
 import json
+import ipaddress
+import math
 import os
 from pathlib import Path
-import selectors
-import shutil
 import subprocess
 import time
 from urllib.parse import urlsplit
 
+import host_process
+from host_platform import executable_name, find_executable
+
 PROTOCOL_VERSION = "2025-11-25"
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESPONSE_BYTES = 512 * 1024
+
+
+def validate_remote_endpoint(url, *, ssh_mcp_port=18766, bearer=False):
+    """Validate connection syntax only; native code owns transport and SSH policy."""
+    if (not isinstance(url, str) or not url or len(url.encode("utf-8")) > 4096
+            or any(char.isspace() or ord(char) < 32 for char in url) or "\\" in url):
+        raise ValueError("remote owner requires a bounded HTTP, HTTPS, or SSH URL")
+    if type(ssh_mcp_port) is not int or not 1 <= ssh_mcp_port <= 65535:
+        raise ValueError("ssh_mcp_port must be in 1..65535")
+    parsed = urlsplit(url)
+    # Accessing port also rejects invalid, negative and overflowing ports.
+    if (parsed.scheme not in ("http", "https", "ssh") or not parsed.hostname
+            or parsed.port == 0 or parsed.password is not None or parsed.query or parsed.fragment
+            or "?" in url or "#" in url):
+        raise ValueError("remote owner URL must have a host and no password, query, or fragment")
+    if parsed.scheme == "ssh":
+        username = parsed.username or ""
+        if (parsed.path not in ("", "/") or parsed.hostname.startswith("-")
+                or "%" in parsed.hostname or any(not (c.isascii() and (c.isalnum() or c in "_.-"))
+                                               for c in username)):
+            raise ValueError("SSH owner requires ssh://[user@]host[:ssh-port] without a path")
+    elif parsed.username is not None:
+        raise ValueError("HTTP owner URL must not contain credentials")
+    if parsed.scheme == "http" and bearer:
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ValueError("bearer tokens require HTTPS, SSH, or numeric loopback HTTP")
+    return url
 
 
 class McpError(Exception):
@@ -38,11 +72,13 @@ class McpToolError(McpError):
 def _binary():
     override = os.environ.get("MNEME_CLIENT_BINARY")
     if override:
+        if host_process.IS_WINDOWS and Path(override).suffix.lower() != ".exe":
+            raise McpTransportError("native Windows mnemed client requires an .exe, not a shell wrapper")
         return override
-    sibling = Path(__file__).resolve().parent.parent / "bin" / "mnemed"
+    sibling = Path(__file__).resolve().parent.parent / "bin" / executable_name("mnemed")
     if sibling.is_file():
-        return str(sibling)
-    found = shutil.which("mnemed")
+        return str(sibling)  # A broken packaged binary must not select a stale PATH fallback.
+    found = find_executable("mnemed")
     if found:
         return found
     raise McpTransportError("mnemed client binary unavailable")
@@ -50,13 +86,19 @@ def _binary():
 
 class McpClient:
     def __init__(self, url, *, token=None, token_env=None, timeout=3.0,
-                 expected_server_name="mneme-mcp"):
-        parsed = urlsplit(url)
-        if (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1")
-                or parsed.username or parsed.password or parsed.query or parsed.fragment
-                or not parsed.port):
-            raise ValueError("Mneme integration requires a numeric loopback HTTP URL with port")
-        if timeout <= 0 or timeout > 30:
+                 expected_server_name="mneme-mcp", remote_owner=False, ssh_mcp_port=18766):
+        if type(remote_owner) is not bool:
+            raise ValueError("remote_owner must be a boolean")
+        if remote_owner:
+            validate_remote_endpoint(url, ssh_mcp_port=ssh_mcp_port,
+                                     bearer=token is not None or bool(token_env))
+        else:
+            parsed = urlsplit(url)
+            if (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1")
+                    or parsed.username or parsed.password or parsed.query or parsed.fragment
+                    or not parsed.port):
+                raise ValueError("Mneme integration requires a numeric loopback HTTP URL with port")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0 or timeout > 30:
             raise ValueError("timeout must be in (0, 30]")
         if token is not None and (not token or "\r" in token or "\n" in token):
             raise ValueError("invalid bearer token")
@@ -69,7 +111,10 @@ class McpClient:
         self.token = token
         self.token_env = token_env
         self.expected_server_name = expected_server_name
+        self.remote_owner = remote_owner
+        self.ssh_mcp_port = ssh_mcp_port
         self._process = None
+        self._pipe = None
         self._next_id = 1
         self._buffer = b""
         self._connected = False
@@ -93,52 +138,45 @@ class McpClient:
             env[token_env] = self.token
         argv = [_binary(), "client", "--endpoint", self.url,
                 "--timeout-ms", str(max(1, round(self.timeout * 1000))),
-                "--expected-server", self.expected_server_name, "--local-only"]
+                "--expected-server", self.expected_server_name]
+        if self.remote_owner:
+            argv += ["--remote-owner", "--ssh-mcp-port", str(self.ssh_mcp_port)]
+        else:
+            argv += ["--local-only"]
         if token_env:
             argv += ["--token-env", token_env]
         try:
-            self._process = subprocess.Popen(argv, stdin=subprocess.PIPE,
+            self._process = host_process.spawn(argv, tree=True, stdin=subprocess.PIPE,
                                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                              env=env, bufsize=0)
+            self._pipe = host_process.BoundedPipe(self._process)
         except OSError as error:
+            self._stop()
             raise McpTransportError("mnemed client process unavailable") from error
 
     def _readline(self, deadline):
-        process = self._process
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while True:
-                pos = self._buffer.find(b"\n")
-                if pos >= 0:
-                    line, self._buffer = self._buffer[:pos], self._buffer[pos + 1:]
-                    return line
-                if len(self._buffer) > MAX_RESPONSE_BYTES:
+        while True:
+            pos = self._buffer.find(b"\n")
+            if pos >= 0:
+                if pos > MAX_RESPONSE_BYTES:
                     raise McpProtocolError("native client response exceeds 512 KiB")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    raise McpTransportError("native client response timed out; request was not retried")
-                chunk = os.read(process.stdout.fileno(), 8192)
-                if not chunk:
-                    raise McpTransportError("native client exited; request outcome may be ambiguous; not retried")
-                self._buffer += chunk
+                line, self._buffer = self._buffer[:pos], self._buffer[pos + 1:]
+                return line
+            if len(self._buffer) > MAX_RESPONSE_BYTES:
+                raise McpProtocolError("native client response exceeds 512 KiB")
+            try:
+                chunk = self._pipe.read(min(8192, MAX_RESPONSE_BYTES + 1 - len(self._buffer)), deadline)
+            except TimeoutError as error:
+                raise McpTransportError("native client response timed out; request was not retried") from error
+            if not chunk:
+                raise McpTransportError("native client exited; request outcome may be ambiguous; not retried")
+            self._buffer += chunk
 
     def _write(self, data, deadline):
-        fd = self._process.stdin.fileno()
-        os.set_blocking(fd, False)
-        remaining_data = memoryview(data)
-        with selectors.DefaultSelector() as selector:
-            selector.register(fd, selectors.EVENT_WRITE)
-            while remaining_data:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    raise McpTransportError("native client write timed out; request was not retried")
-                try:
-                    count = os.write(fd, remaining_data)
-                except BlockingIOError:
-                    continue
-                if count == 0:
-                    raise McpTransportError("native client pipe closed; request was not retried")
-                remaining_data = remaining_data[count:]
+        try:
+            self._pipe.write(data, deadline)
+        except TimeoutError as error:
+            raise McpTransportError("native client write timed out; request was not retried") from error
 
     def _request(self, op, **fields):
         ident = self._next_id
@@ -266,18 +304,16 @@ class McpClient:
         self._buffer = b""
         if process is None:
             return
-        for stream in (process.stdin, process.stdout):
-            try:
-                stream.close()
-            except OSError:
-                pass
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        pipe, self._pipe = self._pipe, None
+        try:
+            host_process.terminate_tree(process, timeout=1)
+        finally:
+            if pipe is not None:
+                pipe.close()
+            else:
+                for stream in (process.stdin, process.stdout):
+                    if stream is not None:
+                        stream.close()
 
     def close(self):
         try:

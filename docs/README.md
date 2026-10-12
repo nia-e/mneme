@@ -19,6 +19,7 @@ New to Mneme? Start with [installation and a first session](../README.md).
 | [Codex integration](../integrations/codex/README.md) | Set up project recall and optional background recording |
 | [Remote CLI](remote-cli.md) | Connect to an existing memory server over HTTP or SSH |
 | [Memory libraries](memory-libraries.md) | Read across enrolled projects and read-only snapshots |
+| [Store separation](store-separation.md) | Keep project, company and personal memory distinct while selecting shared reads |
 | [Workshop](../integrations/workshop/README.md) | Configure background work and its operator controls |
 | [Maintenance handoff](maintenance-handoff.md) | Release and resume a server's exclusive store lease |
 | [Mindcraft integration](../integrations/mindcraft/README.md) | Connect the optional game adapter |
@@ -32,3 +33,5 @@ optional [review-ledger format](review-ledger-schema.md).
 execution remains blocked on access to the upstream engine and assets.
 [Tag stewardship](tag-stewardship.md) covers shared vocabulary, capture-time tags
 and guarded background curation, including configuration and recovery boundaries.
+[Named store registry](proposals/named-store-registry.md) defines configurable
+store purposes and routing, including the implemented limits and validation boundaries.

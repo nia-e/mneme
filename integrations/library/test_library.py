@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -25,7 +27,11 @@ class LibraryTests(unittest.TestCase):
         self.replica = self.root / "replica"
         self.inbox = self.root / "inbox"
         for base, device, peer in ((self.owner, "a", "b"), (self.replica, "b", "a")):
-            base.mkdir()
+            if library.host_files.WINDOWS:
+                library.host_files.ensure_private_directory(base)
+            else:
+                # Retain the historical Unix fixture's ordinary 0755 directory.
+                base.mkdir()
             write(base / "library.json", {"schema": library.CONFIG_SCHEMA,
                    "library_id": "library", "device_id": device,
                    "catalog_path": "catalog.json", "owners": {}, "replicas": {}})
@@ -75,6 +81,7 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(self._register())
         self.assertEqual(sidecar.read_text(), "not publisher JSON")
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_publisher_timer_and_snapshot_require_explicit_enrollment_of_local_entry(self):
         self.assertTrue(self._register())
         entry = library.status(self.owner_config)["entries"][0]
@@ -142,11 +149,19 @@ class LibraryTests(unittest.TestCase):
     def test_local_registration_rejects_symlink_and_orphaned_metadata(self):
         config = self.root / "absent-library" / "library.json"
         alias = self.root / "project-alias"
-        alias.symlink_to(self.project, target_is_directory=True)
+        try:
+            alias.symlink_to(self.project, target_is_directory=True)
+        except OSError as error:
+            if library.host_files.WINDOWS and getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symlink creation requires Developer Mode or privilege")
+            raise
         with self.assertRaisesRegex(library.LibraryError, "real directory"):
             self._register(config=config, root=alias)
         self.assertFalse(config.parent.exists())
-        config.parent.mkdir()
+        if library.host_files.WINDOWS:
+            library.host_files.ensure_private_directory(config.parent)
+        else:
+            config.parent.mkdir()
         write(config.parent / "catalog.json", {"preserved": "evidence"})
         before = (config.parent / "catalog.json").read_bytes()
         with self.assertRaisesRegex(library.LibraryError, "orphaned"):
@@ -199,8 +214,11 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(library._publisher_path(config).exists())
 
     def test_local_registration_before_after_atomic_io_cuts_retry_exactly(self):
-        for owner, name in ((library, "_write_json"), (library, "_sync_dir"),
-                            (library.os, "fsync"), (library.os, "replace")):
+        boundaries = [(library, "_write_json"), (library.os, "fsync"),
+                      (library.host_files, "_replace_synced_file")]
+        if not library.host_files.WINDOWS:
+            boundaries.append((library.host_files, "sync_directory"))
+        for owner, name in boundaries:
             original = getattr(owner, name)
             count = [0]
 
@@ -211,6 +229,7 @@ class LibraryTests(unittest.TestCase):
             probe = self.root / f"probe-{name}" / "library.json"
             with patch.object(owner, name, side_effect=record):
                 self.assertTrue(self._register(config=probe))
+            self.assertGreater(count[0], 0, f"unexercised publication boundary: {name}")
             for cut in range(1, count[0] + 1):
                 for after in (False, True):
                     with self.subTest(operation=name, cut=cut, after=after):
@@ -240,7 +259,7 @@ class LibraryTests(unittest.TestCase):
                         self.assertEqual(entries[0]["db_id"], "DB1")
                         self.assertEqual(entries[0]["delivery"], "local")
                         self.assertFalse(library._publisher_path(config).exists())
-                        self.assertEqual(list(config.parent.glob("*.tmp-*")), [])
+                        self.assertEqual(list(config.parent.glob(".mneme-publish-*")), [])
 
     def test_concurrent_local_registration_serializes_one_config_identity(self):
         config = self.root / "new-library" / "library.json"
@@ -268,6 +287,88 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(set(data["owner_routes"][data["device_id"]]), {"DB1", "DB2"})
         self.assertFalse(library._publisher_path(config).exists())
 
+    @unittest.skipIf(library.host_files.WINDOWS, "Unix retained-directory mode contract")
+    def test_existing_unix_0755_state_directory_is_accepted_without_chmod(self):
+        retained = self.root / "retained-state"
+        retained.mkdir(mode=0o755)
+        retained.chmod(0o755)
+        evidence = retained / "unrelated-evidence"
+        evidence.write_bytes(b"keep these bytes and permissions")
+        evidence.chmod(0o644)
+        before = (evidence.read_bytes(), evidence.stat().st_mode, evidence.stat().st_mtime_ns)
+        config = retained / "library.json"
+        self.assertTrue(self._register(config=config))
+        self.assertEqual(retained.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((evidence.read_bytes(), evidence.stat().st_mode, evidence.stat().st_mtime_ns), before)
+        for path in (config, retained / "catalog.json", Path(str(config) + ".lock")):
+            library.host_files.check_private(path)
+        self.assertEqual(library.status(config)["entries"][0]["delivery"], "local")
+        self.assertEqual(retained.stat().st_mode & 0o777, 0o755)
+
+    def test_created_local_state_is_private_and_status_does_not_mutate(self):
+        config = self.root / "new-library" / "nested" / "library.json"
+        self.assertTrue(self._register(config=config))
+        for directory in (config.parent, config.parent.parent):
+            library.host_files.check_private_directory(directory)
+        paths = (config, config.parent / "catalog.json", Path(str(config) + ".lock"))
+        for path in paths:
+            library.host_files.check_private(path)
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+        self.assertEqual(library.status(config)["entries"][0]["delivery"], "local")
+        self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}, before)
+
+    def test_metadata_and_lock_reject_hardlinks_without_modifying_evidence(self):
+        self.assertTrue(self._register())
+        alias = self.owner / "linked.json"
+        os.link(self.owner_config, alias)
+        before = self.owner_config.read_bytes()
+        with self.assertRaises(library.LibraryError):
+            library._read_json(alias)
+        with self.assertRaises(library.LibraryError):
+            library._write_json(alias, {"unexpected": "replacement"})
+        self.assertEqual(self.owner_config.read_bytes(), before)
+        lock = self.root / "lock-config.lock"
+        lock.write_bytes(b"exact prior lock evidence")
+        os.link(lock, self.root / "lock-alias")
+        with self.assertRaises(library.LibraryError):
+            with library._lock(self.root / "lock-config"):
+                self.fail("multiply-linked lock was admitted")
+        self.assertEqual(lock.read_bytes(), b"exact prior lock evidence")
+
+    def test_windows_relay_refuses_before_any_state_or_provider_work(self):
+        missing = self.root / "absent" / "library.json"
+        operations = (
+            lambda: library.enroll_project(missing, self.project, "DB1"),
+            lambda: library.publish(missing, "project", self.root / "bundle"),
+            lambda: library.sync(missing),
+            lambda: library.once(missing),
+            lambda: library._snapshot(missing, "project"),
+            lambda: library.receive(missing, b"", authenticated_peer="owner"),
+            lambda: library.receive_inbox(missing),
+            lambda: library.serve(missing, self.root / "mcp", "127.0.0.1:8080"),
+        )
+        with patch.object(library.host_files, "WINDOWS", True), \
+                patch.object(library, "_lock", side_effect=AssertionError("lock before denial")), \
+                patch.object(library, "_load", side_effect=AssertionError("state before denial")), \
+                patch.object(library.subprocess, "run", side_effect=AssertionError("provider before denial")):
+            for operation in operations:
+                with self.assertRaisesRegex(library.LibraryError, "snapshot relay is unsupported on Windows"):
+                    operation()
+        self.assertFalse(missing.parent.exists())
+
+    def test_standalone_installed_helper_finds_packaged_file_primitives(self):
+        install = self.root / "installed" / "lib"
+        install.mkdir(parents=True)
+        for path in (Path(library.__file__), Path(library.host_files.__file__)):
+            shutil.copyfile(path, install / path.name)
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        result = subprocess.run([sys.executable, str(install / "library.py"), "--help"],
+                                cwd=self.root, env=env, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b"status", result.stdout)
+
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_explicit_enrollment_promotes_local_descriptor_and_can_restore_withdrawal(self):
         self.assertTrue(self._register())
         entry = library.status(self.owner_config)["entries"][0]
@@ -312,6 +413,26 @@ class LibraryTests(unittest.TestCase):
               "embedding_fingerprint": {}, "files": files})
         return bundle
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
+    def test_archive_preserves_prior_member_bytes_for_pending_delivery_retry(self):
+        bundle = self._bundle()
+        descriptor = {"db_id": "DB1"}
+        delivery = "b" * 32
+        message = library._message(descriptor, bundle, delivery)
+        # The pre-port writer used TarFile.add's filesystem metadata. Changing
+        # it would conflict with a queued delivery's already-published .tar.
+        previous = library.io.BytesIO()
+        with library.tarfile.open(fileobj=previous, mode="w") as archive:
+            data = json.dumps(message, sort_keys=True, separators=(",", ":")).encode()
+            info = library.tarfile.TarInfo("message.json")
+            info.size = len(data)
+            archive.addfile(info, library.io.BytesIO(data))
+            names = ["manifest.json"] + [item["path"] for item in message["snapshot"]["files"]]
+            for name in names:
+                archive.add(bundle / name, arcname="snapshot/" + name, recursive=False)
+        self.assertEqual(library._make_archive(descriptor, bundle, delivery), previous.getvalue())
+
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_descriptor_arrives_before_snapshot(self):
         entry = self._enroll()
         self.assertEqual(library.status(self.owner_config)["pending"], 1)
@@ -320,6 +441,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(received["db_id"], "DB1")
         self.assertEqual(received["replicas"], [])
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_offline_send_keeps_pending_and_retries(self):
         self._enroll()
         settings = json.loads(Path(str(self.owner_config) + ".publisher.json").read_text())
@@ -332,6 +454,7 @@ class LibraryTests(unittest.TestCase):
         write(Path(str(self.owner_config) + ".publisher.json"), settings)
         self.assertEqual(self._deliver(), "announced")
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_replay_stale_withdrawal_and_identity_conflict(self):
         entry = self._enroll()
         data = library._make_archive(entry, None)
@@ -347,6 +470,7 @@ class LibraryTests(unittest.TestCase):
             library.receive(self.replica_config, library._make_archive(conflict, None),
                             authenticated_peer="a")
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_partial_and_corrupt_bundle_cannot_activate(self):
         entry = self._enroll()
         self.assertEqual(self._deliver(), "announced")
@@ -359,6 +483,7 @@ class LibraryTests(unittest.TestCase):
         with self.assertRaises(library.LibraryError):
             library.validate_bundle(bundle, "DB1")
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_private_and_isolated_never_enroll(self):
         for mode in ("private", "isolated"):
             write(self.project / ".mneme" / "profile.json", {"schema": "mneme.profile.v1", "mode": mode})
@@ -367,6 +492,7 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(library.status(self.owner_config)["entries"], [])
             self.assertNotIn("owner_routes", json.loads(self.owner_config.read_text()))
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_private_transition_supersedes_pending_and_withdrawal_sticks(self):
         entry = self._enroll()
         write(self.project / ".mneme" / "profile.json", {"schema": "mneme.profile.v1", "mode": "private"})
@@ -381,6 +507,7 @@ class LibraryTests(unittest.TestCase):
         with self.assertRaisesRegex(library.LibraryError, "withdrawn"):
             library.publish(self.owner_config, entry["project_id"], self._bundle())
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_snapshot_activation_keeps_old_generation_file(self):
         entry = self._enroll()
         self._deliver()
@@ -411,6 +538,7 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(old_database.exists())
         self.assertTrue(unknown.exists())
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_same_second_newer_generation_wins_older_pair_is_stale(self):
         entry = self._enroll()
         self._deliver()
@@ -423,6 +551,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(library.receive(self.replica_config, a, authenticated_peer="a"), "stale")
         self.assertEqual(library.status(self.replica_config)["entries"][0]["replicas"][0]["generation"], "GENB")
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_ssh_uses_fixed_user_local_receiver_command(self):
         peer = {"device_id": "b", "transport": "ssh", "host": "user@pi", "port": 2222}
         completed = subprocess.CompletedProcess([], 0, stdout=b"{}")
@@ -432,6 +561,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(argv[-2:], ["user@pi", "exec ~/.local/bin/mneme-library-receive"])
         self.assertEqual(run.call_args.kwargs["input"], b"archive")
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_replica_service_stops_before_catalog_switch(self):
         entry = self._enroll()
         self._deliver()
@@ -451,6 +581,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(result, "activated")
         self.assertEqual(observed, [("stop", 0), ("start", 1)])
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_hostile_project_path_and_failed_stop_never_switch(self):
         entry = self._enroll()
         self._deliver()
@@ -464,6 +595,7 @@ class LibraryTests(unittest.TestCase):
                     library._make_archive(entry, self._bundle()), authenticated_peer="a")
         self.assertEqual(library.status(self.replica_config)["entries"][0]["replicas"], [])
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_native_source_prune_keeps_two_pending_and_unknown(self):
         entry = self._enroll()
         bundles = [self._bundle(f"GEN{i}", 100 + i) for i in range(1, 4)]
@@ -488,6 +620,7 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(bundles[1].exists() and bundles[2].exists())
         self.assertTrue(unknown.exists() and other_db.exists())
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_snapshot_create_response_records_only_verified_bundle(self):
         entry = self._enroll()
         bundle = self._bundle("GEN1")
@@ -503,6 +636,7 @@ class LibraryTests(unittest.TestCase):
         records = json.loads(sidecar.read_text())["sources"][entry["project_id"]]["native_bundles"]
         self.assertEqual(records[0]["path"], str(bundle.resolve()))
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_two_owner_projects_route_snapshot_to_distinct_local_ports(self):
         self.assertTrue(library.enroll_project(self.owner_config, self.project, "DB1",
                         owner_endpoint={"url": "http://127.0.0.1:18001", "token_env": "OWNER_TOKEN"}))
@@ -533,6 +667,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(commands[0][commands[0].index("--remote-token-env") + 1], "OWNER_TOKEN")
         self.assertEqual(commands[1][commands[1].index("--remote") + 1], "http://127.0.0.1:18002")
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_sender_catalog_learns_receiver_current_and_previous(self):
         entry = self._enroll()
         self._deliver()
@@ -551,6 +686,7 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(all(r["source_device_id"] == "b" for r in owner_replicas))
         self.assertNotEqual(owner_replicas[0]["database"], owner_replicas[1]["database"])
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_wrong_identity_ack_does_not_populate_sender_catalog(self):
         entry = self._enroll()
         self._deliver()
@@ -564,6 +700,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(library.sync(self.owner_config)["pending"], 1)
         self.assertEqual(library.status(self.owner_config)["entries"][0]["replicas"], [])
 
+    @unittest.skipIf(library.host_files.WINDOWS, "snapshot relay requires Unix directory durability")
     def test_ssh_ack_populates_sender_catalog(self):
         entry = self._enroll()
         owner_sidecar = Path(str(self.owner_config) + ".publisher.json")

@@ -71,6 +71,7 @@ storage-new-rocksdb = ["dep:rocksdb"]
 storage-rocksdb = ["dep:cozorocks"]
 storage-sled = ["dep:sled"]
 storage-sqlite = [
+    "dep:mneme-store-path",
     "dep:sqlite",
     "dep:sqlite3-sys",
 ]
@@ -324,3 +325,6 @@ version = "0.11.3"
 
 [dev-dependencies.tempfile]
 version = "3.14.0"
+
+[target.'cfg(windows)'.dependencies]
+mneme-store-path = { path = "../../crates/mneme-store-path", optional = true }

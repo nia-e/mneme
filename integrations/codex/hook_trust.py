@@ -8,13 +8,11 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import selectors
-import shlex
-import signal
 import subprocess
 import sys
 import time
 import install
+import host_process
 
 MAX_FRAME = 2 * 1024 * 1024
 MAX_TOTAL = 8 * 1024 * 1024
@@ -72,6 +70,10 @@ def reviewed_definitions(root, service_path, bundle_root=None):
         install.revalidate_existing_service(plan)
     except (ValueError, OSError, KeyError, TypeError):
         raise TrustError("existing_service_configuration_or_binary_changed") from None
+    try:
+        install.revalidate_store_registry(plan)
+    except (ValueError, OSError, KeyError, TypeError):
+        raise TrustError("store_registry_configuration_changed") from None
     originals = {}
     for name in install.CONFIG_NAMES:
         expected = plan["expected_configs"][name]
@@ -96,9 +98,9 @@ def reviewed_definitions(root, service_path, bundle_root=None):
         expected_hook["recording_mode"] = "off"  # explicit safe narrowing supported by init
     if actual_hook != expected_hook:
         raise TrustError("installed_hook_configuration_changed")
-    command = shlex.join([plan["python"], str(prefix / "lib/hooks.py"), "--config", str(prefix / "config/hooks.json")])
-    definitions = install.hook_handlers(command, async_mode=plan["recall_mode"] == "async",
-        recording=plan["recording_mode"] == "automatic", revision=plan["config_revision"], recall_mode=plan["recall_mode"])
+    # Replay the receipt's exact platform/revision renderer. Background argv
+    # must be encoded as a complete command, never suffixed to an envelope.
+    definitions = install.planned_hook_handlers(plan)
     signatures = []
     expected_groups = [(event, group) for event, groups in definitions.items() for group in groups]
     for event, groups in definitions.items():
@@ -132,12 +134,15 @@ class AppServer:
     """Finite configuration-only NDJSON connection; no generic model/tool API."""
     def __init__(self, codex, root):
         self.deadline = time.monotonic() + TIMEOUT
-        self.process = subprocess.Popen([str(codex), "app-server", "--listen", "stdio://"], cwd=root,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(self.process.stdout, selectors.EVENT_READ)
-        os.set_blocking(self.process.stdout.fileno(), False)
-        os.set_blocking(self.process.stdin.fileno(), False)
+        self.process = host_process.spawn([str(codex), "app-server", "--listen", "stdio://"], cwd=root,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, tree=True, bufsize=0)
+        try:
+            self.pipe = host_process.BoundedPipe(self.process)
+        except BaseException:
+            host_process.terminate_tree(self.process)
+            for stream in (self.process.stdin, self.process.stdout):
+                stream.close()
+            raise
         self.buffer = b""
         self.total = self.frames = self.ident = 0
 
@@ -145,25 +150,23 @@ class AppServer:
         raw = (json.dumps(message, separators=(",", ":")) + "\n").encode()
         if len(raw) > MAX_FRAME:
             raise TrustError("request_limit")
-        with selectors.DefaultSelector() as selector:
-            selector.register(self.process.stdin, selectors.EVENT_WRITE)
-            while raw:
-                remaining = self.deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    raise TrustError("app_server_timeout")
-                count = os.write(self.process.stdin.fileno(), raw)
-                if count <= 0:
-                    raise TrustError("app_server_closed")
-                raw = raw[count:]
+        try:
+            self.pipe.write(raw, self.deadline)
+        except TimeoutError:
+            raise TrustError("app_server_timeout") from None
+        except OSError:
+            raise TrustError("app_server_closed") from None
 
     def _next(self):
         while b"\n" not in self.buffer:
             if len(self.buffer) > MAX_FRAME:
                 raise TrustError("response_frame_limit")
-            remaining = self.deadline - time.monotonic()
-            if remaining <= 0 or not self.selector.select(remaining):
-                raise TrustError("app_server_timeout")
-            block = os.read(self.process.stdout.fileno(), 65536)
+            try:
+                block = self.pipe.read(min(65536, MAX_FRAME + 1 - len(self.buffer)), self.deadline)
+            except TimeoutError:
+                raise TrustError("app_server_timeout") from None
+            except OSError:
+                raise TrustError("app_server_closed") from None
             if not block:
                 raise TrustError("app_server_closed")
             self.total += len(block)
@@ -210,19 +213,10 @@ class AppServer:
         self._send({"method":"initialized"})
 
     def close(self):
-        self.selector.close()
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                self.process.wait(timeout=2)
-        for pipe in (self.process.stdin, self.process.stdout):
-            pipe.close()
+        try:
+            host_process.terminate_tree(self.process)
+        finally:
+            self.pipe.close()
 
 
 def scoped_hooks(response, root, signatures):

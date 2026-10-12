@@ -7,6 +7,11 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
+import subprocess
+
+import host_files
+import host_process
 import unittest
 from unittest.mock import patch
 
@@ -118,11 +123,23 @@ class ReaderRuntimeTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.codex = self.root / "codex"
+        host_files.set_private(self.root, directory=True)
+        if os.name == "nt":
+            # Windows does not execute a shebang. Only fixture launch is adapted;
+            # the real process/pipe/job implementation remains exercised.
+            native_spawn = host_process.spawn
+            def fixture_spawn(argv, **kwargs):
+                if Path(argv[0]) == self.codex:
+                    argv = [sys.executable, *argv]
+                return native_spawn(argv, **kwargs)
+            fixture = patch.object(host_process, "spawn", side_effect=fixture_spawn)
+            fixture.start()
+            self.addCleanup(fixture.stop)
+        self.codex = self.root / ("codex.exe" if os.name == "nt" else "codex")
         self.codex.write_text(FAKE_SERVER.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
         self.codex.chmod(0o700)
         self.auth = self.root / "auth.json"
-        self.auth.write_text("{}")
+        host_files.atomic_write(self.auth, b"{}")
         self.trace = self.root / "trace"
         self.config = {"reader_codex": str(self.codex),
                        "reader_codex_sha256": hashlib.sha256(self.codex.read_bytes()).hexdigest(),
@@ -971,6 +988,83 @@ class ReaderRuntimeTest(unittest.TestCase):
         for feature in ("hooks","memories","multi_agent","shell_tool","plugins","apps",
                         "browser_use","computer_use","skill_search"):
             self.assertIn(feature, disabled)
+
+    @unittest.skipIf(os.name == "nt", "existing Unix scratch compatibility")
+    def test_existing_unix_scratch_keeps_mode_and_private_child(self):
+        scratch = self.root / "existing-scratch"
+        scratch.mkdir(mode=0o755)
+        with ReaderRuntime(self.config, scratch) as runtime:
+            result = runtime.select(self.dialogue, self.cards)
+            self.assertEqual(result["reason"], "selected")
+            self.assertEqual(scratch.stat().st_mode & 0o777, 0o755)
+            host_files.check_private_directory(runtime.home)
+            host_files.check_private_directory(runtime._own_dir)
+
+    def test_nonreading_child_cannot_block_reader_write(self):
+        with ReaderRuntime(self.config, self.root / "scratch") as runtime:
+            runtime.process = host_process.spawn([sys.executable, "-c", "import time;time.sleep(30)"],
+                tree=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+            runtime._pipe = host_process.BoundedPipe(runtime.process)
+            runtime._max_frame_bytes = 512 * 1024
+            started = time.monotonic()
+            with self.assertRaisesRegex(TransportError, "timeout"):
+                runtime._send({"body": "x" * (400 * 1024)}, started + 0.15)
+            self.assertLess(time.monotonic() - started, 2)
+
+    def test_windows_auth_handoff_is_private_regular_copy_and_removed_on_close(self):
+        with patch("reader_runtime.WINDOWS", True), ReaderRuntime(self.config, self.root / "scratch") as runtime:
+            runtime._own_dir = self.root / "private-reader"
+            host_files.ensure_private_directory(runtime._own_dir)
+            runtime.home = runtime._own_dir / "home"
+            host_files.ensure_private_directory(runtime.home)
+            runtime._handoff_auth(self.auth)
+            target = runtime.home / "auth.json"
+            self.assertEqual(target.read_bytes(), self.auth.read_bytes())
+            self.assertFalse(target.is_symlink())
+            self.assertNotEqual(target.stat().st_ino, self.auth.stat().st_ino)
+            host_files.check_private(target)
+        self.assertFalse(target.exists())
+        self.assertEqual(self.auth.read_bytes(), b"{}")
+
+    def test_windows_auth_handoff_rejects_oversize_and_replaced_source(self):
+        with patch("reader_runtime.WINDOWS", True), ReaderRuntime(self.config, self.root / "scratch") as runtime:
+            runtime.home = self.root / "auth-copy"
+            host_files.ensure_private_directory(runtime.home)
+            with patch("reader_runtime.MAX_AUTH_BYTES", 1), self.assertRaisesRegex(TransportError, "unavailable"):
+                runtime._handoff_auth(self.auth)
+            self.assertFalse((runtime.home / "auth.json").exists())
+            open_regular = host_files.open_regular
+            calls = 0
+            def replaced(path, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    host_files.atomic_write(self.auth, b'{"changed":true}')
+                return open_regular(path, *args, **kwargs)
+            with patch.object(host_files, "open_regular", side_effect=replaced):
+                with self.assertRaisesRegex(TransportError, "unavailable"):
+                    runtime._handoff_auth(self.auth)
+            self.assertFalse((runtime.home / "auth.json").exists())
+
+    def test_windows_auth_handoff_rejects_hard_link(self):
+        linked = self.root / "auth-link.json"
+        os.link(self.auth, linked)
+        with patch("reader_runtime.WINDOWS", True), ReaderRuntime(self.config, self.root / "scratch") as runtime:
+            runtime.home = self.root / "auth-copy"
+            host_files.ensure_private_directory(runtime.home)
+            with self.assertRaises((ValueError, OSError)):
+                runtime._handoff_auth(linked)
+            self.assertFalse((runtime.home / "auth.json").exists())
+
+    def test_windows_credential_cleanup_failure_is_not_silenced(self):
+        runtime = ReaderRuntime(self.config, self.root / "scratch")
+        runtime._own_dir = self.root / "private-reader"
+        host_files.ensure_private_directory(runtime._own_dir)
+        with patch("reader_runtime.WINDOWS", True), patch("reader_runtime.shutil.rmtree", side_effect=OSError("locked")):
+            with self.assertRaises(OSError):
+                runtime.close()
+        self.assertIsNotNone(runtime._own_dir)
+        runtime.close()
 
     def test_assessment_diagnostic_unexpected_exception_text_is_not_retained(self):
         for error in (ValueError("private model response marker"), ValueError("invalid_exact_quote", "private"),

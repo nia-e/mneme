@@ -529,7 +529,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(plan['librarian_effort'], 'medium')
         self.assertEqual(plan['reader_model'], 'gpt-6.1-sol')
         self.assertIn('lib/target_policy.py', [row['destination'] for row in plan['files']])
-        self.assertEqual(plan['files'][-1]['destination'], 'lib/stewardship_contract.py')
+        self.assertEqual(plan['files'][-1]['destination'], 'lib/core_hook.py')
         for effort in ('low', 'medium', 'high'):
             altered = copy.deepcopy(plan); altered['librarian_effort'] = effort
             altered['plan_sha256'] = install.plan_hash(altered)
@@ -686,7 +686,8 @@ class InstallTests(unittest.TestCase):
         names = ('turn_observer.py', 'rollout_primitives.py',
                  'recording_contract.py', 'recording_jobs.py', 'routing_memory.py', 'routing_contract.py', 'librarian_policy.py', 'touchstone_contract.py', 'target_policy.py',
                  'misc_binding.py', 'misc_config.py', 'hook_launcher.py', 'tag_config.py',
-                 'tag_context.py', 'stewardship.py', 'stewardship_contract.py')
+                 'tag_context.py', 'stewardship.py', 'stewardship_contract.py', 'host_files.py', 'host_process.py', 'host_platform.py',
+                 'store_registry.py', 'registry_config.py', 'registry_runtime.py', 'registry_reader.py', 'registry_recording.py', 'core_hook.py')
         self.assertEqual([row['destination'] for row in plan['files'][-len(names):]],
                          ['lib/' + name for name in names])
         result = install.apply(plan)

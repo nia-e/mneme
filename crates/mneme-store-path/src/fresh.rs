@@ -13,7 +13,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::fs::File;
 #[cfg(all(unix, test))]
 use std::fs::OpenOptions;
@@ -29,14 +29,27 @@ use super::StoreLease;
 use super::UnixIdentity;
 
 #[cfg(unix)]
+type StageDirectory = File;
+#[cfg(unix)]
+type StageIdentity = UnixIdentity;
+#[cfg(windows)]
+use crate::windows::{Directory as StageDirectory, FileIdentity as StageIdentity};
+#[cfg(windows)]
+type FreshFileIdentityV1 = crate::windows::FileIdentity;
+
+#[cfg(any(unix, windows))]
 mod record;
 #[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use record::{encode_intent, encode_prepared, require_target_binding_len};
 #[cfg(unix)]
 use unix::*;
+#[cfg(windows)]
+use windows::*;
 
 const STAGE_PREFIX: &str = ".mneme-fresh-store-v1-";
 const STAGE_DATABASE: &str = "memory.db";
@@ -67,21 +80,21 @@ pub struct FreshStoreStageV1 {
     database_path: PathBuf,
     spec: FreshStoreStageSpecV1,
     lease: StoreLease,
-    #[cfg(unix)]
-    stage_dir: File,
-    #[cfg(unix)]
-    stage_identity: UnixIdentity,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
+    stage_dir: StageDirectory,
+    #[cfg(any(unix, windows))]
+    stage_identity: StageIdentity,
+    #[cfg(any(unix, windows))]
     intent: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     intent_identity: FreshFileIdentityV1,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     main: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     initial_main_identity: FreshFileIdentityV1,
 }
 
-/// A closed, private, sidecar-free staged file whose inode is durably recorded.
+/// A closed, private, sidecar-free staged file whose identity is durably recorded.
 ///
 /// This is filesystem readiness only, not a semantic store permit.
 #[derive(Debug)]
@@ -92,23 +105,23 @@ pub struct PreparedFreshStoreStageV1 {
     database_path: PathBuf,
     spec: FreshStoreStageSpecV1,
     lease: StoreLease,
-    #[cfg(unix)]
-    stage_dir: File,
-    #[cfg(unix)]
-    stage_identity: UnixIdentity,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
+    stage_dir: StageDirectory,
+    #[cfg(any(unix, windows))]
+    stage_identity: StageIdentity,
+    #[cfg(any(unix, windows))]
     intent: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     intent_identity: FreshFileIdentityV1,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     prepared: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     prepared_identity: FreshFileIdentityV1,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     main: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     initial_main_identity: FreshFileIdentityV1,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     main_identity: FreshFileIdentityV1,
 }
 
@@ -119,9 +132,9 @@ pub struct PreparedFreshStoreStageV1 {
 pub struct PublishedFreshStoreV1 {
     target: PathBuf,
     lease: StoreLease,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     main: File,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     main_identity: FreshFileIdentityV1,
 }
 
@@ -288,7 +301,7 @@ struct FreshFileIdentityV1 {
     len: u64,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug)]
 struct ValidatedDiscardMemberV1 {
     name: OsString,
@@ -296,14 +309,14 @@ struct ValidatedDiscardMemberV1 {
     identity: FreshFileIdentityV1,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RenameNamespaceObservationV1 {
     source: FreshStoreNameObservationV1,
     target: FreshStoreNameObservationV1,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug)]
 struct PublishedCleanupErrorV1 {
     source: io::Error,
@@ -329,11 +342,11 @@ impl StoreLease {
         target: &Path,
         spec: FreshStoreStageSpecV1,
     ) -> io::Result<FreshStoreStageV1> {
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
         {
             begin_fresh_store_v1(self, target, spec)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios", windows)))]
         {
             let _ = (self, target, spec);
             Err(unsupported())
@@ -342,7 +355,8 @@ impl StoreLease {
 }
 
 impl FreshStoreStageV1 {
-    /// Path of the private, pre-created mode-0600 file which the storage layer
+    /// Path of the private, pre-created file (mode 0600 on Unix; protected ACL
+    /// on Windows) which the storage layer
     /// may open and populate as its database.
     ///
     /// This filesystem capability cannot observe whether the caller later
@@ -357,11 +371,11 @@ impl FreshStoreStageV1 {
     /// The caller must already have performed its semantic validation.  This
     /// method intentionally does not inspect SQLite or Mneme bytes.
     pub fn seal_closed_file(self) -> io::Result<PreparedFreshStoreStageV1> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             seal_closed_file(self)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = self;
             Err(unsupported())
@@ -374,11 +388,11 @@ impl FreshStoreStageV1 {
     /// fixed record, main, and three SQLite sidecar names with exact private
     /// identities.  Drop never calls this method.
     pub fn discard_closed(self) -> io::Result<StoreLease> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             discard_building(self)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = self;
             Err(unsupported())
@@ -399,11 +413,11 @@ impl PreparedFreshStoreStageV1 {
     /// releasing the target lease.  A pre-rename error returns the prepared
     /// capability; a post-rename error returns a distinct recovery capability.
     pub fn publish(self) -> Result<PublishedFreshStoreV1, FreshStorePublishErrorV1> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             publish_prepared(self)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(FreshStorePublishErrorV1::NotPublished {
                 source: unsupported(),
@@ -414,11 +428,11 @@ impl PreparedFreshStoreStageV1 {
 
     /// Explicitly discard a prepared but unpublished stage.
     pub fn discard_closed(self) -> io::Result<StoreLease> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             discard_prepared(self)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = self;
             Err(unsupported())
@@ -434,11 +448,11 @@ impl PublishedFreshStoreV1 {
     /// Revalidate the unchanged target lease and prove the published pathname
     /// still names the inode retained across publication.
     pub fn require_guards(&self) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             require_published_guards(self)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(unsupported())
         }
@@ -453,11 +467,11 @@ impl PublishedFreshStoreV1 {
     /// constructing SQLite, then retain this capability and use this runtime
     /// guard for the lifetime of the opened database.
     pub fn require_runtime_guards(&self) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             require_published_main_guards(self)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(unsupported())
         }
@@ -492,11 +506,11 @@ impl FreshStorePublicationNeedsRecoveryV1 {
     /// ambiguous outcome and does not recover, clean up, or semantically admit
     /// the store.
     pub fn require_guards(&self) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             require_post_rename_guards(&self.state)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(unsupported())
         }
@@ -519,11 +533,11 @@ impl FreshStorePublishedWithResidueV1 {
     }
 
     pub fn require_guards(&self) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             require_post_rename_guards(&self.state)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(unsupported())
         }
@@ -540,14 +554,15 @@ impl FreshStorePublishedGuardNeedsRecoveryV1 {
     }
 }
 
+#[cfg(not(windows))]
 fn unsupported() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        "fresh-store atomic no-clobber publication is supported only on Linux and Darwin",
+        "fresh-store atomic no-clobber publication is supported only on Linux, Darwin, and local Windows NTFS",
     )
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 fn begin_fresh_store_v1(
     lease: StoreLease,
     requested_target: &Path,
@@ -578,14 +593,7 @@ fn begin_fresh_store_v1(
             "fresh-store target filename collides with its operation directory under ASCII case-folding",
         ));
     }
-    mkdir_private_at(&lease.parent, &stage_name)?;
-    let stage_dir = open_stage_directory(&lease, &stage_name)?;
-    set_exact_mode(&stage_dir, 0o700, "fresh stage directory")?;
-    let stage_identity = validate_stage_directory(
-        &stage_dir.metadata()?,
-        &lease.parent_path.join(&stage_name),
-        lease.parent_identity.device,
-    )?;
+    let (stage_dir, stage_identity) = create_stage_directory(&lease, &stage_name)?;
 
     let stage_path = lease.parent_path.join(&stage_name);
     let database_path = stage_path.join(STAGE_DATABASE);
@@ -632,12 +640,12 @@ fn begin_fresh_store_v1(
     })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn seal_closed_file(stage: FreshStoreStageV1) -> io::Result<PreparedFreshStoreStageV1> {
     validate_building_stage(&stage, true)?;
     stage.main.sync_all()?;
-    let main_identity = validate_private_main(&stage.main.metadata()?, &stage.database_path)?;
-    if !stage.initial_main_identity.same_stable_file(main_identity) {
+    let main_identity = validate_main(&stage.main, &stage.database_path)?;
+    if !same_stable_file(stage.initial_main_identity, main_identity) {
         return Err(invalid_data(
             "fresh-store main descriptor changed stable identity during build",
         ));
@@ -706,7 +714,7 @@ fn seal_closed_file(stage: FreshStoreStageV1) -> io::Result<PreparedFreshStoreSt
     })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn publish_prepared(
     stage: PreparedFreshStoreStageV1,
 ) -> Result<PublishedFreshStoreV1, FreshStorePublishErrorV1> {
@@ -823,7 +831,7 @@ fn publish_prepared(
     Ok(published)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn publication_recovery_error(
     stage: PreparedFreshStoreStageV1,
     source: io::Error,
@@ -848,7 +856,7 @@ fn publication_recovery_error(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn into_published(stage: PreparedFreshStoreStageV1) -> PublishedFreshStoreV1 {
     let PreparedFreshStoreStageV1 {
         target,
@@ -865,7 +873,7 @@ fn into_published(stage: PreparedFreshStoreStageV1) -> PublishedFreshStoreV1 {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn observe_rename_namespace(
     stage: &PreparedFreshStoreStageV1,
     target_name: &OsStr,
@@ -880,17 +888,14 @@ fn observe_rename_namespace(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn observe_main_name(
-    parent: &File,
+    parent: &StageDirectory,
     name: &OsStr,
     expected: FreshFileIdentityV1,
 ) -> FreshStoreNameObservationV1 {
     match open_private_file_at(parent, name, "fresh-store rename outcome") {
-        Ok(file) => match file
-            .metadata()
-            .and_then(|metadata| validate_private_main(&metadata, Path::new(name)))
-        {
+        Ok(file) => match validate_main(&file, Path::new(name)) {
             Ok(observed) if observed == expected => FreshStoreNameObservationV1::ExactRetainedMain,
             Ok(_) | Err(_) => FreshStoreNameObservationV1::OtherOrUninspectable,
         },
@@ -901,7 +906,7 @@ fn observe_main_name(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn named_stage_path_if_proved(stage: &PreparedFreshStoreStageV1) -> Option<PathBuf> {
     let stage_name = stage.stage_path.file_name()?;
     require_named_stage_directory(&stage.lease, stage_name, stage.stage_identity)
@@ -909,7 +914,7 @@ fn named_stage_path_if_proved(stage: &PreparedFreshStoreStageV1) -> Option<PathB
         .map(|()| stage.stage_path.clone())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn rename_for_publication(
     stage: &PreparedFreshStoreStageV1,
     target_name: &OsStr,
@@ -921,12 +926,28 @@ fn rename_for_publication(
         create_competing_target_for_test(stage, target_name)?;
     }
 
+    #[cfg(unix)]
     rename_no_replace_at(
         &stage.stage_dir,
         OsStr::new(STAGE_DATABASE),
         &stage.lease.parent,
         target_name,
     )?;
+    #[cfg(windows)]
+    {
+        // SQLite opens databases without FILE_SHARE_DELETE. Keep the lifetime
+        // main handle free of DELETE access, and acquire rename authority only
+        // across this closed-database boundary. The separately opened handle
+        // must be exactly the retained and sealed file; drop it before a caller
+        // may construct the published SQLite runtime.
+        let renaming = stage
+            .stage_dir
+            .open_file(OsStr::new(STAGE_DATABASE), true)?;
+        if validate_main(&renaming, &stage.database_path)? != stage.main_identity {
+            return Err(invalid_data("fresh-store rename handle changed identity"));
+        }
+        crate::windows::rename_no_replace(&renaming, &stage.lease.parent, target_name)?;
+    }
     if take_publish_failpoint_for_test(FreshPublishFailPointV1::RenameErrorAfterSyscall) {
         return Err(injected_publish_error("after no-clobber rename"));
     }
@@ -949,7 +970,7 @@ fn create_competing_target_for_test(
     file.sync_all()
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(all(any(unix, windows), not(test)))]
 fn create_competing_target_for_test(
     _stage: &PreparedFreshStoreStageV1,
     _target_name: &OsStr,
@@ -957,7 +978,7 @@ fn create_competing_target_for_test(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn validate_building_stage(stage: &FreshStoreStageV1, require_main_only: bool) -> io::Result<()> {
     stage.lease.require_guards(&stage.target)?;
     let target_name = stage
@@ -996,8 +1017,8 @@ fn validate_building_stage(stage: &FreshStoreStageV1, require_main_only: bool) -
     } else {
         require_building_inventory(stage)?;
     }
-    let observed_main = validate_private_file(&stage.main.metadata()?, &stage.database_path)?;
-    if !stage.initial_main_identity.same_stable_file(observed_main) {
+    let observed_main = validate_file(&stage.main, &stage.database_path)?;
+    if !same_stable_file(stage.initial_main_identity, observed_main) {
         return Err(invalid_data(
             "fresh-store main descriptor changed stable identity during build",
         ));
@@ -1011,7 +1032,7 @@ fn validate_building_stage(stage: &FreshStoreStageV1, require_main_only: bool) -
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn validate_prepared_stage(stage: &PreparedFreshStoreStageV1) -> io::Result<()> {
     stage.lease.require_guards(&stage.target)?;
     let target_name = stage
@@ -1060,7 +1081,7 @@ fn validate_prepared_stage(stage: &PreparedFreshStoreStageV1) -> io::Result<()> 
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn discard_building(stage: FreshStoreStageV1) -> io::Result<StoreLease> {
     validate_building_stage(&stage, false)?;
     let inventory = stage_inventory(&stage.stage_path, MAX_STAGE_ENTRIES)?;
@@ -1073,7 +1094,7 @@ fn discard_building(stage: FreshStoreStageV1) -> io::Result<StoreLease> {
     ] {
         if inventory.contains(&name) {
             let file = open_private_file_at(&stage.stage_dir, &name, "discarded stage member")?;
-            let identity = validate_private_file(&file.metadata()?, &stage.stage_path.join(&name))?;
+            let identity = validate_file(&file, &stage.stage_path.join(&name))?;
             members.push(ValidatedDiscardMemberV1 {
                 name,
                 file,
@@ -1095,7 +1116,7 @@ fn discard_building(stage: FreshStoreStageV1) -> io::Result<StoreLease> {
         )?;
     }
     for member in members {
-        unlink_file_at(&stage.stage_dir, &member.name)?;
+        unlink_validated_file(&stage.stage_dir, &member.name, member.identity)?;
         require_name_absent(&stage.stage_dir, &member.name, "discarded stage member")?;
         drop(member.file);
     }
@@ -1112,17 +1133,25 @@ fn discard_building(stage: FreshStoreStageV1) -> io::Result<StoreLease> {
             stage.spec,
         )?,
     )?;
-    unlink_file_at(&stage.stage_dir, OsStr::new(INTENT_RECORD))?;
+    unlink_validated_file(
+        &stage.stage_dir,
+        OsStr::new(INTENT_RECORD),
+        stage.intent_identity,
+    )?;
     stage.stage_dir.sync_all()?;
     remove_stage_directory(&stage.lease, &stage.stage_path, stage.stage_identity)?;
     stage.lease.parent.sync_all()?;
     Ok(stage.lease)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn discard_prepared(stage: PreparedFreshStoreStageV1) -> io::Result<StoreLease> {
     validate_prepared_stage(&stage)?;
-    unlink_file_at(&stage.stage_dir, OsStr::new(PREPARED_RECORD))?;
+    unlink_validated_file(
+        &stage.stage_dir,
+        OsStr::new(PREPARED_RECORD),
+        stage.prepared_identity,
+    )?;
     stage.stage_dir.sync_all()?;
     let PreparedFreshStoreStageV1 {
         target,
@@ -1156,7 +1185,7 @@ fn discard_prepared(stage: PreparedFreshStoreStageV1) -> io::Result<StoreLease> 
     })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn cleanup_published_records(
     stage: &PreparedFreshStoreStageV1,
 ) -> Result<(), PublishedCleanupErrorV1> {
@@ -1186,8 +1215,12 @@ fn cleanup_published_records(
     .map_err(at(FreshStorePublishedResiduePhaseV1::VerifyIntentRecord))?;
     fail_cleanup_phase_for_test(FreshStorePublishedResiduePhaseV1::RemoveIntentRecord)
         .map_err(at(FreshStorePublishedResiduePhaseV1::RemoveIntentRecord))?;
-    unlink_file_at(&stage.stage_dir, OsStr::new(INTENT_RECORD))
-        .map_err(at(FreshStorePublishedResiduePhaseV1::RemoveIntentRecord))?;
+    unlink_validated_file(
+        &stage.stage_dir,
+        OsStr::new(INTENT_RECORD),
+        stage.intent_identity,
+    )
+    .map_err(at(FreshStorePublishedResiduePhaseV1::RemoveIntentRecord))?;
     fail_cleanup_phase_for_test(FreshStorePublishedResiduePhaseV1::SyncIntentRemoval)
         .map_err(at(FreshStorePublishedResiduePhaseV1::SyncIntentRemoval))?;
     stage
@@ -1207,8 +1240,12 @@ fn cleanup_published_records(
     .map_err(at(FreshStorePublishedResiduePhaseV1::VerifyPreparedRecord))?;
     fail_cleanup_phase_for_test(FreshStorePublishedResiduePhaseV1::RemovePreparedRecord)
         .map_err(at(FreshStorePublishedResiduePhaseV1::RemovePreparedRecord))?;
-    unlink_file_at(&stage.stage_dir, OsStr::new(PREPARED_RECORD))
-        .map_err(at(FreshStorePublishedResiduePhaseV1::RemovePreparedRecord))?;
+    unlink_validated_file(
+        &stage.stage_dir,
+        OsStr::new(PREPARED_RECORD),
+        stage.prepared_identity,
+    )
+    .map_err(at(FreshStorePublishedResiduePhaseV1::RemovePreparedRecord))?;
     fail_cleanup_phase_for_test(FreshStorePublishedResiduePhaseV1::SyncPreparedRemoval)
         .map_err(at(FreshStorePublishedResiduePhaseV1::SyncPreparedRemoval))?;
     stage
@@ -1229,7 +1266,7 @@ fn cleanup_published_records(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn require_post_rename_guards(stage: &PreparedFreshStoreStageV1) -> io::Result<()> {
     stage.lease.require_guards(&stage.target)?;
     let target_name = stage
@@ -1243,7 +1280,7 @@ fn require_post_rename_guards(stage: &PreparedFreshStoreStageV1) -> io::Result<(
         true,
         "published main",
     )?;
-    let opened = validate_private_main(&stage.main.metadata()?, &stage.target)?;
+    let opened = validate_main(&stage.main, &stage.target)?;
     if opened != stage.main_identity {
         return Err(invalid_data(
             "published fresh-store main descriptor changed identity",
@@ -1252,7 +1289,7 @@ fn require_post_rename_guards(stage: &PreparedFreshStoreStageV1) -> io::Result<(
     require_target_sidecars_absent(&stage.lease, target_name)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn require_published_guards(published: &PublishedFreshStoreV1) -> io::Result<()> {
     require_published_main_guards(published)?;
     let target_name = published
@@ -1262,7 +1299,7 @@ fn require_published_guards(published: &PublishedFreshStoreV1) -> io::Result<()>
     require_target_sidecars_absent(&published.lease, target_name)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn require_published_main_guards(published: &PublishedFreshStoreV1) -> io::Result<()> {
     published.lease.require_guards(&published.target)?;
     let target_name = published
@@ -1275,8 +1312,8 @@ fn require_published_main_guards(published: &PublishedFreshStoreV1) -> io::Resul
         published.main_identity,
         "published main",
     )?;
-    let opened = validate_private_main(&published.main.metadata()?, &published.target)?;
-    if !opened.same_stable_file(published.main_identity) {
+    let opened = validate_main(&published.main, &published.target)?;
+    if !same_stable_file(opened, published.main_identity) {
         return Err(invalid_data(
             "published fresh-store main descriptor changed stable identity",
         ));
@@ -1284,7 +1321,7 @@ fn require_published_main_guards(published: &PublishedFreshStoreV1) -> io::Resul
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FreshPublishFailPointV1 {
     RenameErrorBeforeSyscall,
@@ -1296,19 +1333,19 @@ enum FreshPublishFailPointV1 {
     FinalGuard,
 }
 
-#[cfg(all(unix, test))]
+#[cfg(all(any(unix, windows), test))]
 std::thread_local! {
     static PUBLISH_FAILPOINT: std::cell::Cell<Option<FreshPublishFailPointV1>> = const {
         std::cell::Cell::new(None)
     };
 }
 
-#[cfg(all(unix, test))]
+#[cfg(all(any(unix, windows), test))]
 fn arm_publish_failpoint_for_test(point: FreshPublishFailPointV1) {
     PUBLISH_FAILPOINT.with(|armed| armed.set(Some(point)));
 }
 
-#[cfg(all(unix, test))]
+#[cfg(all(any(unix, windows), test))]
 fn take_publish_failpoint_for_test(point: FreshPublishFailPointV1) -> bool {
     PUBLISH_FAILPOINT.with(|armed| {
         if armed.get() == Some(point) {
@@ -1320,12 +1357,12 @@ fn take_publish_failpoint_for_test(point: FreshPublishFailPointV1) -> bool {
     })
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(all(any(unix, windows), not(test)))]
 fn take_publish_failpoint_for_test(_point: FreshPublishFailPointV1) -> bool {
     false
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn fail_publish_point_for_test(point: FreshPublishFailPointV1) -> io::Result<()> {
     if take_publish_failpoint_for_test(point) {
         Err(injected_publish_error("at a publication phase boundary"))
@@ -1334,17 +1371,17 @@ fn fail_publish_point_for_test(point: FreshPublishFailPointV1) -> io::Result<()>
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn fail_cleanup_phase_for_test(phase: FreshStorePublishedResiduePhaseV1) -> io::Result<()> {
     fail_publish_point_for_test(FreshPublishFailPointV1::Cleanup(phase))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn injected_publish_error(at: &str) -> io::Error {
     io::Error::other(format!("injected fresh-store failure {at}"))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn exact_target(lease: &StoreLease, requested: &Path) -> io::Result<(PathBuf, OsString)> {
     if requested.as_os_str().is_empty() || !requested.is_absolute() {
         return Err(invalid_input(
@@ -1367,7 +1404,7 @@ fn exact_target(lease: &StoreLease, requested: &Path) -> io::Result<(PathBuf, Os
     Ok((canonical, name))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn stage_name(operation_id: Ulid) -> OsString {
     OsString::from(format!("{STAGE_PREFIX}{operation_id}"))
 }
@@ -1382,3 +1419,64 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
+
+#[cfg(any(unix, windows))]
+fn same_stable_file(left: FreshFileIdentityV1, right: FreshFileIdentityV1) -> bool {
+    #[cfg(unix)]
+    {
+        left.same_stable_file(right)
+    }
+    #[cfg(windows)]
+    {
+        left.same_file(right)
+    }
+}
+
+#[cfg(unix)]
+fn create_stage_directory(
+    lease: &StoreLease,
+    name: &OsStr,
+) -> io::Result<(StageDirectory, StageIdentity)> {
+    mkdir_private_at(&lease.parent, name)?;
+    let directory = open_stage_directory(lease, name)?;
+    set_exact_mode(&directory, 0o700, "fresh stage directory")?;
+    let identity = validate_stage_directory(
+        &directory.metadata()?,
+        &lease.parent_path.join(name),
+        lease.parent_identity.device,
+    )?;
+    Ok((directory, identity))
+}
+
+#[cfg(unix)]
+fn validate_file(file: &File, path: &Path) -> io::Result<FreshFileIdentityV1> {
+    validate_private_file(&file.metadata()?, path)
+}
+
+#[cfg(unix)]
+fn validate_main(file: &File, path: &Path) -> io::Result<FreshFileIdentityV1> {
+    validate_private_main(&file.metadata()?, path)
+}
+
+#[cfg(unix)]
+fn unlink_validated_file(
+    parent: &StageDirectory,
+    name: &OsStr,
+    _expected: FreshFileIdentityV1,
+) -> io::Result<()> {
+    unlink_file_at(parent, name)
+}
+
+#[cfg(all(windows, test))]
+fn create_competing_target_for_test(
+    stage: &PreparedFreshStoreStageV1,
+    target_name: &OsStr,
+) -> io::Result<()> {
+    use std::io::Write;
+    let mut file = stage.lease.parent.create_file(target_name)?;
+    file.write_all(b"injected competing target")?;
+    file.sync_all()
+}

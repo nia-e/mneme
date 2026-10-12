@@ -3267,7 +3267,35 @@ fn restrict_persistent_permissions(path: &str) -> Result<()> {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn restrict_persistent_permissions(path: &str) -> Result<()> {
+    use mneme_store_path::windows::Directory;
+
+    // The Windows constructor creates the main file with a protected ACL and
+    // checks the sidecar inheritance policy before SQLite runs. Do not silently
+    // repair an existing ACL after publication: verify that same policy here.
+    let path = std::path::Path::new(path);
+    let parent_path = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::InvalidInput("persistent database path has no filename".into()))?;
+    let verify = || -> std::io::Result<()> {
+        let parent = Directory::open_parent(parent_path)?;
+        let _main = parent.open_database_file(name, false)?;
+        parent.require_private_children()
+    };
+    verify().map_err(|error| {
+        backend_str(format!(
+            "verify persistent db permissions on {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn restrict_persistent_permissions(_path: &str) -> Result<()> {
     Ok(())
 }
