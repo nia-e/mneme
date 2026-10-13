@@ -140,7 +140,7 @@ owner-wide cadence: at least the configured native I/O window between admissions
 (10/15/20 seconds for low/medium/high effort), with the existing aggregate byte
 and read/write time envelopes per batch. Thus even continuously active sessions
 using one effort admit at most `ceil(86400 / native_seconds) + 1` content batches
-per UTC day; at medium effort that is 5,761 batches with a 64 KiB decoded-byte
+per UTC day; at medium effort that is 5,761 batches with a 512 KiB decoded-byte
 envelope each.
 This rate bound does not include the preceding identity exchanges, and is an
 upper bound, not a promise of all-day operation. Idle guide probes back off up to

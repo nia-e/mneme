@@ -154,9 +154,12 @@ class RecordingOverlapTests(unittest.TestCase):
                             for name, a in client.calls if name == "get"))
 
     def test_native_bytes_return_guarded_prefix_and_honest_unread_count(self):
+        # Exercise small resource boundaries independently of production presets.
+        class SmallReadBudget(LibrarianBudget):
+            native_read_bytes = property(lambda self: 32768 if self.effort == "low" else 65536)
         for effort in ("low", "medium"):
             owner, client = self.owner(60, padding=600)
-            budget = LibrarianBudget(effort=effort)
+            budget = SmallReadBudget(effort=effort)
             result = owner.overlap(client, budget=budget)
             self.assertEqual(result["outcome"], "ok")
             counts = result["discovery"]["adapter"]

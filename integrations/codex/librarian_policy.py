@@ -10,12 +10,16 @@ MODEL = "gpt-6.1-sol"
 EFFORTS = ("low", "medium", "high")
 # Shared worker lifetime and maximum idle-maintenance refresh interval.
 IDLE_SECONDS = 300
+# Host-side decoded work, shared across selected owners in one native round.
+# This is a ceiling, not a target or model context allowance. Native transport
+# and bridge decoding both count; effort still governs prompts, time and tokens.
+NATIVE_READ_BYTES = 512 * 1024
 # selector prompt/answer, background latency seconds/read bytes, shared attempts,
 # input/output tokens, ordinary-selector room before optional matcher work.
 _PRESETS = (
-    (8192, 2048, 10.0, 32768, 24, 125000, 10000, 8192, 2048),
-    (12288, 4096, 15.0, 65536, 48, 250000, 20000, 16384, 4096),
-    (24576, 8192, 20.0, 131072, 96, 500000, 40000, 32768, 8192),
+    (8192, 2048, 10.0, NATIVE_READ_BYTES, 24, 125000, 10000, 8192, 2048),
+    (12288, 4096, 15.0, NATIVE_READ_BYTES, 48, 250000, 20000, 16384, 4096),
+    (24576, 8192, 20.0, NATIVE_READ_BYTES, 96, 500000, 40000, 32768, 8192),
 )
 
 @dataclass(frozen=True, slots=True)

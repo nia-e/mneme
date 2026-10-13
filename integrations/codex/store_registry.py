@@ -516,6 +516,14 @@ NATIVE_SELECTION_SCHEMA = "mneme.native-store-selection.v1"
 MAX_NATIVE_SNAPSHOT_BYTES = 512 * 1024
 
 
+class _NativeBridgeResponse(dict):
+    """Keep stdout admission size without adding fields to the native payload."""
+
+    def __init__(self, value, wire_bytes):
+        super().__init__(value)
+        self.wire_bytes = wire_bytes
+
+
 def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIVE_SNAPSHOT_BYTES):
     import subprocess
     import time
@@ -548,7 +556,7 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
         value = json.loads(output, object_pairs_hook=_unique)
         if not isinstance(value, dict):
             raise ValueError("invalid native configuration response")
-        return value
+        return _NativeBridgeResponse(value, len(output))
     finally:
         pipe.close()
         host_process.terminate_tree(process, timeout=.2)
@@ -688,27 +696,52 @@ class NativeService:
         return NativeClient(self.store, timeout=timeout, operation=operation)
 
 
+class NativeReadBudgetExhausted(ValueError):
+    """A proven read allowance stop, with this call's exact known work charge."""
+
+    def __init__(self, message, *, known_work_bytes):
+        super().__init__(message)
+        self.known_work_bytes = known_work_bytes
+
+
 class NativeClient:
-    def __init__(self, store, *, timeout=3, operation="explicit"):
+    def __init__(self, store, *, timeout=3, operation="explicit", max_total_bytes=None):
         self.store, self.timeout, self.operation = store, timeout, operation
         self.work_bytes = 0
         self._charged_work = 0
         self.max_native_bytes = 512 * 1024
+        # Opt-in per-call room for BOTH native receive work and the decoded
+        # bridge envelope. The caller owns the aggregate allowance and any
+        # final identity-read reserve; existing non-reader callers are unchanged.
+        self.max_total_bytes = max_total_bytes
+        self.last_read_allowance_bytes = None
     def connect(self): return self
     def close(self): pass
     def __enter__(self): return self.connect()
     def __exit__(self, *_): self.close()
     def call_tool(self, name, arguments):
+        self.last_read_allowance_bytes = None
+        total_limit = self.max_total_bytes
+        if total_limit is not None:
+            if type(total_limit) is not int or total_limit < 0:
+                raise ValueError("invalid native total byte allowance")
+            if total_limit < 2:
+                raise NativeReadBudgetExhausted("native total byte allowance exhausted", known_work_bytes=0)
         if type(self.max_native_bytes) is not int or not 0 < self.max_native_bytes <= 16 * 1024 * 1024:
             raise ValueError("native remaining byte allowance exhausted")
+        native_limit = self.max_native_bytes
+        bridge_options = {}
+        if total_limit is not None:
+            native_limit = min(native_limit, total_limit // 2)
+            bridge_options["limit"] = min(MAX_NATIVE_SNAPSHOT_BYTES, total_limit - native_limit)
         binding = self.store.native_binding
         if binding.get("binary_pin") is not None and native_binary_identity(binding["native_cli"]) != binding["binary_pin"]:
             raise ValueError("native binary changed; use a fresh session")
         response = native_bridge(binding["native_cli"], ["call", "--config", binding["config_path"],
             "--cwd", binding["cwd"], "--operation", self.operation, "--store", self.store.name,
             "--expected-selection-digest", binding["digest"], "--timeout-ms", str(max(1, int(self.timeout * 1000))),
-            "--max-native-bytes", str(self.max_native_bytes), "--canonical-only"],
-            {"tool": name, "arguments": arguments}, timeout=self.timeout)
+            "--max-native-bytes", str(native_limit), "--canonical-only"],
+            {"tool": name, "arguments": arguments}, timeout=self.timeout, **bridge_options)
         if (response.get("schema") != "mneme.config-call.v1" or response.get("selection_digest") != binding["digest"]
                 or response.get("store") != self.store.name or type(response.get("ok")) is not bool):
             raise ValueError("native call does not match frozen owner selection")
@@ -716,12 +749,21 @@ class NativeClient:
         native_bytes = work.get("decoded_bytes") if isinstance(work, dict) else None
         if type(native_bytes) is not int or native_bytes < 0:
             raise ValueError("native call accounting is unknown")
-        self.work_bytes += native_bytes + len(json.dumps(response, ensure_ascii=False).encode())
+        bridge_bytes = len(json.dumps(response, ensure_ascii=False).encode())
+        call_bytes = native_bytes + bridge_bytes
+        self.work_bytes += call_bytes
         if not response["ok"]:
             from mcp_client import McpToolError, McpTransportError, McpProtocolError
             error = response.get("error")
             if not isinstance(error, dict) or not isinstance(error.get("message"), str):
                 raise McpProtocolError("native config error malformed")
+            if total_limit is not None and error.get("kind") == "native" and native_bytes > native_limit:
+                # ReceiveBudget charges the refused chunk before returning and
+                # before decoding its contents. Strict overshoot proves that
+                # refusal; equality or error text cannot distinguish an owner,
+                # identity or protocol error. This is NOT a hard wire bound:
+                # the refused chunk may consume the caller's final-read reserve.
+                raise NativeReadBudgetExhausted("native read byte allowance exhausted", known_work_bytes=call_bytes)
             cls = McpToolError if error.get("kind") == "tool" else McpTransportError if error.get("kind") == "transport" else McpProtocolError
             exception = cls(error["message"][:512])
             exception.details = error
@@ -735,6 +777,13 @@ class NativeClient:
         # retain the qualified cache reference unchanged.
         if isinstance(result, dict) and "_mneme_source" in result:
             raise ValueError("cached hook result needs exact source-qualified delivery; omitted")
+        if total_limit is not None and call_bytes > total_limit:
+            raise NativeReadBudgetExhausted("native total byte allowance exhausted", known_work_bytes=call_bytes)
+        # Repeating this split admission needs both halves to fit, not merely
+        # the last call's sum. This is prospective room for planning a final
+        # read, NOT charged work or a guarantee that its response stays this size.
+        bridge_wire_bytes = response.wire_bytes if isinstance(response, _NativeBridgeResponse) else bridge_bytes
+        self.last_read_allowance_bytes = 2 * max(native_bytes, bridge_bytes, bridge_wire_bytes)
         return result
     def owner_capabilities(self):
         return self.call_tool("owner_capabilities", {})

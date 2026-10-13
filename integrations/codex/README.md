@@ -377,6 +377,21 @@ per session; low halves and high doubles these thresholds. The final admitted
 call can overshoot. Reader, routing and recording share accounting; missing usage
 halts further model admission. There is no automatic provider retry or escalation.
 
+Each native read round has a **512 KiB decoded-work ceiling**, shared across its
+selected owners at every effort. It counts both native transport and bridge
+decoding; it is not the model's context window or a target to fill. Prompt sizes,
+native deadlines (10/15/20 seconds) and model token/attempt allowances still follow
+the effort preset. The shared ceiling also applies to recorder and maintenance
+read batches; their cadence, model allowance and permissions are unchanged.
+
+The reader stops fetching when its retained context packet first fills; it does
+not spend the remaining allowance hunting for smaller cards or additional owners.
+A known byte-budget refusal can still yield the verified prefix to the selector,
+but only after the final owner/configuration check succeeds. Unknown accounting,
+identity changes and failed final checks remain fail-closed. Coverage diagnostics
+distinguish omitted content from owners that were not read. This bounds collection,
+not the selector's reasoning: it still gets one bounded model call afterward.
+
 ### Automatic recording (separate opt-in)
 
 Add `--recording-mode automatic` with async recall. After completed root-session

@@ -46,6 +46,10 @@ class _IdentityMismatch(ValueError):
     pass
 
 
+class _ReadBudgetExhausted(TimeoutError):
+    """Local read admission ran out of known bytes, not an owner failure."""
+
+
 def _service_client(config, *, token, timeout):
     # Keep the injectable legacy client seam; production always dispatches from
     # the parsed service mode, never an inferred URL scheme or remote path.
@@ -57,11 +61,22 @@ def _service_client(config, *, token, timeout):
 
 
 
-def _failed_native_charge(client, before):
+def _failed_native_charge(client, before, error=None):
     """Exact failed bridge work, or None when no measured envelope survived."""
     after = getattr(client, "work_bytes", None)
     if type(before) is int and type(after) is int and after > before:
+        # A caller may keep a verified prefix and then perform its final guard.
+        # Drain the measurement cursor now so that successful guard does not
+        # charge this failed envelope a second time.
+        if hasattr(client, "measured_size"):
+            measured = client.measured_size(None)
+            if type(measured) is not int or measured != after - before:
+                return None
         return after - before
+    known = getattr(error, "known_work_bytes", None)
+    if (type(before) is int and type(after) is int and after == before
+            and type(known) is int and known == 0):
+        return 0
     return None
 
 
@@ -571,6 +586,8 @@ def _cleanup_deadline(client, deadline):
 
 def _collect(service_config_path, prompt, project_root, timeout, observe=False, *, reader=False,
              routing_hints=None, budget=None, read_plan=None, store_target=None, shared_work=None):
+    from store_registry import NativeReadBudgetExhausted
+
     budget = LibrarianBudget() if budget is None else budget
     if reader:
         if read_plan is None:
@@ -582,6 +599,7 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
     deadline = (shared_work["deadline"] if shared_work is not None else
                 time.monotonic() + timeout if reader else None)
     decoded_bytes = shared_work["decoded_bytes"] if shared_work is not None else 0
+    accounting_unknown = bool(shared_work is not None and shared_work.get("accounting_unknown"))
     if reader and (decoded_bytes >= budget.native_read_bytes
                    or shared_work is not None and shared_work.get("accounting_unknown")):
         raise TimeoutError("prior native read allowance is exhausted or unknown")
@@ -607,32 +625,42 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
     # Native transport pins its ceiling on connect: background reads must start
     # with the whole remaining allowance, not a foreground per-RPC ceiling.
     with _service_client(config, token=token, timeout=startup_seconds) as client, _cleanup_deadline(client, deadline):
-        def read(name, args):
-            nonlocal decoded_bytes
-            if reader and (decoded_bytes >= budget.native_read_bytes
-                           or shared_work is not None and shared_work.get("accounting_unknown")):
-                raise TimeoutError("reader decoded-read allowance exhausted or unknown")
+        final_read_reserve = 0
+        collection_deadline = deadline
+
+        def read(name, args, *, final=False, invoke=None):
+            nonlocal decoded_bytes, accounting_unknown
+            allowance = budget.native_read_bytes - decoded_bytes - (0 if final else final_read_reserve)
+            if reader and accounting_unknown:
+                raise ValueError("reader decoded-read accounting is unknown")
+            if reader and allowance <= 0:
+                raise _ReadBudgetExhausted("reader decoded-read allowance exhausted")
             if deadline is not None:
-                remaining = deadline - time.monotonic()
+                remaining = (deadline if final else collection_deadline) - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("reader deadline exceeded")
                 client.timeout = remaining
             before_work = getattr(client, "work_bytes", None)
             try:
                 if hasattr(client, "max_native_bytes"):
-                    client.max_native_bytes = budget.native_read_bytes - decoded_bytes
-                value = client.call_tool(name, args)
-            except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
-                if reader and shared_work is not None:
-                    failed_charge = _failed_native_charge(client, before_work)
+                    client.max_native_bytes = allowance
+                if reader and hasattr(client, "max_total_bytes"):
+                    client.max_total_bytes = allowance
+                value = client.call_tool(name, args) if invoke is None else invoke()
+            except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError) as error:
+                if reader:
+                    failed_charge = _failed_native_charge(client, before_work, error)
                     if failed_charge is None:
                         # Unknown partial reads cannot buy another owner's fresh
                         # allowance. Measured native refusal frames can: charge
                         # their exact cost, not a fabricated exhaustion amount.
-                        shared_work["accounting_unknown"] = True
+                        accounting_unknown = True
+                        if shared_work is not None:
+                            shared_work["accounting_unknown"] = True
                     else:
                         decoded_bytes += failed_charge
-                        shared_work["decoded_bytes"] = decoded_bytes
+                        if shared_work is not None:
+                            shared_work["decoded_bytes"] = decoded_bytes
                 raise
             if reader:
                 decoded_bytes += client.measured_size(value) if hasattr(client, "measured_size") else _bytes(value)
@@ -642,7 +670,22 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
                 raise TimeoutError("reader deadline exceeded")
             return value
 
+        before_catalog = decoded_bytes
         catalog = read("databases", {})
+        if reader and store_target is not None:
+            # Prospective room for the required final owner/config sample. Use
+            # its measured full cost, including native and bridge framing, not
+            # just the visible row. A changed/larger final sample is still
+            # charged exactly and may fail closed; this is not a size promise.
+            final_read_reserve = decoded_bytes - before_catalog
+            admission_room = getattr(client, "last_read_allowance_bytes", None)
+            if admission_room is not None:
+                if type(admission_room) is not int or admission_room < final_read_reserve:
+                    raise ValueError("invalid final reader guard allowance")
+                # A client splitting room between transport and bridge needs
+                # enough for each side, not merely their combined prior cost.
+                final_read_reserve = admission_room
+            collection_deadline = deadline - min(.2, timeout / 10)
         if not hasattr(config, "native_client") and not _expected_catalog(catalog, config.database_path, config.database_name):
             raise ValueError("unexpected project catalog")
         # Older catalogs can still supply recall, but only a canonical native
@@ -693,15 +736,23 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
                          and "conditional_binding" not in row} if have_observation else set()
         for index, candidate in enumerate(candidates):
             identifier = candidate["id"]
-            if reader and (decoded_bytes >= budget.native_read_bytes or time.monotonic() >= deadline):
+            if reader and (decoded_bytes + final_read_reserve >= budget.native_read_bytes
+                           or time.monotonic() >= collection_deadline):
                 adapter["work_budget_unread"] += len(candidates) - index
                 adapter["graph_readback_omitted"] += sum(c["id"] in graph_ids for c in candidates[index:])
                 break
             if reader:
                 adapter["readbacks_attempted"] += 1
-            node = read("get", {"db": config.database_name, "id": identifier,
-                                "body": False, "edges": False,
-                                **({"expected_db_id": db_id} if db_id is not None else {})})
+            try:
+                node = read("get", {"db": config.database_name, "id": identifier,
+                                    "body": False, "edges": False,
+                                    **({"expected_db_id": db_id} if db_id is not None else {})})
+            except (_ReadBudgetExhausted, NativeReadBudgetExhausted):
+                if not reader:
+                    raise
+                adapter["work_budget_unread"] += len(candidates) - index
+                adapter["graph_readback_omitted"] += sum(c["id"] in graph_ids for c in candidates[index:])
+                break
             if preference and not _preference_node(node):
                 adapter["readback_skipped"] += 1
                 continue
@@ -754,8 +805,12 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
                 if _bytes(proposed_result) <= MAX_READER_BYTES - 16:
                     cards = proposed
                 else:
-                    adapter["byte_budget_omitted"] += 1
-                    adapter["graph_byte_omitted"] += identifier in graph_ids
+                    # The content envelope is a ceiling, not a target for more
+                    # native work. Keep this verified prefix rather than fetch
+                    # the remaining window hoping to find smaller later cards.
+                    adapter["byte_budget_omitted"] += len(candidates) - index
+                    adapter["graph_byte_omitted"] += sum(c["id"] in graph_ids for c in candidates[index:])
+                    break
                 continue
             # Episode identity/time fields are never truncated. If their extra
             # bytes squeeze the second card, shorten its displayed summary,
@@ -808,22 +863,17 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
                     for endpoint in control["concern_endpoints"]:
                         after = None
                         while True:
-                            remaining = deadline - time.monotonic()
-                            if remaining <= .05 or decoded_bytes >= budget.native_read_bytes:
+                            remaining = collection_deadline - time.monotonic()
+                            if remaining <= .05 or decoded_bytes + final_read_reserve >= budget.native_read_bytes:
                                 complete = False
                                 break
-                            client.timeout = min(remaining / 2, .5)
-                            try:
-                                response = client.concern_checked(config.database_name, {
-                                    "action": "list", "endpoint": endpoint,
-                                    **({"after": after} if after is not None else {})}, expected_db_id=db_id)
-                            except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
-                                if shared_work is not None:
-                                    shared_work["accounting_unknown"] = True
-                                raise
-                            decoded_bytes += _bytes(response)
-                            if shared_work is not None:
-                                shared_work["decoded_bytes"] = decoded_bytes
+                            arguments = {"action": "list", "endpoint": endpoint,
+                                         **({"after": after} if after is not None else {})}
+                            def lookup():
+                                client.timeout = min(client.timeout, remaining / 2, .5)
+                                return client.concern_checked(config.database_name, arguments,
+                                                              expected_db_id=db_id)
+                            response = read("concern", arguments, invoke=lookup)
                             if response.get("db") != config.database_name or response.get("db_id") != db_id or response.get("action") != "list":
                                 raise ValueError("concern owner mismatch")
                             page = response["page"]
@@ -857,14 +907,19 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
                 except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
                     pass  # Optional lookup cannot erase successful ordinary readback.
             result.update(control)
-            work = {"decoded_bytes": decoded_bytes, "read_allowance_bytes": budget.native_read_bytes,
-                    "read_allowance_exhausted": decoded_bytes >= budget.native_read_bytes}
-            if _bytes({**result, "native_work": work}) <= MAX_READER_RESULT_BYTES - 16:
-                result["native_work"] = work
         if store_target is not None:
-            target_policy.catalog_identity(read("databases", {}), db_id)
+            target_policy.catalog_identity(read("databases", {}, final=True), db_id)
             if _config_snapshot(service_config_path) != target_snapshot:
                 raise _IdentityMismatch("service configuration changed")
+            if reader and decoded_bytes > budget.native_read_bytes:
+                raise _ReadBudgetExhausted("final reader guard exceeded decoded-read allowance")
+        if reader:
+            work = {"decoded_bytes": None if accounting_unknown else decoded_bytes,
+                    "read_allowance_bytes": budget.native_read_bytes,
+                    "read_allowance_exhausted": accounting_unknown or decoded_bytes >= budget.native_read_bytes,
+                    **({"known_decoded_bytes": decoded_bytes, "accounting_unknown": True} if accounting_unknown else {})}
+            if _bytes({**result, "native_work": work}) <= MAX_READER_RESULT_BYTES - 16:
+                result["native_work"] = work
         return result
 
 

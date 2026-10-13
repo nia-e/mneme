@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import hooks
+import hook_recall
 import reader_contract
 import reader_worker
 import store_registry
@@ -16,6 +17,7 @@ from turn_observer import validate_delivery_packet, DELIVERY_SCHEMA
 
 NODE = "01K123456789ABCDEFGHJKMNPQ"
 NODE2 = "01K123456789ABCDEFGHJKMNPR"
+NODE3 = "01K123456789ABCDEFGHJKMNPS"
 OWNERS = ["01ARZ3NDEKTSV4RRFFQ69G5FA" + suffix for suffix in "VWX"]
 
 
@@ -131,6 +133,97 @@ class NamedReaderTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(result["read_coverage"]["budget_omitted"], 2)
         self.assertEqual(len(result["cards"]), 1)
+
+    def test_content_overflow_stops_later_owners_and_smaller_cards(self):
+        first = {**self.card(), "summary": "a" * 200}
+        overflow = {**self.card(NODE2), "summary": "b" * 800}
+        smaller = self.card(NODE3)
+        def named(card):
+            return {**card, "db_id": OWNERS[0], "scope": "named",
+                    "store_name": self.entries[0]["name"], "store_purpose": self.entries[0]["purpose"]}
+        # The final card would fit; finishing promptly deliberately wins over
+        # looking for smaller cards after an actual content overflow.
+        limit = hook_recall._bytes({"cards": [named(first), named(smaller)]}) + 16
+        self.assertGreater(hook_recall._bytes({"cards": [named(first), named(overflow)]}), limit)
+        self.responses[0]["cards"] = [first, deepcopy(first), overflow, smaller, deepcopy(smaller)]
+        with patch("hook_recall.MAX_READER_BYTES", limit):
+            result, native = self.execute()
+        self.assertEqual(native.call_count, 1)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual([card["id"] for card in result["cards"]], [NODE])
+        self.assertEqual(result["selection"]["content_omitted_count"], 2)
+        self.assertEqual(result["selection"]["postpack_count"], 1)
+        self.assertEqual(result["read_coverage"], {"selected": 3, "attempted": 1, "unavailable": 0,
+                                                  "budget_omitted": 2, "complete": False})
+        self.assertEqual([owner["outcome"] for owner in result["selection"]["owners"]],
+                         ["ok", "budget", "budget"])
+        self.assertEqual(result["selection"]["native_work"]["decoded_bytes"], 200)
+        self.assertFalse(result["selection"]["native_work"]["read_allowance_exhausted"])
+        diagnostic = reader_worker._selection_diagnostic(result, {}, True)
+        self.assertNotIn("omitted", diagnostic)
+        self.assertEqual(diagnostic["content_omitted_count"], 2)
+
+    def test_seen_only_owner_does_not_fill_content_or_starve_fresh_owners(self):
+        seen = {**self.card(), "summary": "already delivered " * 100}
+        self.responses[0]["cards"] = [seen, deepcopy(seen)]
+        with patch("hook_recall.MAX_READER_BYTES", 1000):
+            result, native = self.execute(emitted={(OWNERS[0], NODE, "a" * 64)})
+        self.assertEqual(native.call_count, 3)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual([card["db_id"] for card in result["cards"]], OWNERS[1:])
+        self.assertEqual(result["selection"]["seen_count"], 1)
+        self.assertEqual(result["selection"]["postpack_count"], 2)
+        self.assertNotIn("content_omitted_count", result["selection"])
+        self.assertTrue(result["read_coverage"]["complete"])
+
+    def test_no_card_outcomes_distinguish_seen_invalid_empty_and_omitted(self):
+        cases = (("seen", "empty"), ("invalid", "unavailable"),
+                 ("empty", "empty"), ("overflow", "omitted"))
+        for case, outcome in cases:
+            with self.subTest(case=case):
+                for response in self.responses:
+                    response["cards"] = ([] if case == "empty" else
+                                         [{**self.card(), "status": "deleted"}, None] if case == "invalid"
+                                         else [self.card()])
+                emitted = {(owner, NODE, "a" * 64) for owner in OWNERS} if case == "seen" else set()
+                with patch("hook_recall.MAX_READER_BYTES", 1 if case == "overflow" else 8192):
+                    result, native = self.execute(emitted=emitted)
+                self.assertEqual(result["outcome"], outcome)
+                self.assertEqual(result["cards"], [])
+                self.assertFalse(result["provider_attempt"])
+                self.assertEqual(native.call_count, 1 if case == "overflow" else 3)
+                self.assertEqual(result["selection"]["seen_count"], 3 if case == "seen" else 0)
+                self.assertEqual(result["selection"].get("invalid_count", 0), 6 if case == "invalid" else 0)
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_or_mismatched_owner_never_contributes_content(self):
+        for wrong_owner in (None, "not-a-db-id", OWNERS[0]):
+            with self.subTest(owner=wrong_owner):
+                self.responses[1]["db_id"] = wrong_owner
+                self.responses[1]["cards"] = [{**self.card(), "summary": "x" * 10000}]
+                result, native = self.execute()
+                self.assertEqual(native.call_count, 3)
+                self.assertEqual([card["db_id"] for card in result["cards"]], [OWNERS[0], OWNERS[2]])
+                self.assertEqual(result["read_coverage"]["unavailable"], 1)
+                self.assertEqual(result["selection"]["owners"][1]["outcome"], "unavailable")
+                self.assertNotIn("content_omitted_count", result["selection"])
+
+    def test_duplicate_owner_discovered_by_unpinned_project_is_not_packed_twice(self):
+        project = self.entries[0]
+        binding = store_registry.project_store(project["service_config"], self.cwd,
+            database_path=project["database_path"], name=project["name"], db_alias="user",
+            purpose=project["purpose"], read={"enabled": True})
+        self.path.write_text(json.dumps({"schema": store_registry.SCHEMA, "stores": self.entries[1:]}))
+        selected = store_registry.resolve(self.cwd, registry_path=self.path, project_binding=binding)
+        self.config["frozen_selection"] = selected.to_dict()
+        self.responses[0]["db_id"] = OWNERS[1]
+        self.responses[1]["cards"] = [{**self.card(), "summary": "x" * 10000}]
+        result, native = self.execute()
+        self.assertEqual(native.call_count, 3)
+        self.assertEqual([card["db_id"] for card in result["cards"]], OWNERS[1:])
+        self.assertEqual(result["read_coverage"]["unavailable"], 1)
+        self.assertEqual(result["selection"]["owners"][1]["outcome"], "duplicate_owner")
+        self.assertNotIn("content_omitted_count", result["selection"])
 
     def test_owner_cache_does_not_collapse_alias_or_ownerless_history(self):
         result, _ = self.execute(emitted={(OWNERS[0], NODE, "a" * 64), (NODE, "a" * 64)})
@@ -276,6 +369,7 @@ class NamedReaderTests(unittest.TestCase):
         self.assertEqual([row["endpoint_ids"] for row in projected["concern_rows"]],
                          [[owner + ":" + NODE, owner + ":" + NODE2] for owner in OWNERS])
         self.assertEqual(len(result["cards"]), 6)
+        self.assertEqual(result["selection"]["seen_count"], 0)
 
     def worker_delivery(self):
         from reader_test_support import PublicationHandoff

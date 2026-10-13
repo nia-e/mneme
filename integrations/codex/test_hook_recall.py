@@ -23,6 +23,36 @@ def reader_content_bytes(result):
     return hook_recall._bytes({key: value for key, value in result.items() if key not in {"discovery", "concern_endpoints", "concern_rows", "concern_lookup", "native_work"}})
 
 
+def native_byte_budget(native_bytes, *, effort="medium"):
+    """Exercise a small resource envelope without changing the shipped preset."""
+    from librarian_policy import LibrarianBudget
+    class Budget(LibrarianBudget):
+        native_read_bytes = property(lambda self: native_bytes)
+    return Budget(effort=effort)
+
+
+class MeasuredReaderClient(FakeClient):
+    """Full bridge accounting with deliberately non-payload-sized wire costs."""
+    def __init__(self, catalog, context, nodes):
+        super().__init__(catalog, context, nodes)
+        self.work_bytes = self.charged_work = 0
+        self.max_native_bytes = self.max_total_bytes = None
+        self.costs = {"databases": 1200, "recall_context": 1000, "get": 1300}
+        self.allowances = []
+        self.after_read = lambda name, args, value: value
+
+    def call_tool(self, name, args):
+        value = super().call_tool(name, args)
+        self.allowances.append((name, self.max_native_bytes, self.max_total_bytes))
+        self.work_bytes += self.costs.get((name, args.get("id")), self.costs[name])
+        return self.after_read(name, args, value)
+
+    def measured_size(self, value):
+        delta = self.work_bytes - self.charged_work
+        self.charged_work = self.work_bytes
+        return delta
+
+
 class HookRecallTests(unittest.TestCase, RecallOwnerFixture):
     def setUp(self):
         RecallOwnerFixture.__init__(self, self)
@@ -576,6 +606,7 @@ class HookRecallTests(unittest.TestCase, RecallOwnerFixture):
         self.reader_context(ids)
         self.nodes = {identifier: self._node(identifier, "active", "é" * 350) for identifier in ids}
         self.nodes[ids[0]]["status"] = "archived"
+        self.nodes[ids[-1]]["summary"] = "x"  # Do not keep fetching to fill spare bytes.
         self.context["omitted"]["primary"] = {"bounded_window_budget": 3, "further_tail_unknown": True}
         client = FakeClient(self.catalog, self.context, self.nodes)
         with patch("hook_recall.McpClient", return_value=client), patch("hook_recall.MAX_READER_BYTES", 2400):
@@ -587,13 +618,17 @@ class HookRecallTests(unittest.TestCase, RecallOwnerFixture):
         self.assertEqual(discovery["native"]["omitted"]["primary"], self.context["omitted"]["primary"])
         adapter = discovery["adapter"]
         self.assertEqual(adapter["observed_unique_window"], 10)
-        self.assertEqual(adapter["readbacks_attempted"], 10)
+        gets = [args["id"] for name, args in client.calls if name == "get"]
+        self.assertEqual(adapter["readbacks_attempted"], len(gets))
+        self.assertLess(len(gets), 10)
+        self.assertEqual(gets, ids[:len(gets)])
+        self.assertNotIn(ids[-1], gets)
         self.assertEqual(adapter["readback_skipped"], 1)
         self.assertGreater(adapter["byte_budget_omitted"], 0)
         self.assertEqual(adapter["returned"], len(result["cards"]))
         self.assertEqual(sum(adapter[k] for k in ("work_budget_unread", "readback_skipped", "byte_budget_omitted", "returned")), 10)
         self.assertEqual([name for name, _ in client.calls].count("recall_context"), 1)
-        self.assertEqual([name for name, _ in client.calls].count("get"), 10)
+        self.assertEqual(len(gets), adapter["returned"] + adapter["readback_skipped"] + 1)
         self.assertLessEqual(reader_content_bytes(result), 2400)
         self.assertNotIn("secret", json.dumps(discovery))
         self.assertNotIn("corpus", json.dumps(discovery))
@@ -619,13 +654,12 @@ class HookRecallTests(unittest.TestCase, RecallOwnerFixture):
         self.assertEqual(len(ctx["ids"]),len(result["cards"]))
 
     def test_one_response_read_overshoot_stops_later_work_not_kept_card(self):
-        from librarian_policy import LibrarianBudget
         self.reader_context([ID1,ID2,ID3])
         self.nodes[ID1] = self._node(ID1,"active","x"*35000)
         client = FakeClient(self.catalog,self.context,self.nodes)
         with patch("hook_recall.McpClient",return_value=client):
             result = hook_recall.collect_reader(self.config,"Investigate warning",self.root,
-                                               budget=LibrarianBudget(effort="low"))
+                                               budget=native_byte_budget(32768, effort="low"))
         self.assertEqual([c["id"] for c in result["cards"]],[ID1])
         self.assertEqual(sum(name=="get" for name,_ in client.calls),1)
         self.assertGreater(result["native_work"]["decoded_bytes"],32768)
@@ -633,6 +667,124 @@ class HookRecallTests(unittest.TestCase, RecallOwnerFixture):
         self.assertEqual(result["discovery"]["adapter"]["work_budget_unread"],2)
         self.assertEqual(result["discovery"]["adapter"]["readback_skipped"],0)
         self.assertLessEqual(hook_recall._bytes(result),10240)
+
+    def measured_reader_target(self):
+        from target_policy import TargetPolicy
+        self.reader_context([ID1, ID2, ID3])
+        self._connect_config(database_name="user", database_path="/owner/workshop.db")
+        self.catalog = [{"db": "user", "name": "user", "state": "open",
+                         "configured_path": "/owner/workshop.db", "db_id": ID7}]
+        policy = TargetPolicy("workshop", "user", "/owner/workshop.db", ID7,
+                              str(self.root), str(self.config))
+        return policy, MeasuredReaderClient(self.catalog, self.context, self.nodes)
+
+    def collect_measured_reader(self, policy, client, limit, *, prior=100):
+        shared = {"deadline": time.monotonic() + 10, "decoded_bytes": prior}
+        with patch("hook_recall.McpClient", return_value=client):
+            result = hook_recall.collect_reader(self.config, "Investigate warning", self.root,
+                budget=native_byte_budget(limit), store_target=policy, shared_work=shared)
+        return result, shared
+
+    def test_reader_reserves_full_measured_final_guard_and_skips_optional_work(self):
+        policy, client = self.measured_reader_target()
+        self.nodes[ID1]["concern_endpoint"] = {"id": ID1, "meaning": "a" * 64}
+        def no_room(*args, **kwargs):
+            self.fail("optional concern lookup consumed reserved final-guard room")
+        client.concern_checked = no_room
+        result, shared = self.collect_measured_reader(policy, client, 4800)
+        self.assertEqual(result["outcome"], "ok")
+        self.assertEqual([card["id"] for card in result["cards"]], [ID1])
+        self.assertEqual([name for name, _ in client.calls], ["databases", "recall_context", "get", "databases"])
+        self.assertEqual(client.allowances, [("databases", 4700, 4700), ("recall_context", 2300, 2300),
+                                             ("get", 1300, 1300), ("databases", 1200, 1200)])
+        self.assertEqual(result["discovery"]["adapter"]["work_budget_unread"], 2)
+        self.assertEqual(shared["decoded_bytes"], 4800)
+        self.assertEqual(result["native_work"]["decoded_bytes"], 4800)
+        self.assertTrue(result["native_work"]["read_allowance_exhausted"])
+
+    def test_known_reader_byte_refusal_keeps_prefix_and_charges_failure_once(self):
+        from store_registry import NativeReadBudgetExhausted
+        for failed_bytes in (0, 50):
+            with self.subTest(failed_bytes=failed_bytes):
+                policy, client = self.measured_reader_target()
+                client.costs[("get", ID2)] = failed_bytes
+                def refuse(name, args, value):
+                    if name == "get" and args["id"] == ID2:
+                        raise NativeReadBudgetExhausted("fixture byte bound", known_work_bytes=failed_bytes)
+                    return value
+                client.after_read = refuse
+                result, shared = self.collect_measured_reader(policy, client, 8000)
+                self.assertEqual(result["outcome"], "ok")
+                self.assertEqual([card["id"] for card in result["cards"]], [ID1])
+                self.assertEqual([name for name, _ in client.calls],
+                                 ["databases", "recall_context", "get", "get", "databases"])
+                self.assertEqual(result["discovery"]["adapter"]["work_budget_unread"], 2)
+                self.assertEqual(shared["decoded_bytes"], 4800 + failed_bytes)
+                self.assertEqual(shared["decoded_bytes"], 100 + client.work_bytes)
+                self.assertEqual(client.charged_work, client.work_bytes)
+                self.assertEqual(result["native_work"]["decoded_bytes"], shared["decoded_bytes"])
+
+    def test_reader_reserve_uses_split_admission_room_without_charging_it(self):
+        policy, client = self.measured_reader_target()
+        # Prior catalog cost is 1200; an asymmetric native/bridge split needs
+        # 1600 admitted room to repeat it. That reserve is not consumed work.
+        client.last_read_allowance_bytes = 1600
+        result, shared = self.collect_measured_reader(policy, client, 5200)
+        self.assertEqual(result["outcome"], "ok")
+        self.assertEqual([card["id"] for card in result["cards"]], [ID1])
+        self.assertEqual(client.allowances[-1], ("databases", 1600, 1600))
+        self.assertEqual(shared["decoded_bytes"], 4800)
+        self.assertEqual(shared["decoded_bytes"], 100 + client.work_bytes)
+        self.assertFalse(result["native_work"]["read_allowance_exhausted"])
+
+    def test_reader_does_not_salvage_unknown_work_or_ordinary_read_errors(self):
+        from store_registry import NativeReadBudgetExhausted
+        for failure in (NativeReadBudgetExhausted("unknown byte refusal", known_work_bytes=None),
+                        TimeoutError("owner timeout"), hook_recall.McpError("owner changed")):
+            with self.subTest(failure=type(failure).__name__):
+                policy, client = self.measured_reader_target()
+                client.costs[("get", ID2)] = 0 if isinstance(failure, NativeReadBudgetExhausted) else 50
+                def refuse(name, args, value):
+                    if name == "get" and args["id"] == ID2:
+                        raise failure
+                    return value
+                client.after_read = refuse
+                result, shared = self.collect_measured_reader(policy, client, 8000)
+                self.assertIn(result["outcome"], ("unavailable", "timeout"))
+                self.assertEqual(result["cards"], [])
+                self.assertEqual(sum(name == "databases" for name, _ in client.calls), 1)
+                if isinstance(failure, NativeReadBudgetExhausted):
+                    self.assertTrue(shared["accounting_unknown"])
+                    self.assertIsNone(result["native_work"]["decoded_bytes"])
+                else:
+                    self.assertEqual(shared["decoded_bytes"], 100 + client.work_bytes)
+
+    def test_partial_reader_still_requires_final_identity_configuration_and_budget(self):
+        original_config = self.config.read_bytes()
+        for mode in ("identity", "configuration", "refused", "larger"):
+            with self.subTest(mode=mode):
+                self.config.write_bytes(original_config)
+                policy, client = self.measured_reader_target()
+                def changed(name, args, value):
+                    if name == "databases" and len(client.calls) > 1:
+                        if mode == "identity":
+                            return [{**value[0], "db_id": ID6}]
+                        if mode == "configuration":
+                            self.config.write_bytes(original_config + b" ")
+                        if mode == "refused":
+                            raise hook_recall.McpError("final identity refused")
+                        if mode == "larger":
+                            client.work_bytes += 100
+                    return value
+                client.after_read = changed
+                result, shared = self.collect_measured_reader(policy, client, 4800)
+                self.assertIn(result["outcome"], ("unavailable", "timeout"))
+                self.assertEqual(result["cards"], [])
+                self.assertEqual(client.calls[-1], ("databases", {}))
+                self.assertEqual(shared["decoded_bytes"], 100 + client.work_bytes)
+                if mode == "larger":
+                    self.assertGreater(shared["decoded_bytes"], 4800)
+        self.config.write_bytes(original_config)
 
     def test_absent_or_malformed_native_coverage_does_not_drop_valid_cards(self):
         self.reader_context([ID1, ID2])
@@ -1128,6 +1280,10 @@ class OverlapTests(unittest.TestCase, OverlapFixture):
     def test_effort_window_and_read_work_preserve_final_guard(self):
         for effort in ('low', 'medium', 'high'):
             budget = self.routing_fixture(36, effort=effort)
+            # Native bytes are no longer selected by model effort. Keep this
+            # small-allowance regression independent of the shipped ceiling.
+            if effort == 'low':
+                budget = native_byte_budget(32768, effort=effort)
             client = FakeClient(self.catalog, self.context, self.nodes)
             result = self.routing_read(client, budget)
             diagnostic = result['routing_discovery']

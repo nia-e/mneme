@@ -103,6 +103,7 @@ def execute(config, cue, runtime, reserve, emitted, *, start_owner=None):
     shared = {"deadline": time.monotonic() + budget.native_seconds, "decoded_bytes": 0}
     cards, owners, paths, routing, conditional, concern_rows, case_keys = [], set(), {}, {}, {}, [], set()
     owner_diagnostics = []
+    candidate_keys, seen_count, content_full = set(), 0, False
     readable = list(getattr(selection, "recallable", selection.readable))
     if start_owner is not None:
         for index, store in enumerate(readable):
@@ -112,7 +113,8 @@ def execute(config, cue, runtime, reserve, emitted, *, start_owner=None):
     coverage["selected"] = len(readable)
     for store in readable:
         remaining = shared["deadline"] - time.monotonic()
-        if remaining <= 0 or shared.get("accounting_unknown") or shared["decoded_bytes"] >= budget.native_read_bytes:
+        if (content_full or remaining <= 0 or shared.get("accounting_unknown")
+                or shared["decoded_bytes"] >= budget.native_read_bytes):
             coverage["budget_omitted"] += 1
             owner_diagnostics.append({"name": store.name, "db_id": store.db_id, "outcome": "budget"})
             continue
@@ -151,18 +153,31 @@ def execute(config, cue, runtime, reserve, emitted, *, start_owner=None):
             except (ValueError, TypeError, KeyError):
                 pass
         for raw in native.get("cards", []):
+            if not isinstance(raw, dict):
+                diagnostic["invalid_count"] = diagnostic.get("invalid_count", 0) + 1
+                continue
             card = {**raw, "db_id": owner, "scope": "named", "store_name": store.name,
                     "store_purpose": store.purpose}
             if not _valid_card(card):
                 diagnostic["invalid_count"] = diagnostic.get("invalid_count", 0) + 1
                 continue
-            # Per-owner discovery, identities and purpose must share one retained
-            # content envelope. Native input bytes are independently shared above.
-            if _bytes({"cards": cards + [card]}) > MAX_READER_BYTES - 16:
+            key = _key(card)
+            if key in candidate_keys:
+                continue
+            candidate_keys.add(key)
+            # Filter after this owner's verified concern endpoints are known, but
+            # before packing: old deliveries must not crowd out fresh owners.
+            if _was_emitted(card, emitted) and key not in case_keys:
+                seen_count += 1
+                continue
+            # Identities and purpose share one retained content envelope. Native
+            # input bytes are independently shared above. Stop on the first real
+            # overflow rather than searching later owners/cards for smaller fits.
+            if content_full or _bytes({"cards": cards + [card]}) > MAX_READER_BYTES - 16:
+                content_full = True
                 diagnostic["content_omitted_count"] = diagnostic.get("content_omitted_count", 0) + 1
                 continue
-            if _key(card) not in {_key(c) for c in cards}:
-                cards.append(card)
+            cards.append(card)
     coverage["complete"] = coverage["unavailable"] == 0 and coverage["budget_omitted"] == 0
     diagnostic["owners"] = owner_diagnostics
     unknown = shared.get("accounting_unknown", False)
@@ -173,15 +188,13 @@ def execute(config, cue, runtime, reserve, emitted, *, start_owner=None):
     diagnostic["postpack_count"] = len(cards)
     diagnostic["requested_effort"] = budget.effort
     diagnostic["stage"] = "filter"
-    valid = cards
-    cards = [card for card in valid if not _was_emitted(card, emitted) or _key(card) in case_keys]
-    diagnostic["seen_count"] = len(valid) - len(cards)
+    diagnostic["seen_count"] = seen_count
     diagnostic["pool"] = [{"id": c["id"], "fingerprint": c["fingerprint"], "db_id": c["db_id"]} for c in cards]
     if not cards:
         outcome = "empty" if coverage["complete"] else "unavailable"
-        if not valid and diagnostic.get("content_omitted_count"):
+        if diagnostic.get("content_omitted_count"):
             outcome = "omitted"
-        elif not valid and diagnostic.get("invalid_count"):
+        elif not seen_count and diagnostic.get("invalid_count"):
             outcome = "unavailable"
         return done({**failed, "outcome": outcome})
     reader_cards = []

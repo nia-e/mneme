@@ -5,8 +5,8 @@ import unittest
 from librarian_policy import EFFORTS, MODEL, LibrarianBudget, resolve
 
 class PolicyTests(unittest.TestCase):
-    def test_exact_explicit_presets_and_medium_continuity(self):
-        expected=[(8192,2048,10,32768,24,125000,10000),(12288,4096,15,65536,48,250000,20000),(24576,8192,20,131072,96,500000,40000)]
+    def test_shared_read_ceiling_preserves_effort_prompt_time_and_token_presets(self):
+        expected=[(8192,2048,10,524288,24,125000,10000),(12288,4096,15,524288,48,250000,20000),(24576,8192,20,524288,96,500000,40000)]
         for effort,values in zip(EFFORTS,expected):
             budget=resolve({"reader_model":MODEL,"librarian_effort":effort})
             self.assertEqual(tuple(getattr(budget,key) for key in ("selector_prompt_bytes","selector_answer_bytes","native_seconds","native_read_bytes","attempts","input_tokens","output_tokens")),values)

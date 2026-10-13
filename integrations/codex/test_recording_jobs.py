@@ -2720,7 +2720,7 @@ class TopicRecordingJobsTests(unittest.TestCase, RecordingFixture):
         self.assertEqual(self.writes[0][1]["payload"]["tags"], ["people", "possibility", "rust"])
 
     def test_no_context_read_when_existing_native_envelope_has_no_room(self):
-        self.overlap.return_value["native_work"]["decoded_bytes"] = 65536
+        self.overlap.return_value["native_work"]["decoded_bytes"] = resolve(self.config).native_read_bytes
         self.closed()
         with patch("tag_context.collect", side_effect=AssertionError("must not borrow another allowance")):
             runtime = self.runtime()

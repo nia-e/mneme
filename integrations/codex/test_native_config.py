@@ -130,7 +130,8 @@ class NativeHookConfigTests(unittest.TestCase):
                 calls, failed_cost = [], []
                 def bridge(binary, argv, request, **kwargs):
                     name = argv[argv.index("--store")+1]
-                    calls.append((name, request["tool"], int(argv[argv.index("--max-native-bytes")+1])))
+                    native_limit = int(argv[argv.index("--max-native-bytes")+1])
+                    calls.append((name, request["tool"], native_limit + kwargs["limit"]))
                     if name == "optionaldown" and mode == "unknown":
                         raise McpProtocolError("failed response has unknown accounting")
                     envelope = {"schema": "mneme.config-call.v1", "selection_digest": self.selected.digest,
@@ -364,14 +365,161 @@ class NativeCallTests(unittest.TestCase):
 
     def test_bounded_native_budget_and_operation_are_forwarded(self):
         self.client.max_native_bytes = 1024
-        with patch("store_registry.native_bridge", return_value=self.envelope(ok=True, result={"answer": 1})) as bridge:
+        response = self.envelope(ok=True, result={"answer": 1})
+        with patch("store_registry.native_bridge", return_value=response) as bridge:
             self.assertEqual(self.client.call_tool("get", {"id": DB}), {"answer": 1})
         args = bridge.call_args.args[1]
         self.assertEqual(args[args.index("--operation")+1], "record")
         self.assertEqual(args[args.index("--max-native-bytes")+1], "1024")
+        self.assertNotIn("limit", bridge.call_args.kwargs)
         measured = self.client.measured_size({})
-        self.assertGreater(measured, 19)
+        self.assertEqual(measured, 19 + len(json.dumps(response, ensure_ascii=False).encode()))
         self.assertEqual(self.client.measured_size({}), 0)
+
+    def test_total_allowance_splits_native_and_bridge_room_before_work(self):
+        self.client.max_total_bytes = 4097
+        response = self.envelope(ok=True, result={"answer": "é"})
+        with patch("store_registry.native_bridge", return_value=response) as bridge:
+            self.assertEqual(self.client.call_tool("get", {}), response["result"])
+        args = bridge.call_args.args[1]
+        native_limit = int(args[args.index("--max-native-bytes")+1])
+        bridge_limit = bridge.call_args.kwargs["limit"]
+        self.assertEqual((native_limit, bridge_limit), (2048, 2049))
+        self.assertEqual(self.client.measured_size(None), 19 + len(json.dumps(response, ensure_ascii=False).encode()))
+        self.assertEqual(self.client.measured_size(None), 0)
+
+    def test_total_allowance_respects_separate_native_and_bridge_ceilings(self):
+        self.client.max_native_bytes = 1024
+        self.client.max_total_bytes = 2 * registry.MAX_NATIVE_SNAPSHOT_BYTES
+        with patch("store_registry.native_bridge", return_value=self.envelope(ok=True, result={})) as bridge:
+            self.client.call_tool("get", {})
+        args = bridge.call_args.args[1]
+        self.assertEqual(args[args.index("--max-native-bytes")+1], "1024")
+        self.assertEqual(bridge.call_args.kwargs["limit"], registry.MAX_NATIVE_SNAPSHOT_BYTES)
+
+    def test_asymmetric_read_reserves_split_room_not_just_its_actual_charge(self):
+        response = self.envelope(ok=True, result={"data": ""})
+        response["work"]["decoded_bytes"] = 1019
+        response["result"]["data"] = "x" * (489 - len(json.dumps(response, ensure_ascii=False).encode()))
+        self.assertEqual(len(json.dumps(response, ensure_ascii=False).encode()), 489)
+        # Even an initially unbounded caller can use this estimate to reserve
+        # enough room for both halves of a later bounded final read.
+        with patch("store_registry.native_bridge", return_value=response) as bridge:
+            self.client.call_tool("databases", {})
+            self.assertEqual(self.client.measured_size(None), 1508)
+            self.assertEqual(self.client.last_read_allowance_bytes, 2038)
+            self.client.max_total_bytes = self.client.last_read_allowance_bytes
+            self.client.call_tool("databases", {})
+        args = bridge.call_args.args[1]
+        self.assertEqual(args[args.index("--max-native-bytes")+1], "1019")
+        self.assertEqual(bridge.call_args.kwargs["limit"], 1019)
+        self.assertEqual(self.client.measured_size(None), 1508)
+        self.assertEqual(self.client.work_bytes, 3016)
+
+    def test_native_bridge_preserves_raw_whitespace_size_for_split_reserve(self):
+        value = self.envelope(ok=True, result={"answer": "é"})
+        raw = (json.dumps(value, indent=16, ensure_ascii=False) + "\n").encode()
+        serialized_bytes = len(json.dumps(value, ensure_ascii=False).encode())
+        self.assertGreater(len(raw), serialized_bytes)
+        process, pipe = MagicMock(), MagicMock()
+        process.returncode = 0
+        pipe.read.side_effect = [raw, b""]
+        with patch("host_process.spawn", return_value=process), \
+             patch("host_process.BoundedPipe", return_value=pipe), \
+             patch("host_process.terminate_tree"):
+            response = registry.native_bridge("/tmp/mnemed", ["call"], limit=len(raw))
+        self.assertIsInstance(response, dict)
+        self.assertEqual(response, value)
+        self.assertEqual(json.dumps(response), json.dumps(value))
+        with patch("store_registry.native_bridge", return_value=response) as bridge:
+            self.client.call_tool("databases", {})
+            self.assertEqual(self.client.last_read_allowance_bytes, 2 * len(raw))
+            self.assertEqual(self.client.measured_size(None), 19 + serialized_bytes)
+            self.client.max_total_bytes = self.client.last_read_allowance_bytes
+            self.client.call_tool("databases", {})
+        self.assertEqual(bridge.call_args.kwargs["limit"], len(raw))
+        self.assertEqual(self.client.measured_size(None), 19 + serialized_bytes)
+
+    def test_total_allowance_validation_precedes_native_work(self):
+        for allowance in (-1, True, "1024", 1.5):
+            with self.subTest(allowance=allowance), patch("store_registry.native_bridge") as bridge:
+                self.client.max_total_bytes = allowance
+                with self.assertRaises(ValueError) as caught:
+                    self.client.call_tool("get", {})
+                self.assertNotIsInstance(caught.exception, registry.NativeReadBudgetExhausted)
+                bridge.assert_not_called()
+        for allowance in (0, 1):
+            with self.subTest(allowance=allowance), patch("store_registry.native_bridge") as bridge:
+                self.client.max_total_bytes = allowance
+                with self.assertRaises(registry.NativeReadBudgetExhausted) as caught:
+                    self.client.call_tool("get", {})
+                self.assertEqual(caught.exception.known_work_bytes, 0)
+                self.assertEqual(self.client.work_bytes, 0)
+                bridge.assert_not_called()
+
+    def test_native_receive_overshoot_is_typed_and_charged_once(self):
+        self.client.max_total_bytes = 4096
+        response = self.envelope(ok=False, error={"kind": "native", "message": "opaque receive failure"})
+        response["work"]["decoded_bytes"] = 2050
+        with patch("store_registry.native_bridge", return_value=response):
+            with self.assertRaises(registry.NativeReadBudgetExhausted) as caught:
+                self.client.call_tool("get", {})
+        charge = 2050 + len(json.dumps(response, ensure_ascii=False).encode())
+        self.assertEqual(caught.exception.known_work_bytes, charge)
+        self.assertEqual(self.client.work_bytes, charge)
+        self.assertEqual(self.client.measured_size(None), charge)
+        self.assertEqual(self.client.measured_size(None), 0)
+
+    def test_measured_success_over_total_room_is_typed_after_exact_charge(self):
+        self.client.max_total_bytes = 512
+        response = self.envelope(ok=True, result=list(range(20)))
+        response["work"]["decoded_bytes"] = 256
+        # Compact native JSON fits its bridge half, but Python's charged
+        # reserialization adds spaces. Never silently admit that full-call cost.
+        self.assertLessEqual(len(json.dumps(response, separators=(",", ":")).encode()) + 1, 256)
+        with patch("store_registry.native_bridge", return_value=response):
+            with self.assertRaises(registry.NativeReadBudgetExhausted) as caught:
+                self.client.call_tool("get", {})
+        charge = 256 + len(json.dumps(response, ensure_ascii=False).encode())
+        self.assertEqual(caught.exception.known_work_bytes, charge)
+        self.assertEqual(self.client.measured_size(None), charge)
+        self.assertEqual(self.client.measured_size(None), 0)
+
+    def test_budget_text_or_exact_native_limit_does_not_reclassify_failure(self):
+        from mcp_client import McpProtocolError, McpToolError, McpTransportError
+        self.client.max_total_bytes = 4096
+        for kind, native_bytes, error_type in (("native", 2048, McpProtocolError),
+                                              ("native", 19, McpProtocolError),
+                                              ("input", 2050, McpProtocolError),
+                                              ("protocol", 2050, McpProtocolError),
+                                              ("tool", 2050, McpToolError),
+                                              ("transport", 2050, McpTransportError)):
+            response = self.envelope(ok=False, error={"kind": kind, "message": "shared MCP receive budget exhausted"})
+            response["work"]["decoded_bytes"] = native_bytes
+            with self.subTest(kind=kind, native_bytes=native_bytes), patch("store_registry.native_bridge", return_value=response):
+                with self.assertRaises(error_type) as caught:
+                    self.client.call_tool("get", {})
+                self.assertNotIsInstance(caught.exception, registry.NativeReadBudgetExhausted)
+                self.assertEqual(self.client.measured_size(None), native_bytes + len(json.dumps(response).encode()))
+                self.assertEqual(self.client.measured_size(None), 0)
+
+    def test_missing_or_untrusted_work_remains_unknown_not_budget_exhaustion(self):
+        self.client.max_total_bytes = 4096
+        base = self.envelope(ok=False, error={"kind": "native", "message": "receive budget exhausted"})
+        base["work"]["decoded_bytes"] = 2050
+        for changed in ({"work": {}}, {"work": {"decoded_bytes": None}},
+                        {"work": {"decoded_bytes": True}}, {"selection_digest": "f" * 64},
+                        {"store": "different"}, {"schema": "unknown"}):
+            with self.subTest(changed=changed), patch("store_registry.native_bridge", return_value={**base, **changed}):
+                with self.assertRaises(ValueError) as caught:
+                    self.client.call_tool("get", {})
+                self.assertNotIsInstance(caught.exception, registry.NativeReadBudgetExhausted)
+                self.assertEqual(self.client.work_bytes, 0)
+        with patch("store_registry.native_bridge", side_effect=ValueError("native config response exceeds byte limit")):
+            with self.assertRaises(ValueError) as caught:
+                self.client.call_tool("get", {})
+            self.assertNotIsInstance(caught.exception, registry.NativeReadBudgetExhausted)
+            self.assertEqual(self.client.work_bytes, 0)
 
     def test_uncertain_verified_save_error_keeps_native_details(self):
         from mcp_client import McpToolError
