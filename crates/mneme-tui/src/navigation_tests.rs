@@ -289,6 +289,7 @@ fn source_switch_drops_pending_lens_and_old_channel() {
             token_env: None,
             expected_db_id: None,
             expected_path: None,
+            configured: None,
         })
         .collect();
     let (tx, mut rx) = mpsc::channel(1);
@@ -748,6 +749,7 @@ fn source_switch_forgets_scene_and_geometry_state() {
         token_env: None,
         expected_db_id: None,
         expected_path: None,
+        configured: None,
     }];
     switch_view(&mut app, None, &mut None);
     open_scene(&mut app, None, &mut None);

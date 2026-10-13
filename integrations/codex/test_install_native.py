@@ -1,0 +1,183 @@
+"""Offline native-config adapter preparation and fenced disposable installation."""
+import copy
+import json
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+import hook_launcher
+import install
+from install_test_support import InstallFixture
+import registry_config
+
+
+class NativeInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = InstallFixture()
+        self.addCleanup(self.fixture.temp.cleanup)
+        self.memory = self.fixture.base / "memory.toml"
+        self.memory.write_text('schema = "mneme.config.v1"\n')
+        self.snapshot = {"schema": "mneme.config-selection.v1", "digest": "a" * 64,
+            "sources": [{"role": "user", "path": str(self.memory), "sha256": install.digest(self.memory.read_bytes())}],
+            "config": {"background": {"enabled": False, "model": "gpt-6.1-sol", "effort": "medium"}},
+            "stores": [], "active": [], "read_default": None, "cwd": str(self.fixture.project), "project": {"configured": False}}
+        self.select = patch("store_registry.native_select", return_value=SimpleNamespace(snapshot=self.snapshot))
+        self.select.start()
+        self.addCleanup(self.select.stop)
+
+    def plan(self, **options):
+        return self.fixture.prepare(memory_config=self.memory, reader_codex=self.fixture.native("codex"), **options)
+
+    def test_one_policy_native_mcp_no_project_actor_no_start(self):
+        with patch("service.ensure_ready") as start:
+            plan = self.plan()
+            install.validate_plan(plan)
+            service, hook = install.runtime_configs(plan)
+            self.assertEqual(hook["schema"], "mneme.codex-hooks.config.v13")
+            self.assertEqual(set(hook), {"schema", "memory_config", "native_cli", "state_dir", "reader_codex", "reader_codex_sha256"})
+            self.assertEqual(install.planned_hook_handlers(plan), {})
+            outputs = install.config_outputs(plan, {"config.toml": None, "hooks.json": None})
+            import tomllib
+            server = tomllib.loads(outputs["config.toml"].decode())["mcp_servers"][install.SERVER]
+            self.assertEqual(server["command"], str(self.fixture.prefix / install.binary_destination(plan, "mneme-mcp")))
+            self.assertEqual(server["args"], ["--memory-config", str(self.memory), "--cwd", str(self.fixture.project)])
+            self.assertEqual(json.loads(outputs["hooks.json"])["hooks"], {})
+            self.assertNotIn("permissions", hook)
+            start.assert_not_called()
+        self.assertFalse(self.fixture.prefix.exists())
+
+    def test_config_drift_fails_before_any_publication_and_rollback_needs_no_config(self):
+        plan = self.plan()
+        self.snapshot["digest"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "memory config changed"):
+            install.apply(plan)
+        self.assertFalse(self.fixture.prefix.exists())
+        plan = self.plan()
+        result = install.apply(plan)
+        self.memory.unlink()
+        self.select.stop()
+        self.assertEqual(install.uninstall(result["receipt"])["status"], "configuration removed")
+
+    def test_native_source_drift_refuses_without_running_changed_selector(self):
+        plan = self.plan()
+        native = self.fixture.native("mnemed")
+        native.write_text("changed executable")
+        with patch("store_registry.native_select") as select:
+            with self.assertRaisesRegex(ValueError, "installation source changed"):
+                install.apply(plan)
+            select.assert_not_called()
+        self.assertFalse(self.fixture.prefix.exists())
+
+    def test_cannot_add_old_independent_policy_or_reenrollment(self):
+        for extra in ({"recording_mode": "automatic"}, {"reader_model": "gpt-6.1-sol"},
+                      {"librarian_effort": "medium"}, {"tag_stewardship": False},
+                      {"store_registry": self.memory}, {"global_preferences": {}},
+                      {"library_helper": self.memory}):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "independent hook policy"):
+                self.plan(**extra)
+
+    def test_retained_owner_binary_does_not_become_staged_configured_server(self):
+        owner = self.fixture.base / "old-mneme-mcp"
+        owner.write_text("retained owner binary fixture")
+        owner.chmod(0o700)
+        state = self.fixture.base / "owner-state"
+        state.mkdir()
+        service = {"binary": str(owner), "project_db": str(self.fixture.project / ".mneme/codex-memory.db"),
+                   "working_directory": str(self.fixture.project), "port": 18765, "state_dir": str(state)}
+        path = self.fixture.base / "retained-service.json"
+        path.write_bytes(install.json_bytes(service))
+        plan = self.plan(existing_service_config=path)
+        install.validate_plan(plan)
+        self.assertEqual(install.runtime_configs(plan)[0], service)
+        self.assertEqual(plan["existing_owner_binary"]["source"], str(owner))
+        owner.write_text("drifted owner")
+        with self.assertRaisesRegex(ValueError, "existing service binary changed"):
+            install.apply(plan)
+        self.assertFalse(self.fixture.prefix.exists())
+
+    def test_old_revision_cannot_smuggle_native_policy_or_new_helper_inventory(self):
+        plan = self.plan()
+        plan["config_revision"] = 24
+        plan["files"] = plan["files"][:len(install.V24_DESTINATIONS)]
+        plan["plan_sha256"] = install.plan_hash(plan)
+        with self.assertRaisesRegex(ValueError, "invalid native memory config pin"):
+            install.validate_plan(plan)
+        legacy = self.fixture.async_plan()
+        legacy["config_revision"] = 24
+        legacy["files"] = legacy["files"][:len(install.V24_DESTINATIONS)]
+        legacy["plan_sha256"] = install.plan_hash(legacy)
+        install.validate_plan(legacy)
+
+    def test_device_plan_keeps_core_and_async_independent_and_adapter_is_machine_only(self):
+        adapters = [{"root": str(self.fixture.project), "state_dir": str(self.fixture.project / ".mneme/retained"),
+                     "reader_codex": str(self.fixture.native("codex"))}]
+        destination = self.fixture.base / "device-hooks.json"
+        args = dict(memory_config=self.memory, native_cli=self.fixture.native("mnemed"), cwd=self.fixture.project,
+                    state_dir=self.fixture.base / "device-state", reader_codex=self.fixture.native("codex"),
+                    hooks_program=Path(hook_launcher.__file__), hook_config_path=destination,
+                    workspace_adapters=adapters)
+        prepared = registry_config.prepare_native(**args)
+        config = prepared["hook_config"]
+        self.assertEqual(config["workspace_adapters"][0]["state_dir"], adapters[0]["state_dir"])
+        self.assertNotIn("recording_mode", config)
+        start = prepared["global_hooks"]["hooks"]["SessionStart"]
+        self.assertIn("--core", start[0]["hooks"][0]["command"])
+        self.assertFalse(start[0]["hooks"][0].get("async", False))
+        self.assertTrue(prepared["global_hooks"]["hooks"]["Stop"][-1]["hooks"][0]["async"])
+        self.assertFalse(destination.exists())
+        self.assertFalse((self.fixture.base / "device-state").exists())
+        adapters[0]["permissions"] = {"write": True}
+        with self.assertRaisesRegex(ValueError, "select only"):
+            registry_config.prepare_native(**args)
+
+    def test_copied_native_adapter_uses_its_bundle_without_source_tree(self):
+        native = self.fixture.native("mnemed")
+        native.write_text("#!" + sys.executable + "\nimport json\nprint(json.dumps(" + repr(self.snapshot) + "))\n")
+        plan = self.plan(program_root=Path(install.__file__).parent)
+        result = install.apply(plan)
+        script = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import hooks, store_registry, registry_runtime, guidance, registry_config
+config = hooks._config(Path(sys.argv[2]), cwd=sys.argv[3])
+assert config["schema"] == "mneme.codex-hooks.config.v13"
+assert config["recording_mode"] == "off"
+assert registry_runtime.selection(config).stores == ()
+for module in (hooks, store_registry, registry_runtime, guidance, registry_config):
+    assert Path(module.__file__).parent == Path(sys.argv[1])
+print(json.dumps({"schema": config["schema"], "selected": 0}))
+"""
+        process = subprocess.run([sys.executable, "-I", "-c", script,
+            str(self.fixture.prefix / "lib"), str(self.fixture.prefix / "config/hooks.json"),
+            str(self.fixture.project)], capture_output=True, text=True, timeout=10, check=True,
+            cwd=self.fixture.base)
+        self.assertEqual(json.loads(process.stdout), {"schema": "mneme.codex-hooks.config.v13", "selected": 0})
+        self.assertFalse((self.fixture.project / ".mneme/codex-hook-state").exists())
+        self.assertEqual(install.uninstall(result["receipt"])["status"], "configuration removed")
+
+    def test_native_prepare_help_and_dispatch_agree(self):
+        for path, command, fields in ((install.__file__, "prepare", ("--memory-config",)),
+                                     (registry_config.__file__, "prepare-native", ("--memory-config", "--native-cli", "--workspace-adapters"))):
+            process = subprocess.run([sys.executable, path, command, "--help"],
+                capture_output=True, text=True, timeout=10, check=True)
+            for field in fields:
+                self.assertIn(field, process.stdout)
+
+    def test_native_dispatch_does_not_decline_enrolled_workspace_in_python(self):
+        event = {"hook_event_name": "SessionStart", "source": "startup", "session_id": "session",
+                 "cwd": str(self.fixture.project)}
+        with patch("hooks._bounded_json", return_value={"schema": "mneme.codex-hooks.config.v13"}), \
+             patch("hooks._config", return_value={"native": "checked"}) as configure, \
+             patch("hooks.handle_event", return_value={"handled": True}), \
+             patch("hook_launcher.choose_workspace") as discover:
+            self.assertEqual(hook_launcher.handle_event(event, self.memory), {"handled": True})
+            configure.assert_called_once_with(self.memory, cwd=str(self.fixture.project))
+            discover.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

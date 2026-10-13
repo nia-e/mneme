@@ -13,6 +13,9 @@ pub struct LibraryServer {
 }
 
 impl LibraryServer {
+    pub fn from_runtime(runtime: LibraryRuntime) -> Self {
+        Self { runtime }
+    }
     pub fn from_path(path: &Path) -> Result<Self, AnyErr> {
         Ok(Self {
             runtime: LibraryRuntime::from_path(path)?,

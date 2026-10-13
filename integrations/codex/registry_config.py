@@ -105,6 +105,71 @@ def prepare(*, store_registry, state_dir, reader_codex, hooks_program, hook_conf
 
 
 
+def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
+                   hooks_program, hook_config_path, python=sys.executable,
+                   reader_auth=None, workspace_adapters=None):
+    """Preview one device actor from native TOML; do not write/trust/start anything.
+
+    Workspace adapters choose only retained ledger locations and reader binaries.
+    Store activation, purpose, grants and background policy remain native-owned.
+    """
+    from registry_runtime import NATIVE_SCHEMA, validate_native_static
+    from store_registry import native_select
+    path = canonical_path(Path(memory_config).resolve(strict=True))
+    native = canonical_path(Path(native_cli).resolve(strict=True))
+    workspace = canonical_path(Path(cwd).resolve(strict=True))
+    reader = canonical_path(Path(reader_codex).resolve(strict=True))
+    program = canonical_path(Path(hooks_program).resolve(strict=True))
+    interpreter = canonical_path(Path(python).resolve(strict=True))
+    destination = canonical_path(hook_config_path)
+    if not all(is_executable(executable) for executable in (native, reader, interpreter)) or not program.is_file():
+        raise ValueError("native preparation requires existing native CLI, reader, dispatcher and Python")
+    if program.name != "hook_launcher.py":
+        raise ValueError("native device hooks require shipped hook_launcher.py")
+    selected = native_select(str(path), str(native), str(workspace))
+    config = {"schema": NATIVE_SCHEMA, "memory_config": str(path), "native_cli": str(native),
+              "state_dir": str(canonical_path(state_dir)), "reader_codex": str(reader),
+              "reader_codex_sha256": hashlib.sha256(reader.read_bytes()).hexdigest()}
+    if reader_auth is not None:
+        config["reader_auth"] = str(canonical_path(reader_auth))
+    if workspace_adapters is not None:
+        if not isinstance(workspace_adapters, list) or len(workspace_adapters) > 64:
+            raise ValueError("workspace adapters must be a bounded list of explicit machinery bindings")
+        adapters = []
+        for adapter in workspace_adapters:
+            if not isinstance(adapter, dict) or set(adapter) != {"root", "state_dir", "reader_codex"}:
+                raise ValueError("workspace adapters select only root, state_dir and reader_codex")
+            pinned_reader = canonical_path(Path(adapter["reader_codex"]).resolve(strict=True))
+            if not is_executable(pinned_reader):
+                raise ValueError("workspace adapter reader must be executable")
+            adapters.append({"root": str(canonical_path(Path(adapter["root"]).resolve(strict=True))),
+                "state_dir": str(canonical_path(adapter["state_dir"])), "reader_codex": str(pinned_reader),
+                "reader_codex_sha256": hashlib.sha256(pinned_reader.read_bytes()).hexdigest()})
+        config["workspace_adapters"] = sorted(adapters, key=lambda item: item["root"])
+    validate_native_static(config)
+    from hooks import MAX_CONFIG
+    if len(json.dumps(config, ensure_ascii=False, indent=2).encode()) > MAX_CONFIG:
+        raise ValueError("native hook adapter exceeds byte limit")
+    from install import PROGRAMS, hook_handlers
+    argv = [str(interpreter), str(program), "--config", str(destination)]
+    # Always install lifecycle/wakeup recipes: per-operation native flags decide
+    # work after selection. Core is independent of background enabled/recording.
+    handlers = hook_handlers(hook_command(argv), async_mode=True, recording=True,
+        background_command=hook_command([*argv, "--reader-background"]))
+    handlers["SessionStart"].insert(0, {"hooks": [{"type": "command",
+        "command": hook_command([*argv, "--core"]), "timeout": 15, "additionalContextLimit": 0}]})
+    sources = Path(__file__).parent
+    return {"schema": "mneme.codex-native-prepare.v1", "hook_config": config,
+        "hook_config_path": str(destination), "selection": selected.snapshot,
+        "native_cli_sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+        "global_hooks": {"hooks": handlers},
+        "programs": [{"name": name, "sha256": hashlib.sha256((sources / name).read_bytes()).hexdigest()}
+                     for name in PROGRAMS],
+        "installation": "not performed", "services": "not contacted",
+        "session_policy": "disable old hooks; close old sessions; quiesce all retained ledgers; start fresh sessions",
+        "dispatch_policy": "one device actor for all workspaces; no additive project hook actors"}
+
+
 def quiescence(state_dir):
     """Read-only worker snapshot; disabling old hooks is a required precondition.
 
@@ -206,6 +271,13 @@ def main(argv=None):
     prep.add_argument("--recording-mode", choices=("off", "automatic"), default="off")
     prep.add_argument("--librarian-effort", choices=("low", "medium", "high"), default="medium")
     prep.add_argument("--reader-auth")
+    native = sub.add_parser("prepare-native", help="preview one device actor driven by native memory.toml")
+    for name in ("memory-config", "native-cli", "cwd", "state-dir", "reader-codex", "hooks-program", "hook-config-path"):
+        native.add_argument("--" + name, required=True)
+    native.add_argument("--python", default=sys.executable)
+    native.add_argument("--reader-auth")
+    native.add_argument("--workspace-adapters", type=Path,
+                        help="reviewed JSON list of root/state_dir/reader_codex machinery bindings, not policy")
     args = vars(parser.parse_args(argv))
     operation = args.pop("operation")
     if operation == "quiescence":
@@ -216,6 +288,11 @@ def main(argv=None):
                                  if args["global_preferences"] else None,
                                  misc=_bounded_json(args["misc_config"], MAX_CONFIG) if args["misc_config"] else None,
                                  global_core=args["global_core"])
+    elif operation == "prepare-native":
+        from hooks import _bounded_json, MAX_CONFIG
+        if args["workspace_adapters"] is not None:
+            args["workspace_adapters"] = _bounded_json(args["workspace_adapters"], MAX_CONFIG)
+        value = prepare_native(**args)
     else:
         value = prepare(**args)
     print(json.dumps(value, ensure_ascii=True, indent=2))

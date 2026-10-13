@@ -6,6 +6,7 @@ in recording_jobs. Discovery never creates an owner or substitutes a destination
 """
 from dataclasses import dataclass, replace
 from pathlib import Path
+import json
 import time
 
 from rollout_primitives import digest, encoded, read_regular
@@ -43,10 +44,23 @@ class Acquisition:
     decoded_bytes: int
     native_seconds_left: float
     diagnostic: dict
+    guidance_snapshots: dict | None = None
+    project_focus_witnesses: dict | None = None
 
     @property
     def scope_options(self):
-        return {"selected_stores": self.stores}
+        offered = []
+        for store in self.stores:
+            if store.native_binding is None:
+                offered.append(store)
+                continue
+            snapshot = (self.guidance_snapshots or {}).get(store.name, {})
+            role = snapshot.get("roles", {}).get("tag_guide", {})
+            guide = role.get("witness", {}).get("text") if role.get("outcome") == "ok" else None
+            offered.append({**store.to_dict(), "project_focus": ((self.project_focus_witnesses or {}).get(store.name) or {}).get("text"),
+                            "tag_guide": guide,
+                            "tagging_enabled": not store.guidance.get("tag_guide") or guide is not None})
+        return {"selected_stores": tuple(offered)}
 
     def named(self, name):
         for store in self.stores:
@@ -78,10 +92,12 @@ def collect(config, observation, *, budget, seconds):
     deadline = time.monotonic() + min(budget.native_seconds, seconds)
     diagnostic = {"selected": len(selected.recordable), "offered": 0,
                   "identity_unavailable": 0, "budget_omitted": 0,
-                  "overlap_omitted": 0, "native_accounting": "measured",
+                  "overlap_omitted": 0, "project_focus_unavailable": 0, "native_accounting": "measured",
                   "routing": "not_enabled", "concerns": "not_enabled"}
     charged = 0
     available, cards = [], []
+    guidance_snapshots = {}
+    project_focus_witnesses = {}
     exhausted = False
     for store in selected.recordable:
         remaining = deadline - time.monotonic()
@@ -109,13 +125,45 @@ def collect(config, observation, *, budget, seconds):
         # Injected project adapters can be unpinned until their first live read.
         # Only this assessment uses the resolved ID; the original snapshot still
         # fences config/service admission and the job pins this native identity.
+        if store.native_binding is not None:
+            from guidance import GuidanceOwner, collect_guidance
+            owner = GuidanceOwner(policy, store.service(), identifier, deadline,
+                                  max(0, budget.native_read_bytes - charged), operation="record")
+            before = owner.remaining_bytes
+            try:
+                with owner:
+                    witness = collect_guidance(owner, store.guidance, owner_binding=policy.canonical(), roles=("tag_guide",))
+                frozen_guidance = witness.to_dict()
+                # A failed optional tag guide was not consulted. It disables
+                # dependent topic proposals, not an otherwise valid SAVE.
+                if frozen_guidance["roles"].get("tag_guide", {}).get("outcome") != "ok":
+                    frozen_guidance["roles"].pop("tag_guide", None)
+                guidance_snapshots[store.name] = frozen_guidance
+                charged += before - owner.remaining_bytes
+            except (ValueError, OSError, TimeoutError, TypeError, KeyError):
+                charged += before - owner.remaining_bytes
+                if owner.remaining_bytes <= 0:
+                    exhausted = True
+                diagnostic["identity_unavailable"] += 1
+                continue
+        if store.native_binding is not None and store.workspace_root is not None:
+            # Keep the existing project instruction file as background context;
+            # neither native IDs nor display names invent a project file role.
+            from recording_jobs import project_focus_witness
+            try:
+                focus, witness = project_focus_witness(store.workspace_root)
+            except (OSError, ValueError, TypeError):
+                diagnostic["project_focus_unavailable"] += 1
+                continue
+            project_focus_witnesses[store.name] = {"text": focus, **witness}
         recording = store.record
         if not store.read.enabled:
             recording = replace(recording, allow_associations=False)
         available.append(replace(store, db_id=identifier, record=recording))
 
     diagnostic["offered"] = len(available)
-    plan, reason = overlap_plan(observation, budget=budget, selected_stores=tuple(available))
+    offered = Acquisition(selected, tuple(available), [], charged, max(0, deadline - time.monotonic()), diagnostic, guidance_snapshots, project_focus_witnesses)
+    plan, reason = overlap_plan(observation, budget=budget, **offered.scope_options)
     if plan is None:
         raise ValueError("assessment_input_refused")
     cue = observation["evidence"][0]["content"][0]["text"]
@@ -145,7 +193,7 @@ def collect(config, observation, *, budget, seconds):
         cards.extend({**card, "db_id": store.db_id} for card in result["cards"])
     revalidate(selected)
     return Acquisition(selected, tuple(available), cards, charged,
-                       max(0, deadline - time.monotonic()), diagnostic)
+                       max(0, deadline - time.monotonic()), diagnostic, guidance_snapshots, project_focus_witnesses)
 
 
 def freeze_destination(acquisition, destination, *, seconds):
@@ -153,7 +201,13 @@ def freeze_destination(acquisition, destination, *, seconds):
     store = acquisition.named(destination)
     revalidate(acquisition.selection, operation="record", store_name=destination)
     policy = TargetPolicy.from_selected(acquisition.selection.named(destination), acquisition.selection)
-    return store, policy, {"destination": destination, "db_id": store.db_id,
+    tagging = next((item.get("tagging_enabled", True) for item in acquisition.scope_options["selected_stores"]
+                    if isinstance(item, dict) and item.get("name") == destination), True)
+    focus = (acquisition.project_focus_witnesses or {}).get(destination)
+    return store, policy, {**({"project_focus_witness": {"root": focus["root"], "sha256": focus["sha256"]}}
+                              if focus is not None else {}), "tagging_enabled": tagging, **({"guidance_snapshot": acquisition.guidance_snapshots[destination]}
+                             if acquisition.guidance_snapshots is not None and destination in acquisition.guidance_snapshots else {}),
+                          "destination": destination, "db_id": store.db_id,
                           "db_alias": store.db_alias, "store_target": policy.canonical(),
                           "registry_native_bytes": acquisition.decoded_bytes,
                           "native_deadline_monotonic": time.monotonic() + min(
@@ -197,11 +251,25 @@ def validate_payload(config, job):
             or not job.get("citations")
             or any(citation.get("kind") not in rule.evidence_kinds for citation in job["citations"])):
         raise ValueError("registry_recording_policy_changed")
+    if set(rule.evidence_kinds) == {"user_statement"} and (store.native_binding is not None or "root_user_ref_json" in job):
+        root_ref = job.get("root_user_ref_json")
+        if not isinstance(root_ref, str):
+            raise ValueError("registry_root_user_evidence")
+        for citation in job["citations"]:
+            if (citation.get("source_ref_json") != root_ref
+                    or citation.get("source_field") != "content[0].text"
+                    or citation.get("rendering") != "exact_text"):
+                raise ValueError("registry_root_user_evidence")
     tags = payload.get("tags", [])
     if (not isinstance(tags, list) or len(tags) > 32 or len(set(tags)) != len(tags)
             or not set(rule.required_tags) <= set(tags)
             or "possibility" in tags and job["proposal_kind"] != "possibility"):
         raise ValueError("registry_recording_tags")
+    if store.native_binding is not None:
+        guidance = job.get("guidance_snapshot", {}).get("roles", {})
+        tagging_enabled = not store.guidance.get("tag_guide") or guidance.get("tag_guide", {}).get("outcome") == "ok"
+        if job.get("tagging_enabled") != tagging_enabled or not tagging_enabled and set(tags) - set(rule.required_tags) - {"possibility"}:
+            raise ValueError("registry_tagging_guidance_changed")
     from tag_context import ordinary_tags
     ordinary_tags([tag for tag in tags if tag not in rule.required_tags and tag != "possibility"], max_count=32)
     links = payload.get("links", [])

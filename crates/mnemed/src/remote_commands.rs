@@ -118,7 +118,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
     let mut edit_body = None;
     let mut edit_summary = None;
     let (tool, arguments) = match command {
-        Command::Client(_) => {
+        Command::Config(_) | Command::Client(_) => {
             return Err("client is a standalone local process, not a remote CLI operation".into());
         }
         Command::Stores(_) => {

@@ -49,9 +49,20 @@ class _IdentityMismatch(ValueError):
 def _service_client(config, *, token, timeout):
     # Keep the injectable legacy client seam; production always dispatches from
     # the parsed service mode, never an inferred URL scheme or remote path.
+    if hasattr(config, "native_client"):
+        return config.native_client(timeout=timeout, operation="record" if config.store.record.enabled and not config.store.read.enabled else "explicit")
     if McpClient is not _DEFAULT_CLIENT:
         return McpClient(config.url, token=token, timeout=timeout)
     return client_for_service(config, token=token, timeout=timeout)
+
+
+
+def _failed_native_charge(client, before):
+    """Exact failed bridge work, or None when no measured envelope survived."""
+    after = getattr(client, "work_bytes", None)
+    if type(before) is int and type(after) is int and after > before:
+        return after - before
+    return None
 
 
 def _result(outcome, cards=None, elapsed_ms=0, observation=None):
@@ -606,17 +617,25 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
                 if remaining <= 0:
                     raise TimeoutError("reader deadline exceeded")
                 client.timeout = remaining
+            before_work = getattr(client, "work_bytes", None)
             try:
+                if hasattr(client, "max_native_bytes"):
+                    client.max_native_bytes = budget.native_read_bytes - decoded_bytes
                 value = client.call_tool(name, args)
             except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
                 if reader and shared_work is not None:
-                    # A partially decoded failed response cannot buy another
-                    # owner's fresh allowance. Preserve the known count rather
-                    # than pretending the maximum was observed.
-                    shared_work["accounting_unknown"] = True
+                    failed_charge = _failed_native_charge(client, before_work)
+                    if failed_charge is None:
+                        # Unknown partial reads cannot buy another owner's fresh
+                        # allowance. Measured native refusal frames can: charge
+                        # their exact cost, not a fabricated exhaustion amount.
+                        shared_work["accounting_unknown"] = True
+                    else:
+                        decoded_bytes += failed_charge
+                        shared_work["decoded_bytes"] = decoded_bytes
                 raise
             if reader:
-                decoded_bytes += _bytes(value)
+                decoded_bytes += client.measured_size(value) if hasattr(client, "measured_size") else _bytes(value)
                 if shared_work is not None:
                     shared_work["decoded_bytes"] = decoded_bytes
             if deadline is not None and name not in ("get",) and time.monotonic() >= deadline:
@@ -624,7 +643,7 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
             return value
 
         catalog = read("databases", {})
-        if not _expected_catalog(catalog, config.database_path, config.database_name):
+        if not hasattr(config, "native_client") and not _expected_catalog(catalog, config.database_path, config.database_name):
             raise ValueError("unexpected project catalog")
         # Older catalogs can still supply recall, but only a canonical native
         # identity permits a delivery binding. Never retry a failed guard with
@@ -642,6 +661,10 @@ def _collect(service_config_path, prompt, project_root, timeout, observe=False, 
             request["observe"] = True
         if preference:
             request.update(depth=0, tags=[GLOBAL_PREFERENCE_TAG])
+        if hasattr(config, "native_client"):
+            retrieval = config.store.native_binding["entry"]["store"].get("retrieval")
+            if retrieval is not None:
+                request["tags"] = retrieval["tags"]
         if routing_hints is not None:
             # Optional suggestions never widen an ordinary read into a write.
             # A malformed optional batch becomes the empty sampling opt-in.
@@ -900,9 +923,9 @@ def _config_snapshot(path):
     # Reuse the service parser for meaning; these bytes only fence changes to
     # its explicit configuration file during this background operation.
     with path.open("rb") as stream:
-        raw = stream.read(MAX_CONFIG_BYTES + 1)
-    if len(raw) > MAX_CONFIG_BYTES:
-        raise ValueError("service configuration exceeds bound")
+        raw = stream.read(64 * 1024 + 1)
+    if len(raw) > 64 * 1024:
+        raise ValueError("owner configuration exceeds bound")
     return path.resolve(strict=True), hashlib.sha256(raw).digest()
 
 
@@ -991,11 +1014,18 @@ def _background_project_read(service_config_path, project_root, timeout, *, cue=
                 nonlocal decoded_bytes, accounting_known
                 if decoded_bytes >= budget.native_read_bytes:
                     raise ValueError("native decoded-read allowance exhausted")
+                before_work = getattr(client, "work_bytes", None)
                 try:
+                    if hasattr(client, "max_native_bytes"):
+                        client.max_native_bytes = budget.native_read_bytes - decoded_bytes
                     value = client.call_tool(name, arguments)
-                    size = _bytes(value)
+                    size = client.measured_size(value) if hasattr(client, "measured_size") else _bytes(value)
                 except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
-                    accounting_known = False
+                    failed_charge = _failed_native_charge(client, before_work)
+                    if failed_charge is None:
+                        accounting_known = False
+                    else:
+                        decoded_bytes += failed_charge
                     raise
                 decoded_bytes += size
                 if decoded_bytes > budget.native_read_bytes:
@@ -1221,8 +1251,10 @@ def collect_routing_witnesses(service_config_path: Path, cue: str, project_root:
                 if remaining <= 0:
                     raise TimeoutError("routing phase deadline exceeded")
                 client.timeout = remaining
+                if hasattr(client, "max_native_bytes"):
+                    client.max_native_bytes = budget.native_read_bytes - decoded_bytes
                 value = client.call_tool(name, arguments)
-                decoded_bytes += _bytes(value)
+                decoded_bytes += client.measured_size(value) if hasattr(client, "measured_size") else _bytes(value)
                 return value
             try:
                 catalog = read("databases", {})
@@ -1370,11 +1402,18 @@ def check_association_target(service_config_path: Path, project_root: Path,
                 if decoded_bytes >= policy.native_read_bytes:
                     raise ValueError("association decoded-read allowance exhausted")
                 client.timeout = remaining()
+                before_work = getattr(client, "work_bytes", None)
                 try:
+                    if hasattr(client, "max_native_bytes"):
+                        client.max_native_bytes = policy.native_read_bytes - decoded_bytes
                     value = client.call_tool(name, arguments)
-                    size = _bytes(value)
+                    size = client.measured_size(value) if hasattr(client, "measured_size") else _bytes(value)
                 except (OSError, ValueError, TypeError, KeyError, McpError, TimeoutError):
-                    accounting_known = False
+                    failed_charge = _failed_native_charge(client, before_work)
+                    if failed_charge is None:
+                        accounting_known = False
+                    else:
+                        decoded_bytes += failed_charge
                     raise
                 decoded_bytes += size
                 if decoded_bytes > policy.native_read_bytes:

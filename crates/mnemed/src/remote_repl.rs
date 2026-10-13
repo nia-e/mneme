@@ -9,8 +9,98 @@ use tokio::sync::mpsc;
 
 use crate::cli_owner::{OwnerBinding, SelectedRemote};
 use crate::remote_commands::{Request, RequestAccess};
-use crate::remote_transport::RemoteClient;
+use crate::remote_transport::RemoteClient as NativeRemoteClient;
 use crate::{AnyErr, parse_id};
+
+enum ReplClient {
+    Legacy(NativeRemoteClient),
+    Configured {
+        client: mneme_store_client::ConfiguredClient,
+        name: String,
+        catalog: Vec<Value>,
+    },
+}
+impl ReplClient {
+    async fn connect(
+        options: &crate::remote_transport::ConnectionOptions,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self::Legacy(NativeRemoteClient::connect(options).await?))
+    }
+    fn advertises(&self, tool: &str) -> bool {
+        match self {
+            Self::Legacy(client) => client.advertises(tool),
+            Self::Configured { catalog, .. } => {
+                mneme_mcp_client::CatalogView(catalog).advertises(tool)
+            }
+        }
+    }
+    async fn call_tool(
+        &mut self,
+        tool: &str,
+        mut arguments: Value,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::Legacy(client) => client.call_tool(tool, arguments).await,
+            Self::Configured { client, name, .. } => {
+                if arguments.get("db").is_some() {
+                    arguments["db"] = json!(name);
+                }
+                let mut budget =
+                    mneme_store_client::OperationBudget::new(1024 * 1024, Duration::from_secs(15))?;
+                client
+                    .call_owner_with_budget(name, tool, arguments, &mut budget)
+                    .await
+            }
+        }
+    }
+    async fn close(&mut self) {
+        match self {
+            Self::Legacy(client) => client.close().await,
+            Self::Configured { client, .. } => client.close().await,
+        }
+    }
+}
+
+pub(crate) async fn run_configured(
+    snapshot: mneme_config::SelectionSnapshot,
+    name: &str,
+    json_output: bool,
+    start: &str,
+    budget: usize,
+    query: Option<&str>,
+) -> Result<(), AnyErr> {
+    validate_start(start, budget, query)?;
+    let selected_store = snapshot.explicit_store(name)?;
+    selected_store.require_operation(mneme_config::Operation::ExplicitRead)?;
+    let owner = &selected_store.store.owner;
+    let selected = SelectedRemote {
+        remote: crate::remote_config::ResolvedRemote {
+            database: owner.db.clone(),
+            connection: crate::remote_transport::ConnectionOptions {
+                url: owner.url.clone(),
+                ssh_mcp_port: owner.ssh_mcp_port.unwrap_or(18766),
+                token_env: owner.token_env.clone(),
+            },
+        },
+        owner: None,
+        origin: crate::cli_owner::OwnerOrigin::ExplicitRemote,
+    };
+    let client = mneme_store_client::ConfiguredClient::for_explicit(snapshot, name)
+        .map_err(|e| e.to_string())?;
+    let mut allowance =
+        mneme_store_client::OperationBudget::new(512 * 1024, Duration::from_secs(10))
+            .map_err(|e| e.to_string())?;
+    let catalog = client
+        .catalog_owner_with_budget(name, &mut allowance)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut client = ReplClient::Configured {
+        client,
+        name: name.to_owned(),
+        catalog,
+    };
+    run_session(&mut client, &selected, json_output, start, budget, query).await
+}
 
 const MAX_LINE_BYTES: usize = 8192;
 // Four stdin lines per server action envelope leaves room for help/blank lines
@@ -41,12 +131,23 @@ pub(crate) async fn run(
 ) -> Result<(), AnyErr> {
     validate_start(start, budget, query)?;
     let mut client = tokio::select! {
-        result = RemoteClient::connect(&selected.remote.connection) => result.map_err(|error| -> AnyErr { error })?,
+        result = ReplClient::connect(&selected.remote.connection) => result.map_err(|error| -> AnyErr { error })?,
         _ = tokio::signal::ctrl_c() => return Err("remote repl connection interrupted".into()),
     };
+    run_session(&mut client, &selected, json_output, start, budget, query).await
+}
+
+async fn run_session(
+    client: &mut ReplClient,
+    selected: &SelectedRemote,
+    json_output: bool,
+    start: &str,
+    budget: usize,
+    query: Option<&str>,
+) -> Result<(), AnyErr> {
     let mut active = None;
     let result = tokio::select! {
-        result = shell(&mut client, &selected, &mut active, json_output, start, budget, query) => result,
+        result = shell(client, selected, &mut active, json_output, start, budget, query) => result,
         _ = tokio::signal::ctrl_c() => Err("remote repl interrupted; a submitted reflect may have completed, do not blindly retry".into()),
     };
     // Terminal cleanup is best effort and bounded. Cancellation of an unknown
@@ -55,7 +156,7 @@ pub(crate) async fn run(
         let _ = tokio::time::timeout(
             CLEANUP_TIMEOUT,
             call(
-                &mut client,
+                client,
                 selected.owner.as_ref(),
                 &selected.remote.database,
                 "walk",
@@ -84,11 +185,19 @@ fn request(tool: &'static str, arguments: Value, access: RequestAccess) -> Reque
 }
 
 async fn admit(
-    client: &mut RemoteClient,
+    client: &mut ReplClient,
     owner: Option<&OwnerBinding>,
     database: &str,
     request: &mut Request,
 ) -> Result<(), AnyErr> {
+    if let ReplClient::Configured { client, name, .. } = client {
+        let selected = client.selection().explicit_store(name)?;
+        selected.require_operation(match request.access {
+            RequestAccess::ReadOnly => mneme_config::Operation::ExplicitRead,
+            RequestAccess::Mutation => mneme_config::Operation::ExplicitWrite,
+        })?;
+        request.arguments["expected_db_id"] = json!(selected.store.id);
+    }
     if !client.advertises(request.tool) {
         return Err(format!(
             "remote repl requires advertised {} tool; no fallback attempted",
@@ -98,13 +207,16 @@ async fn admit(
     }
     if let Some(owner) = owner {
         owner.check_request(request)?;
+        let ReplClient::Legacy(client) = client else {
+            return Err("legacy owner guard cannot apply to a configured client".into());
+        };
         owner.verify_and_guard(client, request, database).await?;
     }
     Ok(())
 }
 
 async fn call(
-    client: &mut RemoteClient,
+    client: &mut ReplClient,
     owner: Option<&OwnerBinding>,
     database: &str,
     tool: &'static str,
@@ -223,7 +335,7 @@ fn parse_command(line: &str) -> Result<Option<Command>, AnyErr> {
 }
 
 async fn shell(
-    client: &mut RemoteClient,
+    client: &mut ReplClient,
     selected: &SelectedRemote,
     active: &mut Option<String>,
     json_output: bool,

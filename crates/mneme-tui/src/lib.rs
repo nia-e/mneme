@@ -28,7 +28,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use model::*;
-pub use model::{SourceChoice, Target, View};
+pub use model::{ConfiguredTarget, SourceChoice, Target, View};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     io,

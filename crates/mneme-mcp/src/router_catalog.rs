@@ -17,6 +17,11 @@ pub(super) const TOOLS: &[&str] = &[
     "supersede",
     "forget",
     "status",
+    "query",
+    "recall",
+    "capture",
+    "concern",
+    "graph",
 ];
 pub(super) struct RouteCatalog<'a> {
     pub name: &'a str,
@@ -84,7 +89,7 @@ pub(super) fn ordinary_catalog(
                 });
         }
         let guard_supported = match name {
-            "episode" => tool
+            "episode" | "concern" | "graph" => tool
                 .pointer("/inputSchema/properties/action/enum")
                 .and_then(Value::as_array)
                 .is_some_and(|actions| {
@@ -151,7 +156,7 @@ pub(super) fn advertises_action(tools: &[Value], name: &str, args: &Value) -> bo
     let Some(tool) = tools.iter().find(|tool| tool["name"] == name) else {
         return false;
     };
-    if name == "episode" {
+    if matches!(name, "episode" | "concern" | "graph") {
         return args["action"].as_str().is_some_and(|action| {
             tool.pointer("/inputSchema/properties/action/enum")
                 .and_then(Value::as_array)

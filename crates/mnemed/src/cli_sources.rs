@@ -36,6 +36,7 @@ pub(crate) fn selected_target(selected: SelectedRemote) -> Target {
         token_env: selected.remote.connection.token_env,
         expected_db_id: selected.owner.map(|owner| owner.db_id().to_string()),
         expected_path: None,
+        configured: None,
     }
 }
 // Name preference is discovery provenance, not a parsed display-string convention.
@@ -367,6 +368,7 @@ fn library_entries(config: Option<&Path>) -> Result<Vec<DiscoveredSource>, AnyEr
                     token_env: endpoint.token_env,
                     expected_db_id: Some(entry.db_id),
                     expected_path: None,
+                    configured: None,
                 }),
                 authored_name: true,
             });
@@ -416,6 +418,7 @@ fn library_entries(config: Option<&Path>) -> Result<Vec<DiscoveredSource>, AnyEr
                 token_env: service["token_env"].as_str().map(str::to_owned),
                 expected_db_id: None,
                 expected_path: Some(core.global_database.to_string_lossy().into_owned()),
+                configured: None,
             })
         })();
         add(
@@ -589,6 +592,7 @@ mod tests {
             token_env: None,
             expected_db_id: id.map(str::to_owned),
             expected_path: path.map(str::to_owned),
+            configured: None,
         }
     }
     fn discovered(route: Target, authored_name: bool) -> DiscoveredSource {

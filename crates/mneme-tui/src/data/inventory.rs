@@ -21,7 +21,7 @@ fn graph_action(catalog: &[Value], action: &str) -> bool {
         }
     })
 }
-fn require_graph(connection: &RemoteClient, action: &str) -> Result<(), Error> {
+fn require_graph(connection: &ReadClient, action: &str) -> Result<(), Error> {
     if !graph_action(connection.tool_catalog(), action)
         || !connection.supports_expected_db_id("graph", Some(action))
     {
@@ -30,7 +30,7 @@ fn require_graph(connection: &RemoteClient, action: &str) -> Result<(), Error> {
     Ok(())
 }
 pub(super) async fn page(
-    connection: &mut RemoteClient,
+    connection: &mut ReadClient,
     target: &Target,
     identity: &str,
     after: Option<&str>,
@@ -41,10 +41,12 @@ pub(super) async fn page(
         args["after"] = json!(after);
     }
     let value = connection.call_tool("graph", args).await?;
-    Ok(Response::Inventory(parse_page(&value, identity, after)?))
+    let mut page = parse_page(&value, identity, after)?;
+    append_cache_label(&mut page.graph.note, &value);
+    Ok(Response::Inventory(page))
 }
 pub(super) async fn summaries(
-    connection: &mut RemoteClient,
+    connection: &mut ReadClient,
     target: &Target,
     identity: &str,
     ids: &[String],

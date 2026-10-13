@@ -29,7 +29,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
     }
     assert_eq!(
         names.iter().filter(|name| name.as_str() != "help").count(),
-        39,
+        40,
         "review the workflow guide when commands change"
     );
     for heading in ["Read:", "Inspect:", "Write:", "Curate:", "Maintain:"] {

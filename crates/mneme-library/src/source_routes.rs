@@ -85,6 +85,27 @@ impl ReplicaRoute {
 }
 
 impl LibraryRuntime {
+    /// Resolve a native owner identity only when exactly one retained descriptor
+    /// maps it. Human configuration never repeats catalog topology coordinates.
+    pub fn resolve_replica_by_db_id(
+        &self,
+        db_id: &str,
+        pin: Option<&ReplicaPin>,
+    ) -> Result<ReplicaRoute, LibraryError> {
+        let catalog = self.read_catalog()?;
+        let mut matches = catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.db_id == db_id && !entry.withdrawn);
+        let entry = matches
+            .next()
+            .ok_or_else(|| err("native owner has no retained library descriptor"))?;
+        if matches.next().is_some() {
+            return Err(err("native owner maps to multiple library descriptors"));
+        }
+        self.resolve_replica_in(&catalog, &entry.project_id, pin)
+    }
+
     /// Resolve only configured replica endpoints, never a live owner fallback.
     /// Re-read the published catalog on every call. An unpinned call selects the
     /// newest configured replica by (captured_at, generation); a pin must match
@@ -104,6 +125,14 @@ impl LibraryRuntime {
             return Err(err("invalid replica project or exact snapshot reference"));
         }
         let catalog = self.read_catalog()?;
+        self.resolve_replica_in(&catalog, project_id, pin)
+    }
+    fn resolve_replica_in(
+        &self,
+        catalog: &crate::Catalog,
+        project_id: &str,
+        pin: Option<&ReplicaPin>,
+    ) -> Result<ReplicaRoute, LibraryError> {
         let entry = catalog
             .entries
             .iter()

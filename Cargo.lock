@@ -2222,6 +2222,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mneme-config"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shlex",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "ulid",
+ "url",
+]
+
+[[package]]
 name = "mneme-core"
 version = "0.1.0"
 dependencies = [
@@ -2320,6 +2336,7 @@ dependencies = [
  "libc",
  "mneme-app",
  "mneme-body",
+ "mneme-config",
  "mneme-core",
  "mneme-cozo",
  "mneme-embed",
@@ -2327,6 +2344,7 @@ dependencies = [
  "mneme-library",
  "mneme-mcp-client",
  "mneme-present",
+ "mneme-store-client",
  "mneme-store-path",
  "mneme-walk",
  "serde",
@@ -2361,6 +2379,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mneme-store-client"
+version = "0.1.0"
+dependencies = [
+ "mneme-app",
+ "mneme-config",
+ "mneme-core",
+ "mneme-library",
+ "mneme-mcp-client",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "ulid",
+]
+
+[[package]]
 name = "mneme-store-path"
 version = "0.1.0"
 dependencies = [
@@ -2375,7 +2409,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crossterm",
+ "mneme-config",
  "mneme-mcp-client",
+ "mneme-store-client",
  "ratatui",
  "serde_json",
  "tokio",
@@ -2415,6 +2451,7 @@ dependencies = [
  "libc",
  "mneme-app",
  "mneme-body",
+ "mneme-config",
  "mneme-core",
  "mneme-cozo",
  "mneme-embed",
@@ -2422,6 +2459,7 @@ dependencies = [
  "mneme-library",
  "mneme-mcp-client",
  "mneme-present",
+ "mneme-store-client",
  "mneme-store-path",
  "mneme-tui",
  "mneme-walk",
@@ -4385,8 +4423,15 @@ dependencies = [
  "serde",
  "serde_spanned",
  "toml_datetime",
+ "toml_write",
  "winnow",
 ]
+
+[[package]]
+name = "toml_write"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tower"

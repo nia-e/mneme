@@ -50,6 +50,9 @@ pub(crate) async fn run(
     remote: &RemoteOptions,
     user: bool,
     db: Option<&std::path::Path>,
+    memory_config: Option<&std::path::Path>,
+    store: Option<&str>,
+    profile: Option<&str>,
     json: bool,
 ) -> Result<(), AnyErr> {
     if json {
@@ -74,7 +77,23 @@ pub(crate) async fn run(
             "tui needs an interactive terminal; try tui --demo --snapshot for a preview".into(),
         );
     }
-    let selection = resolve_targets(args, remote, user)?;
+    let selection = if !args.demo && args.config.is_none() && remote.remote.is_none() {
+        match crate::cli_config::discover(memory_config, profile)? {
+            Some(snapshot) => declarative_targets(snapshot, store, user)?,
+            None if store.is_some() || profile.is_some() || memory_config.is_some() => {
+                return Err(
+                    "declarative TUI selection requires memory.toml; use --memory-config PATH"
+                        .into(),
+                );
+            }
+            None => resolve_targets(args, remote, user)?,
+        }
+    } else {
+        if memory_config.is_some() || store.is_some() || profile.is_some() {
+            return Err("do not mix declarative selectors with demo, explicit library or remote TUI selection".into());
+        }
+        resolve_targets(args, remote, user)?
+    };
     if args.snapshot {
         println!("{}", mneme_tui::preview_view(120, 36, args.view.into())?);
         return Ok(());
@@ -93,6 +112,64 @@ pub(crate) async fn run(
 struct ResolvedTargets {
     sources: Vec<SourceChoice>,
     warnings: Vec<String>,
+}
+
+/// Same immutable metadata witness used by the CLI, MCP and native hook bridge.
+fn declarative_targets(
+    snapshot: mneme_config::SelectionSnapshot,
+    named: Option<&str>,
+    user: bool,
+) -> Result<ResolvedTargets, AnyErr> {
+    if user {
+        return Err(
+            "--user is a legacy selector; use --store NAME with declarative configuration".into(),
+        );
+    }
+    let primary = named
+        .or(snapshot.read_default.as_deref())
+        .ok_or("no admitted TUI default; select --store NAME")?
+        .to_owned();
+    snapshot
+        .explicit_store(&primary)?
+        .require_operation(mneme_config::Operation::ExplicitRead)?;
+    let snapshot = std::sync::Arc::new(snapshot);
+    let mut sources = Vec::new();
+    let mut rows: Vec<_> = snapshot.stores.iter().collect();
+    rows.sort_by_key(|row| row.name != primary);
+    for row in rows {
+        if row.admitted && row.eligible.read && (row.active || row.name == primary) {
+            let owner = &row.store.owner;
+            sources.push(SourceChoice::routed(mneme_tui::Target {
+                name: row.name.clone(),
+                database: owner.db.clone(),
+                url: owner.url.clone(),
+                ssh_mcp_port: owner.ssh_mcp_port.unwrap_or(18766),
+                token_env: owner.token_env.clone(),
+                expected_db_id: Some(row.store.id.clone()),
+                expected_path: owner
+                    .path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                configured: Some(mneme_tui::ConfiguredTarget {
+                    selection: snapshot.clone(),
+                    store: row.name.clone(),
+                }),
+            }));
+        } else {
+            let mut source = SourceChoice::unavailable(
+                &row.name,
+                row.reason
+                    .as_deref()
+                    .unwrap_or("read permission not granted"),
+            );
+            source.expected_db_id = Some(row.store.id.clone());
+            sources.push(source);
+        }
+    }
+    Ok(ResolvedTargets {
+        sources,
+        warnings: vec![],
+    })
 }
 
 /// Explicit selectors never inspect or append ambient sources.
@@ -157,6 +234,72 @@ impl ResolvedTargets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declarative_picker_uses_the_cli_snapshot_and_does_not_activate_inventory() {
+        let config = mneme_config::Config::parse(
+            r#"
+schema = "mneme.config.v1"
+read_default = "renamed-project"
+[stores.renamed-project]
+id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+owner = { url = "http://127.0.0.1:1", db = "project-alias" }
+active = { workspace = "any" }
+[stores.other]
+id = "01BRZ3NDEKTSV4RRFFQ69G5FAV"
+owner = { url = "http://127.0.0.1:2", db = "other-alias" }
+active = { workspace = "project", roots = ["/not-this-workspace"] }
+[stores.blocked]
+id = "01CRZ3NDEKTSV4RRFFQ69G5FAV"
+owner = { url = "http://127.0.0.1:3", db = "blocked-alias" }
+active = { workspace = "any", profiles = ["isolated"] }
+"#,
+        )
+        .unwrap();
+        let snapshot = mneme_config::select(
+            &config,
+            &mneme_config::SelectionContext::new(std::env::temp_dir().canonicalize().unwrap()),
+        )
+        .unwrap();
+        let digest = snapshot.digest.clone();
+        let selected = declarative_targets(snapshot.clone(), None, false).unwrap();
+        assert_eq!(selected.sources[0].name, "renamed-project");
+        assert_eq!(
+            selected.sources[0].route().unwrap().database,
+            "project-alias"
+        );
+        let binding = selected.sources[0]
+            .route()
+            .unwrap()
+            .configured
+            .as_ref()
+            .unwrap();
+        assert_eq!(binding.selection.digest, digest);
+        assert_eq!(*binding.selection, snapshot);
+        assert!(
+            selected
+                .sources
+                .iter()
+                .find(|source| source.name == "other")
+                .unwrap()
+                .route()
+                .is_none()
+        );
+        assert!(
+            selected
+                .sources
+                .iter()
+                .find(|source| source.name == "blocked")
+                .unwrap()
+                .route()
+                .is_none()
+        );
+        let explicit = declarative_targets(snapshot.clone(), Some("other"), false).unwrap();
+        assert_eq!(explicit.sources[0].name, "other");
+        assert!(explicit.sources[0].route().is_some());
+        assert!(declarative_targets(snapshot.clone(), Some("blocked"), false).is_err());
+        assert!(declarative_targets(snapshot, None, true).is_err());
+    }
 
     #[test]
     fn explicit_remote_and_demo_do_not_append_ambient_owners() {

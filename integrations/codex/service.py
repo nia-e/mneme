@@ -156,6 +156,8 @@ class RemoteConfig:
 
 def client_for_service(config, *, timeout=3.0, token=None, token_env=None,
                        expected_server_name="mneme-mcp"):
+    if hasattr(config, "native_client"):
+        return config.native_client(timeout=timeout)
     """Choose transport from the explicit config, never from URL guessing."""
     from mcp_client import McpClient
 

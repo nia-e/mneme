@@ -600,6 +600,7 @@ mod tests {
                 token_env: None,
                 expected_db_id: None,
                 expected_path: None,
+                configured: None,
             })
             .collect();
         app.cabinet.page.next = Some("old cursor".into());

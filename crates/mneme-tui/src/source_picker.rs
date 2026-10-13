@@ -193,6 +193,7 @@ mod tests {
             token_env: None,
             expected_db_id: Some("identity".into()),
             expected_path: None,
+            configured: None,
         };
         let mut app = App::new(vec![target], String::new(), false);
         app.sources.push(SourceChoice::unavailable(

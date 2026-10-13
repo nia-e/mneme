@@ -67,6 +67,7 @@ class TagContext:
     vocabulary_json: str
     decoded_bytes: int = 0
     store_purpose: str | None = None
+    guidance_json: str | None = None
 
     @property
     def guide(self):
@@ -78,6 +79,9 @@ class TagContext:
 
     @property
     def content_guards(self):
+        if self.guidance_json is not None:
+            from guidance import GuidanceSnapshot
+            return GuidanceSnapshot(self.guidance_json).content_guards
         guide = self.guide
         return [{"id": guide["id"], "content_fingerprint": guide["content_fingerprint"]}] if guide else []
 
@@ -99,10 +103,12 @@ class TagContext:
         identity = ({key: guide[key] for key in ("id", "content_fingerprint", "text_sha256")}
                     if guide else None)
         return {"db_id": self.db_id, "guide": identity,
+                **({"guidance": json.loads(self.guidance_json)} if self.guidance_json is not None else {}),
                 "guide_summary_sha256": guide["text_sha256"] if guide else None,
                 "guide_revision_sha256": digest({"builtin": BUILTIN_GUIDANCE,
                     **({"store_purpose": self.store_purpose} if self.store_purpose is not None else {}),
-                    "guide": {"id": guide["id"], "text_sha256": guide["text_sha256"]} if guide else None}),
+                    "guide": {"id": guide["id"], "text_sha256": guide["text_sha256"]} if guide else None,
+                    **({"guidance": json.loads(self.guidance_json)} if self.guidance_json is not None else {})}),
                 "vocabulary_sha256": digest(self.vocabulary),
                 "vocabulary_partial": self.vocabulary.get("partial", True), "outcome": self.outcome}
 
@@ -125,6 +131,21 @@ def _validate_context(context, expected_db_id=None):
             or context.guide_json is not None and (not isinstance(context.guide_json, str)
                                                   or len(context.guide_json.encode()) > MAX_CONTEXT_BYTES)):
         raise ValueError("invalid_tag_context")
+    if context.guidance_json is not None:
+        from guidance import validate_snapshot
+        witness = validate_snapshot(json.loads(context.guidance_json))
+        if witness["db_id"] != context.db_id:
+            raise ValueError("invalid_tag_context")
+        if context.store_purpose is not None:
+            raise ValueError("invalid_tag_context")
+        if any(row["outcome"] not in ("ok", "not_configured") for row in witness["roles"].values()):
+            raise ValueError("invalid_tag_context")
+        tag_role = witness["roles"].get("tag_guide", {})
+        expected_guide = ({key: tag_role["witness"][key]
+                           for key in ("id", "content_fingerprint", "text_sha256", "text")}
+                          if tag_role.get("outcome") == "ok" else None)
+        if context.guide != expected_guide:
+            raise ValueError("invalid_tag_context")
     if len(encoded(context.packet())) > MAX_CONTEXT_BYTES:
         raise ValueError("invalid_tag_context")
     guide = context.guide
@@ -192,7 +213,7 @@ def lookup_prefixes(cue, seed_tags=()):
     return result
 
 
-def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue="", seed_tags=()):
+def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue="", seed_tags=(), owner=None):
     """Directed lexical pages + fallback within one aggregate read/time envelope.
 
     Prefix selection is deterministic and fallible. Partial pages and unqueried
@@ -210,8 +231,11 @@ def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue
     deadline = time.monotonic() + timeout
     consumed = 0
     client = None
+    external_owner = owner
+    guidance_json = None
     try:
         purpose = None
+        selected_guidance = None
         if config.get("memory_scope") == "registry":
             from registry_runtime import selection
             store = selection(config).named(config["selected_store"])
@@ -219,14 +243,19 @@ def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue
                     or config.get("tag_guide_id") != store.maintenance.tag_guide_id):
                 raise ValueError("selected tag context owner changed")
             purpose = store.purpose
+            if getattr(store, "native_binding", None) is not None:
+                selected_guidance = getattr(store, "guidance", {})
+                purpose = None
         target = target_kwargs(config)
         policy, service = policy_for(config["service_config"], config["project_root"], **target)
         alias = policy.db_alias
         token = os.environ.get(service.token_env) if service.token_env else None
         if service.token_env and not token:
             raise ValueError("native_unavailable")
-        client = client_for_service(service, token=token, timeout=min(30, timeout))
-        client.connect()
+        if external_owner is None:
+            client = (service.native_client(timeout=min(30, timeout), operation="maintenance")
+                      if getattr(policy, "native", False) else client_for_service(service, token=token, timeout=min(30, timeout)))
+            client.connect()
 
         def call(name, args):
             nonlocal consumed
@@ -235,9 +264,17 @@ def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue
             left = deadline - time.monotonic()
             if left <= 0:
                 raise ValueError("tag_context_deadline")
-            client.timeout = min(30, left)
-            value = client.call_tool(name, {"db": alias, "expected_db_id": expected_db_id, **args})
-            consumed += len(encoded(value))
+            if external_owner is None:
+                client.timeout = min(30, left)
+                value = client.call_tool(name, {"db": alias, "expected_db_id": expected_db_id, **args})
+            else:
+                before = external_owner.remaining_bytes
+                try:
+                    value = external_owner.call(name, {"db": alias, "expected_db_id": expected_db_id, **args})
+                finally:
+                    consumed += max(0, before-external_owner.remaining_bytes)
+            if external_owner is None:
+                consumed += len(encoded(value))
             if (consumed > max_bytes or not isinstance(value, dict)
                     or value.get("db") != alias or value.get("db_id") != expected_db_id):
                 raise ValueError("tag_context_unavailable")
@@ -245,6 +282,21 @@ def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue
 
         guide = None
         guide_id = config.get("tag_guide_id")
+        if selected_guidance is not None:
+            from guidance import collect_guidance, selectors
+            from types import SimpleNamespace
+            selected_guidance = selectors(selected_guidance)
+            bounded = SimpleNamespace(db_id=expected_db_id, policy=policy, call=call,
+                                      deadline=deadline)
+            snapshot = collect_guidance(bounded, selected_guidance,
+                                        owner_binding=policy.canonical())
+            guidance_json = snapshot.witness_json
+            row = snapshot.roles["tag_guide"]
+            if row["outcome"] not in ("ok", "not_configured"):
+                raise ValueError("configured_tag_guide_unavailable")
+            if row["outcome"] == "ok":
+                guide = {key: row["witness"][key] for key in ("id", "content_fingerprint", "text_sha256", "text")}
+            guide_id = None
         if guide_id is not None:
             if not isinstance(guide_id, str) or not ULID.fullmatch(guide_id):
                 raise ValueError("invalid_guide")
@@ -320,7 +372,7 @@ def collect(config, *, expected_db_id, timeout, max_bytes=MAX_CONTEXT_BYTES, cue
             raise ValueError("tag_context_unavailable")
         context = TagContext(True, "ok", expected_db_id,
                              encoded(guide).decode() if guide else None, encoded(vocab).decode(), consumed,
-                             purpose)
+                             purpose, guidance_json)
         return validate_context(context, expected_db_id)
     except Exception:
         return disabled(expected_db_id, "tag_context_unavailable", consumed)

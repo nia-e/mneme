@@ -109,12 +109,13 @@ def selection(config):
         raw = _bounded_json(Path(config["_config_path"]), MAX_CONFIG, with_raw=True)[1]
         if hashlib.sha256(raw).hexdigest() != config["_registry_config_sha256"]:
             raise ValueError("hook policy changed; reload before work")
-    current = Selection.from_dict(config["frozen_selection"])
+    from store_registry import selection_from_dict
+    current = selection_from_dict(config["frozen_selection"])
     if str(config.get("selection_cwd", current.cwd)) != current.cwd:
         raise ValueError("selected workspace changed")
     if config.get("workspace_binding") is not None:
         validate_binding(config["workspace_binding"])
-    if config.get("_registry_origin_scope", config.get("memory_scope")) == "project":
+    if config.get("schema") != NATIVE_SCHEMA and config.get("_registry_origin_scope", config.get("memory_scope")) == "project":
         from recording_jobs import load_project_focus
         origin = {**config, "memory_scope": "project"}
         if load_project_focus(origin) != config.get("_project_focus"):
@@ -131,7 +132,7 @@ def config_for_store(config, store):
             "_registry_origin_scope": config.get("_registry_origin_scope", config.get("memory_scope")),
             "service_config": Path(store.service_config),
             "selected_store": store.name, "_store_purpose": store.purpose,
-            "tag_stewardship": store.maintenance.enabled and config.get("recording_mode") == "automatic",
+            "tag_stewardship": store.maintenance.enabled and (config.get("schema") == NATIVE_SCHEMA or config.get("recording_mode") == "automatic"),
             "tag_guide_id": store.maintenance.tag_guide_id}
 
 
@@ -156,3 +157,68 @@ def admit_session(config, event):
             raise HookError("registry selection changed; quiesce worker and start a fresh session")
         return None, False
     _with_state(config["state_dir"], event["session_id"], bind, blocking=False)
+
+
+NATIVE_SCHEMA = "mneme.codex-hooks.config.v13"
+NATIVE_FIELDS = {"schema", "state_dir", "memory_config", "native_cli", "reader_codex", "reader_codex_sha256"}
+
+
+def validate_native_static(value):
+    if (not isinstance(value, dict) or value.get("schema") != NATIVE_SCHEMA
+            or not NATIVE_FIELDS <= set(value) or set(value) - NATIVE_FIELDS - {"reader_auth", "workspace_adapters"}):
+        raise ValueError("invalid native hook adapter fields")
+    for key in ("state_dir", "memory_config", "native_cli", "reader_codex", "reader_auth"):
+        if key in value: canonical_path(value[key])
+    if not isinstance(value["reader_codex_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["reader_codex_sha256"]):
+        raise ValueError("invalid reader executable hash")
+    adapters = value.get("workspace_adapters", [])
+    if not isinstance(adapters, list) or len(adapters) > 64:
+        raise ValueError("invalid workspace adapter inventory")
+    roots = set()
+    for adapter in adapters:
+        if not isinstance(adapter, dict) or set(adapter) != {"root", "state_dir", "reader_codex", "reader_codex_sha256"}:
+            raise ValueError("invalid workspace adapter")
+        for key in ("root", "state_dir", "reader_codex"): canonical_path(adapter[key])
+        root_path = Path(adapter["root"]).resolve(strict=True)
+        if not root_path.is_dir():
+            raise ValueError("workspace adapter root must exist")
+        root = str(root_path)
+        if root in roots or not isinstance(adapter["reader_codex_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", adapter["reader_codex_sha256"]):
+            raise ValueError("duplicate workspace adapter or invalid reader hash")
+        roots.add(root)
+    return dict(value)
+
+
+def load_native(value, path, raw, *, cwd=None, workspace_binding=None):
+    from store_registry import native_select
+    from hooks import _bounded_json, MAX_CONFIG
+    if workspace_binding is not None or cwd is None:
+        raise ValueError("native hook selection requires event workspace, not legacy binding")
+    config = validate_native_static(value)
+    current = Path(cwd).absolute()
+    canonical = current.resolve(strict=True)
+    if not canonical.is_dir(): raise ValueError("native hook workspace must be a directory")
+    matching = [row for row in config.get("workspace_adapters", []) if canonical.is_relative_to(Path(row["root"]).resolve(strict=True))]
+    if matching:
+        adapter = max(matching, key=lambda row: len(Path(row["root"]).parts))
+        config.update({key: adapter[key] for key in ("state_dir", "reader_codex", "reader_codex_sha256")})
+    selected = native_select(config["memory_config"], config["native_cli"], current)
+    background = selected.snapshot["config"]["background"]
+    # Model defaults are executable host recipe, not another policy parser.
+    config.update(reader_model=background.get("model") or "gpt-6.1-sol",
+                  librarian_effort=background.get("effort") or "medium",
+                  memory_scope="registry", memory_mode="async", project_root=current,
+                  selection_cwd=current, recall_mode="automatic" if selected.recallable else "off",
+                  recording_mode="automatic" if selected.recordable else "off",
+                  _background_maintenance=bool(selected.maintainable),
+                  frozen_selection=selected.to_dict(), _config_path=Path(path).resolve(),
+                  _registry_config_sha256=hashlib.sha256(raw).hexdigest())
+    resolve_budget(config)
+    for key in ("state_dir", "memory_config", "native_cli", "reader_codex", "reader_auth"):
+        if key in config: config[key] = Path(config[key]).resolve()
+    if _bounded_json(Path(path), MAX_CONFIG, with_raw=True)[1] != raw:
+        raise ValueError("native hook adapter changed during selection")
+    from recording_jobs import _config_digest
+    config["_reader_config_pin"] = _config_digest(config)
+    selection(config)
+    return config

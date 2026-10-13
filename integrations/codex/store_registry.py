@@ -198,6 +198,8 @@ class SelectedStore:
     service_digest: str = ""
     workspace_root: str | None = None
     _service: object = field(default=None, compare=False, repr=False)
+    native_binding: dict | None = field(default=None, repr=False)
+    guidance: dict = field(default_factory=dict)
 
     @property
     def is_project(self):
@@ -216,15 +218,20 @@ class SelectedStore:
         return (self.db_id, node_id)
 
     def to_dict(self):
-        return {"name": self.name, "service_config": self.service_config,
+        value = {"name": self.name, "service_config": self.service_config,
                 "db_alias": self.db_alias, "database_path": self.database_path,
                 "db_id": self.db_id, "purpose": self.purpose, "when": asdict(self.when),
                 "read": asdict(self.read), "record": asdict(self.record),
                 "maintenance": asdict(self.maintenance), "service_digest": self.service_digest,
                 "workspace_root": self.workspace_root}
+        if self.native_binding is not None:
+            value.update(native_binding=self.native_binding, guidance=self.guidance)
+        return value
 
     def service(self):
         """Return the already parsed snapshot only while its file is unchanged."""
+        if self.native_binding is not None:
+            return NativeService(self)
         if self._service is None or hashlib.sha256(_read(self.service_config, MAX_SERVICE_BYTES)).hexdigest() != self.service_digest:
             raise ValueError("selected service configuration changed; select again")
         return self._service
@@ -468,6 +475,8 @@ def resolve(cwd, *, registry_path=None, project_binding=None, mode="async"):
 
 
 def revalidate(selection, *, operation=None, store_name=None):
+    if isinstance(selection, NativeSelection):
+        return selection.revalidate(operation=operation, store_name=store_name)
     if not isinstance(selection, Selection):
         raise ValueError("checked store selection required")
     current = Selection.from_dict(selection.to_dict())
@@ -496,4 +505,246 @@ def selection_to_dict(selection):
 
 
 def selection_from_dict(value):
+    if isinstance(value, dict) and value.get("schema") == NATIVE_SELECTION_SCHEMA:
+        return NativeSelection.from_dict(value)
     return Selection.from_dict(value)
+
+
+# Native declarative adapter. Python validates the bounded wire contract, never
+# parses TOML or repeats native activation/project/profile policy.
+NATIVE_SELECTION_SCHEMA = "mneme.native-store-selection.v1"
+MAX_NATIVE_SNAPSHOT_BYTES = 512 * 1024
+
+
+def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIVE_SNAPSHOT_BYTES):
+    import subprocess
+    import time
+    import math
+    import host_process
+    if (not Path(binary).is_absolute() or type(timeout) not in (int, float)
+            or not math.isfinite(timeout) or not 0 < timeout <= 30):
+        raise ValueError("invalid bounded native config request")
+    raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode() if payload is not None else b""
+    if len(raw) > 128 * 1024:
+        raise ValueError("native config request exceeds byte limit")
+    deadline = time.monotonic() + timeout
+    process = host_process.spawn([str(binary), "--json", "config", *arguments], tree=True,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    pipe = host_process.BoundedPipe(process, max_read_bytes=min(limit + 1, 16384))
+    try:
+        pipe.write(raw, deadline)
+        process.stdin.close()
+        output = bytearray()
+        while True:
+            chunk = pipe.read(min(16384, limit + 1 - len(output)), deadline)
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > limit:
+                raise ValueError("native config response exceeds byte limit")
+        process.wait(timeout=max(.001, deadline - time.monotonic()))
+        if process.returncode:
+            raise ValueError("native configuration refused; reselect before work")
+        value = json.loads(output, object_pairs_hook=_unique)
+        if not isinstance(value, dict):
+            raise ValueError("invalid native configuration response")
+        return value
+    finally:
+        pipe.close()
+        host_process.terminate_tree(process, timeout=.2)
+
+
+def native_binary_identity(binary):
+    stat = Path(binary).stat()
+    return {"device": stat.st_dev, "inode": stat.st_ino, "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns}
+
+
+def native_select(config_path, binary, cwd):
+    config_path, binary, cwd = str(_path(config_path)), str(_path(binary)), str(_path(cwd))
+    pin = native_binary_identity(binary)
+    snapshot = native_bridge(binary, ["select", "--config", config_path, "--cwd", cwd])
+    if native_binary_identity(binary) != pin:
+        raise ValueError("native binary changed during selection; use a fresh session")
+    return NativeSelection(snapshot, config_path, binary, cwd, pin)
+
+
+@dataclass(frozen=True)
+class NativeSelection:
+    snapshot: dict
+    registry_path: str
+    native_cli: str
+    requested_cwd: str | None = None
+    binary_pin: dict | None = None
+
+    def __post_init__(self):
+        value = self.snapshot
+        if (not isinstance(value, dict) or value.get("schema") != "mneme.config-selection.v1"
+                or not isinstance(value.get("digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", value["digest"])
+                or not isinstance(value.get("active"), list) or len(value["active"]) > 64
+                or not isinstance(value.get("config"), dict) or not isinstance(value.get("cwd"), str)
+                or not Path(value["cwd"]).is_absolute()):
+            raise ValueError("invalid native selection snapshot")
+        names, owners = set(), set()
+        for row in value["active"]:
+            if (not isinstance(row, dict) or not isinstance(row.get("name"), str) or not NAME.fullmatch(row["name"])
+                    or not isinstance(row.get("store"), dict) or not isinstance(row.get("eligible"), dict)
+                    or set(row["eligible"]) != {"read", "write", "core", "context", "recall", "record", "maintenance"}
+                    or any(type(flag) is not bool for flag in row["eligible"].values())):
+                raise ValueError("invalid native selected owner")
+            store = row["store"]
+            if (not isinstance(store.get("id"), str) or not ULID.fullmatch(store["id"])
+                    or not isinstance(store.get("owner"), dict) or not NAME.fullmatch(store["owner"].get("db", ""))
+                    or row["name"] in names or store["id"] in owners):
+                raise ValueError("duplicate or invalid native selected identity")
+            names.add(row["name"]); owners.add(store["id"])
+        if len(json.dumps(value).encode()) > MAX_NATIVE_SNAPSHOT_BYTES:
+            raise ValueError("native selected snapshot exceeds byte limit")
+
+    @property
+    def digest(self): return self.snapshot["digest"]
+    @property
+    def cwd(self): return self.requested_cwd or self.snapshot["cwd"]
+    @property
+    def canonical_cwd(self): return self.snapshot["cwd"]
+    @property
+    def project_binding(self): return None
+    @property
+    def omissions(self): return tuple((row["name"], row.get("reason") or "native activation") for row in self.snapshot.get("stores", []) if not row.get("active"))
+    @property
+    def stores(self):
+        result = []
+        for row in self.snapshot["active"]:
+            entry, eligible = row["store"], row["eligible"]
+            owner, guidance = entry["owner"], entry.get("guidance") or {}
+            purpose = "Knowledge and experience belonging to this selected owner."
+            capture = entry.get("capture") or {}
+            project = self.snapshot.get("project") or {}
+            workspace_root = (project.get("root") if project.get("configured") and
+                              (entry.get("active") or {}).get("workspace") == "project" else None)
+            binding = {"config_path": self.registry_path, "native_cli": self.native_cli,
+                       "cwd": self.cwd, "digest": self.digest, "entry": row, "binary_pin": self.binary_pin}
+            result.append(SelectedStore(row["name"], self.registry_path, owner["db"], owner.get("path") or "",
+                entry["id"], purpose, read=ReadPolicy(eligible["read"], eligible["core"]),
+                record=RecordPolicy(eligible["record"], tuple(capture.get("kinds", KINDS)),
+                    tuple(capture.get("evidence_kinds", EVIDENCE_KINDS)), tuple(capture.get("required_tags", [])),
+                    capture.get("allow_associations", True) and eligible["read"],
+                    capture.get("max_summary_bytes", 512), capture.get("max_body_bytes", 2048)),
+                maintenance=MaintenancePolicy(eligible["maintenance"], (guidance.get("tag_guide") or {}).get("id")),
+                service_digest=self.digest, workspace_root=workspace_root, native_binding=binding, guidance=guidance))
+        return tuple(result)
+    def subset(self, operation):
+        admitted = {row["name"] for row in self.snapshot["active"] if row["eligible"][operation]}
+        return tuple(store for store in self.stores if store.name in admitted)
+    readable = property(lambda self: self.subset("read"))
+    context = property(lambda self: self.subset("context"))
+    recallable = property(lambda self: self.subset("recall"))
+    core = property(lambda self: self.subset("core"))
+    recordable = property(lambda self: self.subset("record"))
+    maintainable = property(lambda self: self.subset("maintenance"))
+    def named(self, name):
+        for store in self.stores:
+            if store.name == name: return store
+        raise ValueError("store is not selected")
+    def to_dict(self):
+        return {"schema": NATIVE_SELECTION_SCHEMA, "config_path": self.registry_path,
+                "native_cli": self.native_cli, "snapshot": self.snapshot, "digest": self.digest,
+                "cwd": self.cwd, "binary_pin": self.binary_pin}
+    @classmethod
+    def from_dict(cls, value):
+        if not isinstance(value, dict) or set(value) != {"schema", "config_path", "native_cli", "snapshot", "digest", "cwd", "binary_pin"}:
+            raise ValueError("invalid native frozen selection")
+        frozen = cls(value["snapshot"], value["config_path"], value["native_cli"], value["cwd"], value["binary_pin"])
+        if frozen.digest != value["digest"] or frozen.cwd != value["cwd"]:
+            raise ValueError("native frozen selection differs")
+        return frozen.revalidate()
+    def revalidate(self, *, operation=None, store_name=None):
+        current = native_select(self.registry_path, self.native_cli, self.cwd)
+        if current.snapshot != self.snapshot or current.binary_pin != self.binary_pin:
+            raise ValueError("native selected configuration changed; use a fresh session")
+        if operation is not None:
+            operation = "read" if operation == "explicit" else operation
+            if operation not in {"read", "write", "core", "context", "recall", "record", "maintenance"} or not any(s.name == store_name for s in current.subset(operation)):
+                raise ValueError("selected owner does not permit this operation")
+        elif store_name is not None:
+            current.named(store_name)
+        return current
+
+
+@dataclass(frozen=True)
+class NativeService:
+    store: SelectedStore
+    token_env = None
+    @property
+    def database_name(self): return self.store.db_alias
+    @property
+    def database_path(self): return self.store.database_path
+    @property
+    def url(self): return "native-config:" + self.store.name
+    def native_client(self, timeout=3, *, operation=None):
+        if operation is None:
+            flags = self.store.native_binding["entry"]["eligible"]
+            operation = "record" if flags["record"] else "recall" if flags["recall"] else "core" if flags["core"] else "explicit"
+        return NativeClient(self.store, timeout=timeout, operation=operation)
+
+
+class NativeClient:
+    def __init__(self, store, *, timeout=3, operation="explicit"):
+        self.store, self.timeout, self.operation = store, timeout, operation
+        self.work_bytes = 0
+        self._charged_work = 0
+        self.max_native_bytes = 512 * 1024
+    def connect(self): return self
+    def close(self): pass
+    def __enter__(self): return self.connect()
+    def __exit__(self, *_): self.close()
+    def call_tool(self, name, arguments):
+        if type(self.max_native_bytes) is not int or not 0 < self.max_native_bytes <= 16 * 1024 * 1024:
+            raise ValueError("native remaining byte allowance exhausted")
+        binding = self.store.native_binding
+        if binding.get("binary_pin") is not None and native_binary_identity(binding["native_cli"]) != binding["binary_pin"]:
+            raise ValueError("native binary changed; use a fresh session")
+        response = native_bridge(binding["native_cli"], ["call", "--config", binding["config_path"],
+            "--cwd", binding["cwd"], "--operation", self.operation, "--store", self.store.name,
+            "--expected-selection-digest", binding["digest"], "--timeout-ms", str(max(1, int(self.timeout * 1000))),
+            "--max-native-bytes", str(self.max_native_bytes), "--canonical-only"],
+            {"tool": name, "arguments": arguments}, timeout=self.timeout)
+        if (response.get("schema") != "mneme.config-call.v1" or response.get("selection_digest") != binding["digest"]
+                or response.get("store") != self.store.name or type(response.get("ok")) is not bool):
+            raise ValueError("native call does not match frozen owner selection")
+        work = response.get("work")
+        native_bytes = work.get("decoded_bytes") if isinstance(work, dict) else None
+        if type(native_bytes) is not int or native_bytes < 0:
+            raise ValueError("native call accounting is unknown")
+        self.work_bytes += native_bytes + len(json.dumps(response, ensure_ascii=False).encode())
+        if not response["ok"]:
+            from mcp_client import McpToolError, McpTransportError, McpProtocolError
+            error = response.get("error")
+            if not isinstance(error, dict) or not isinstance(error.get("message"), str):
+                raise McpProtocolError("native config error malformed")
+            cls = McpToolError if error.get("kind") == "tool" else McpTransportError if error.get("kind") == "transport" else McpProtocolError
+            exception = cls(error["message"][:512])
+            exception.details = error
+            raise exception
+        if "result" not in response:
+            raise ValueError("native config result missing")
+        result = response["result"]
+        # Legacy hook cards have no exact-replica continuation witness. Until
+        # that card format supports it, omit rather than flatten cached data
+        # into apparent live-owner evidence or guards. Native explicit routes
+        # retain the qualified cache reference unchanged.
+        if isinstance(result, dict) and "_mneme_source" in result:
+            raise ValueError("cached hook result needs exact source-qualified delivery; omitted")
+        return result
+    def owner_capabilities(self):
+        return self.call_tool("owner_capabilities", {})
+    def save_verified(self, db, payload, *, expected_db_id=None):
+        if db != self.store.db_alias or expected_db_id != self.store.db_id:
+            raise ValueError("verified save differs from selected owner")
+        return self.call_tool("save/verified", {"db": db, "payload": payload, "expected_db_id": expected_db_id})
+    def measured_size(self, value):
+        # Full bridge work, including initialize/catalog/framing, is charged
+        # exactly once by the caller's existing shared allowance.
+        size = self.work_bytes - self._charged_work
+        self._charged_work = self.work_bytes
+        return size

@@ -12,6 +12,7 @@
 mod activity;
 mod capture;
 mod concern;
+mod configured_server;
 mod context_observation;
 mod edit_body;
 mod edit_summary;
@@ -366,18 +367,27 @@ impl CapabilityPolicy {
 enum Coordinator {
     Library(library_server::LibraryServer),
     Router(router_server::RouterServer),
+    Configured(configured_server::ConfiguredServer),
 }
 
 impl Coordinator {
-    async fn dispatch(&self, method: &str, params: Value) -> Result<Value, AnyErr> {
+    fn dispatch<'a>(
+        &'a self,
+        method: &'a str,
+        params: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, AnyErr>> + Send + 'a>>
+    {
         match self {
-            Self::Library(server) => server.dispatch(method, params).await,
-            Self::Router(server) => server.dispatch(method, params).await,
+            Self::Library(server) => Box::pin(server.dispatch(method, params)),
+            Self::Router(server) => Box::pin(server.dispatch(method, params)),
+            Self::Configured(server) => server.dispatch(method, params),
         }
     }
     async fn close(&self) {
-        if let Self::Router(server) = self {
-            server.close().await;
+        match self {
+            Self::Router(server) => server.close().await,
+            Self::Configured(server) => server.close().await,
+            Self::Library(_) => {}
         }
     }
 }
@@ -402,6 +412,9 @@ struct Args {
     dbs: Vec<(String, PathBuf)>,
     library_config: Option<PathBuf>,
     router_config: Option<PathBuf>,
+    memory_config: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    configured_library: Option<String>,
     http: Option<String>,
     capability_profile: CapabilityProfile,
     /// Explicitly expose the unreceipted direct-feedback compatibility tool.
@@ -423,6 +436,33 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), AnyErr> {
     let mut args = parse_args()?;
+    if let Some(path) = args.memory_config.as_deref() {
+        let cwd = args
+            .cwd
+            .as_deref()
+            .expect("declarative startup cwd captured by argument admission");
+        let coordinator = if let Some(name) = args.configured_library.as_deref() {
+            let client = mneme_store_client::ConfiguredClient::new(
+                mneme_config::select_workspace(path, cwd, None)?,
+            )?;
+            Coordinator::Library(library_server::LibraryServer::from_runtime(
+                client.library(name)?,
+            ))
+        } else {
+            Coordinator::Configured(configured_server::ConfiguredServer::from_path(path, cwd)?)
+        };
+        let server = Server {
+            registry: Registry {
+                activity: crate::activity::ActivityRing::default(),
+                dbs: BTreeMap::new(),
+            },
+            library: Some(coordinator),
+            sessions: std::sync::Arc::new(Mutex::new(SessionState::default())),
+            cold_work: ColdWorkGate::default(),
+            capability: CapabilityPolicy::new(CapabilityProfile::ReadOnly, false),
+        };
+        return serve_selected_transport(server, args, "declarative configured stores").await;
+    }
     if let Some(path) = args.router_config.as_deref() {
         let server = Server {
             registry: Registry {
@@ -538,6 +578,9 @@ where
     let mut dbs = Vec::new();
     let mut library_config = None;
     let mut router_config = None;
+    let mut memory_config = None;
+    let mut cwd = None;
+    let mut configured_library = None;
     let mut http = None;
     let mut http_token_env = None;
     let mut cors_origin = None;
@@ -552,6 +595,26 @@ where
                     .split_once('=')
                     .ok_or_else(|| format!("--db expects NAME=PATH, got {spec:?}"))?;
                 dbs.push((name.to_string(), PathBuf::from(path)));
+            }
+            "--memory-config" => {
+                if memory_config.is_some() {
+                    return Err("--memory-config may be specified only once".into());
+                }
+                memory_config = Some(PathBuf::from(
+                    it.next().ok_or("--memory-config needs PATH")?,
+                ));
+            }
+            "--cwd" => {
+                if cwd.is_some() {
+                    return Err("--cwd may be specified only once".into());
+                }
+                cwd = Some(PathBuf::from(it.next().ok_or("--cwd needs WORKSPACE")?));
+            }
+            "--library" => {
+                if configured_library.is_some() {
+                    return Err("--library may be specified only once".into());
+                }
+                configured_library = Some(it.next().ok_or("--library needs NAME")?);
             }
             "--router-config" => {
                 if router_config.is_some() {
@@ -594,7 +657,7 @@ where
             "--allow-direct-feedback" => allow_direct_feedback = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: mneme-mcp [--db NAME=PATH]... [--capability-profile read-only|receipt-grounded|curator|operator] [--allow-direct-feedback (deprecated; operator only)] [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --library-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --router-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]]"
+                    "usage: mneme-mcp --memory-config PATH [--cwd WORKSPACE] [--library NAME] [--http IP:PORT] | mneme-mcp [--db NAME=PATH]... [--capability-profile read-only|receipt-grounded|curator|operator] [--allow-direct-feedback (deprecated; operator only)] [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --library-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --router-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]]"
                         .into(),
                 );
             }
@@ -603,6 +666,24 @@ where
     }
     if http.is_none() && (http_token_env.is_some() || cors_origin.is_some()) {
         return Err("--http-token-env and --cors-origin require --http".into());
+    }
+    if memory_config.is_some() {
+        if cwd.is_none() {
+            cwd = Some(
+                std::env::current_dir()
+                    .map_err(|_| "cannot capture declarative MCP startup workspace")?,
+            );
+        }
+        if router_config.is_some()
+            || library_config.is_some()
+            || !dbs.is_empty()
+            || capability_profile.is_some()
+            || allow_direct_feedback
+        {
+            return Err("--memory-config cannot combine owner/legacy coordinator settings".into());
+        }
+    } else if cwd.is_some() || configured_library.is_some() {
+        return Err("--cwd and --library require --memory-config".into());
     }
     if router_config.is_some()
         && (library_config.is_some()
@@ -634,6 +715,9 @@ where
         dbs,
         library_config,
         router_config,
+        memory_config,
+        cwd,
+        configured_library,
         http,
         capability_profile,
         allow_direct_feedback,

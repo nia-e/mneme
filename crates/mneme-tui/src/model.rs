@@ -13,6 +13,14 @@ pub struct Target {
     pub token_env: Option<String>,
     pub expected_db_id: Option<String>,
     pub expected_path: Option<String>,
+    /// Exact shared selection; none is a deliberate legacy/explicit-remote source.
+    pub configured: Option<ConfiguredTarget>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfiguredTarget {
+    pub selection: std::sync::Arc<mneme_config::SelectionSnapshot>,
+    pub store: String,
 }
 
 /// A known source is metadata, not an already opened connection.

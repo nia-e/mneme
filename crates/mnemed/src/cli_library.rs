@@ -16,6 +16,9 @@ pub(crate) struct LibraryArgs {
     /// $XDG_DATA_HOME/mneme/libraries/personal/library.json (or ~/.local/share).
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Name from the admitted declarative library inventory. Required when ambiguous.
+    #[arg(long, conflicts_with = "config")]
+    pub library: Option<String>,
     #[command(subcommand)]
     pub action: LibraryAction,
 }
@@ -233,6 +236,11 @@ fn render(action: &LibraryAction, value: &Value, json: bool) {
 }
 
 pub(crate) async fn run(args: &LibraryArgs, json: bool) -> Result<(), AnyErr> {
+    if args.library.is_some() {
+        return Err(
+            "library --library NAME requires a declarative memory.toml configuration".into(),
+        );
+    }
     // Validate the complete typed request before config load or source access.
     let query = match &args.action {
         LibraryAction::Query(search_args) | LibraryAction::RecallContext(search_args) => {
@@ -242,6 +250,43 @@ pub(crate) async fn run(args: &LibraryArgs, json: bool) -> Result<(), AnyErr> {
     };
     let config = crate::cli_library_config::resolve(args.config.as_deref())?;
     let library = LibraryRuntime::from_path(&config)?;
+    run_with(args, library, query, json).await
+}
+
+pub(crate) async fn run_configured(
+    args: &LibraryArgs,
+    snapshot: mneme_config::SelectionSnapshot,
+    json: bool,
+) -> Result<(), AnyErr> {
+    if args.config.is_some() {
+        return Err(
+            "do not combine explicit legacy library --config and declarative memory configuration"
+                .into(),
+        );
+    }
+    let query = match &args.action {
+        LibraryAction::Query(search_args) | LibraryAction::RecallContext(search_args) => {
+            Some(search(search_args)?)
+        }
+        _ => None,
+    };
+    let name = match args.library.as_deref() {
+        Some(name) => name.to_owned(),
+        None if snapshot.libraries.len() == 1 => snapshot.libraries.keys().next().unwrap().clone(),
+        None => return Err("declarative library selection is absent or ambiguous; inspect config select and use library --library NAME".into()),
+    };
+    let client =
+        mneme_store_client::ConfiguredClient::new(snapshot).map_err(|error| error.to_string())?;
+    let library = client.library(&name).map_err(|error| error.to_string())?;
+    run_with(args, library, query, json).await
+}
+
+async fn run_with(
+    args: &LibraryArgs,
+    library: LibraryRuntime,
+    query: Option<LibraryQuery>,
+    json: bool,
+) -> Result<(), AnyErr> {
     let value = match &args.action {
         LibraryAction::Catalog => library.catalog()?,
         LibraryAction::Query(_) => library.query(query.expect("validated query")).await?,

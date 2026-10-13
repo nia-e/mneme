@@ -44,6 +44,7 @@ CONFIG_SCHEMA_V9 = "mneme.codex-hooks.config.v9"
 CONFIG_SCHEMA_V10 = "mneme.codex-hooks.config.v10"
 CONFIG_SCHEMA_V11 = "mneme.codex-hooks.config.v11"
 CONFIG_SCHEMA_V12 = "mneme.codex-hooks.config.v12"
+CONFIG_SCHEMA_V13 = "mneme.codex-hooks.config.v13"
 STATE_SCHEMA = "mneme.codex-hooks.state.v2"
 LEGACY_STATE_SCHEMA = "mneme.codex-hooks.state.v1"
 MAX_STDIN = 64_000
@@ -212,8 +213,9 @@ def _config(path: Path, *, workspace_binding=None, cwd=None) -> dict[str, Any]:
     data, parsed_raw = _bounded_json(path, MAX_CONFIG, with_raw=True)
     if not isinstance(data, dict):
         raise HookError("invalid hook config schema")
-    if data.get("schema") == CONFIG_SCHEMA_V12:
-        from registry_runtime import load
+    if data.get("schema") in (CONFIG_SCHEMA_V12, CONFIG_SCHEMA_V13):
+        from registry_runtime import load, load_native
+        load = load_native if data["schema"] == CONFIG_SCHEMA_V13 else load
         try:
             return load(data, path, parsed_raw, workspace_binding=workspace_binding, cwd=cwd)
         except (ValueError, OSError, TypeError, KeyError) as error:
@@ -1196,9 +1198,11 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
         _admit_async_state(config, session_id)
     except (HookError, OSError, ValueError, AttributeError, TypeError, RecursionError, OverflowError):
         return _lifecycle_failure(event, background=background)
+    if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recall_mode") != "automatic" and config.get("recording_mode") != "automatic" and not config.get("_background_maintenance") and name not in ("SessionStart", "SessionEnd"):
+        return {}
     if background:
         recording = config.get("recording_mode") == "automatic"
-        if recording and name in ("Stop", "SessionEnd"):
+        if (recording or config.get("_background_maintenance")) and name in ("Stop", "SessionEnd"):
             try:
                 _reader_worker().background(config, event)
             except Exception:
@@ -1235,6 +1239,8 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
             pass
         recording_guidance = ("Optional off-thread recording is enabled; no actor checkpoint is required."
                               if config.get("recording_mode") == "automatic" else f"At a natural checkpoint: {_memory_choice(config)}")
+        if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recall_mode") != "automatic" and config.get("recording_mode") != "automatic" and not config.get("_background_maintenance"):
+            return _context(name, "Mneme background recall and recording are disabled for this selected workspace. Startup core and explicit permitted reads/writes remain independent.")
         scope_label = ("named-store selection" if "frozen_selection" in config else
                        "workshop user store" if config.get("memory_scope") == "workshop" else
                        "shared misc store for unconfigured work" if config.get("memory_scope") == "misc" else "project")
@@ -1276,7 +1282,11 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
             pass
         if not substantive:
             return {}
-        base = _opportunity_base(config, session_id, turn_id)
+        base = ("Selected Mneme stores retain their explicit permitted operations."
+                if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recording_mode") != "automatic"
+                else _opportunity_base(config, session_id, turn_id))
+        if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recall_mode") != "automatic":
+            return _context(name, base + (" Optional background maintenance is enabled." if config.get("_background_maintenance") else " Automatic task context is disabled."))
         suffix = (" Optional async project-memory cards, if available, "
                   "arrive only at a later tool boundary, not in this prompt hook. "
                   "Continue normal work; do not duplicate pending recall. Use explicit scoped recall "
@@ -1331,7 +1341,7 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
                 _recording_jobs().close_turn(config, session_id, turn_id, cancel=name == "Interrupt")
         except Exception:
             pass
-        if config.get("recording_mode") == "automatic" or name == "Interrupt" or event.get("stop_hook_active") is True:
+        if config.get("schema") == CONFIG_SCHEMA_V13 or config.get("recording_mode") == "automatic" or name == "Interrupt" or event.get("stop_hook_active") is True:
             return {}
         try:
             return _stop_checkpoint(config, session_id, turn_id, blocking=False)
@@ -1341,7 +1351,7 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
 
 
 def handle_event(event: Any, config: dict[str, Any], *, reader_background: bool = False) -> dict[str, Any]:
-    if config.get("schema") == CONFIG_SCHEMA_V12:
+    if config.get("schema") in (CONFIG_SCHEMA_V12, CONFIG_SCHEMA_V13):
         if (not isinstance(event, dict) or _subagent(event)
                 or not _valid_id(event.get("session_id")) or not _in_scope(event, config["project_root"])):
             return {}
@@ -1372,7 +1382,7 @@ def handle_event(event: Any, config: dict[str, Any], *, reader_background: bool 
             workshop_policy(config).validate_workspace(event.get("cwd") if isinstance(event, dict) else None)
         except (ValueError, OSError, TypeError):
             return {}
-    if isinstance(event, dict) and isinstance(event.get("cwd"), str):
+    if config.get("schema") != CONFIG_SCHEMA_V13 and isinstance(event, dict) and isinstance(event.get("cwd"), str):
         selection = select_for_cwd(event["cwd"])
         if selection["configured"] and selection["root"] != config["project_root"]:
             return {}

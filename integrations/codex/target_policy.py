@@ -55,8 +55,8 @@ class TargetPolicy:
 
     @classmethod
     def from_selected(cls, store, selection):
-        from store_registry import SelectedStore, Selection, revalidate
-        if not isinstance(store, SelectedStore) or not isinstance(selection, Selection):
+        from store_registry import SelectedStore, Selection, NativeSelection, revalidate
+        if not isinstance(store, SelectedStore) or not isinstance(selection, (Selection, NativeSelection)):
             raise ValueError("configured target requires a checked selected binding")
         current = revalidate(selection, store_name=store.name)
         actual = current.named(store.name)
@@ -143,7 +143,27 @@ class TargetPolicy:
         if hasattr(service, "state_dir") and not service.database_path.is_file():
             raise ValueError("project store is unavailable" if self.scope == "project" else "selected store is unavailable")
 
+    @property
+    def native(self):
+        return self.scope == "configured" and self._configured_store().native_binding is not None
+
+    @property
+    def guidance(self):
+        return self._configured_store().guidance if self.scope == "configured" else {}
+
     def catalog_identity(self, catalog, expected=None, *, require_id=True):
+        if self.native:
+            # Native config call verifies the selected live owner and returns a
+            # checked catalog projection. Match one explicit row; duplicates or
+            # another alias are not a reason to weaken legacy single-row checks.
+            if not isinstance(catalog, list):
+                raise ValueError("unexpected native owner catalog")
+            rows = [row for row in catalog if isinstance(row, dict) and row.get("db") == self.db_alias]
+            if (len(rows) != 1 or rows[0].get("name") != self.db_alias or rows[0].get("state") != "open"
+                    or rows[0].get("db_id") != self.db_id or expected is not None and expected != self.db_id
+                    or self.database_path and rows[0].get("resolved_path") != self.database_path):
+                raise ValueError("native selected database identity changed")
+            return self.db_id
         if (not isinstance(catalog, list) or len(catalog) != 1 or not isinstance(catalog[0], dict)
                 or catalog[0].get("db") != self.db_alias or catalog[0].get("name") != self.db_alias
                 or catalog[0].get("state") != "open"
@@ -185,7 +205,8 @@ def policy_for(service_config_path, root, store_target=None):
                 and service.database_path != root / ".mneme" / "codex-memory.db"):
             raise ValueError("project store boundary mismatch")
         policy = TargetPolicy("project", "project", str(service.database_path), None, str(root), str(path))
-    policy.validate_service(service)
+    if not getattr(service, "native_client", None):
+        policy.validate_service(service)
     return policy, service
 
 

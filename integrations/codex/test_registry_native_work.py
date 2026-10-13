@@ -177,6 +177,44 @@ class RegistryNativeWorkTests(unittest.TestCase, OverlapFixture):
                     self.assertEqual([tool for tool, _ in client.calls],
                                      ["databases"] if operation == "identity" else ["databases", "get"])
 
+    def test_measured_failed_identity_and_association_charge_exact_work(self):
+        for operation, failure_tool in (("identity", "databases"), ("association", "get")):
+            for mode in ("known", "unknown", "over_budget"):
+                with self.subTest(operation=operation, mode=mode):
+                    client = self.client()
+                    client.work_bytes = 0
+                    charged = [0]
+                    original = client.call_tool
+                    def read(tool, arguments):
+                        if tool == failure_tool:
+                            client.calls.append((tool, arguments))
+                            if mode != "unknown":
+                                client.work_bytes += self.budget.native_read_bytes if mode == "over_budget" else 13
+                            raise recall.McpError("owner unavailable")
+                        value = original(tool, arguments)
+                        client.work_bytes += recall._bytes(value)
+                        return value
+                    def measured(value):
+                        delta = client.work_bytes - charged[0]
+                        charged[0] = client.work_bytes
+                        return delta
+                    client.call_tool, client.measured_size = read, measured
+                    with patch("hook_recall.McpClient", return_value=client):
+                        result = (self.identity(spent_native_bytes=71) if operation == "identity" else
+                                  self.association(with_work=True, spent_native_bytes=71))
+                    self.assertEqual(result["outcome"], "unavailable")
+                    work = result["native_work"]
+                    if mode == "unknown":
+                        self.assertIsNone(work["decoded_bytes"])
+                        self.assertEqual(work["known_decoded_bytes"], 71 + client.work_bytes)
+                    else:
+                        self.assertEqual(work["decoded_bytes"], 71 + client.work_bytes)
+                        self.assertEqual(work["read_allowance_exhausted"], mode == "over_budget")
+                    if mode != "known":
+                        with patch("hook_recall._service_client") as later_owner:
+                            self.identity(spent_native_bytes=work["decoded_bytes"])
+                        later_owner.assert_not_called()
+
     def test_association_catalog_latency_does_not_restart_the_deadline(self):
         client = self.client()
         original = client.call_tool

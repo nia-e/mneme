@@ -7,6 +7,7 @@ exclude = ["vendor/mnestic"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+serde_json = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 ulid = { version = "1.2.1", features = ["serde"] }
 unordered-pair = { version = "0.2.5", features = ["serde"] }
@@ -19,6 +20,7 @@ url = "2.5"
 # Internal crates, referenced by path so dependency arrows stay explicit. Domain
 # code points toward `mneme-core`; the tiny store-path crate is infrastructure
 # shared only by process frontends/publication code.
+mneme-config = { path = "crates/mneme-config" }
 mneme-core = { path = "crates/mneme-core" }
 mneme-engine = { path = "crates/mneme-engine" }
 mneme-app = { path = "crates/mneme-app" }

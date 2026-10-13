@@ -86,6 +86,60 @@ class RegistryRecordingContractTests(unittest.TestCase):
         self.assertIsNotNone(prompt, context)
         return json.loads(prompt.split("PAYLOAD:\n", 1)[1]), context
 
+    def test_project_instruction_file_is_scoped_context_not_evidence_or_permission(self):
+        project = store("actual-project", PROJECT, kinds=["lesson"])
+        project["project_focus"] = "# hippocampus\n\nRemember experimental dead ends and why they failed."
+        other = store("unrelated-owner", PERSONAL)
+        packet, context = self.prepared([project, other])
+        first, second = packet["selected_stores"]
+        self.assertEqual(first["project_focus"], project["project_focus"])
+        self.assertNotIn("project_focus", second)
+        self.assertFalse(any(project["project_focus"] in item.text for item in context.bindings))
+        self.assertEqual(contract.validate_answer(answer("actual-project"), context)["proposal"].destination,
+                         "actual-project")
+        with self.assertRaisesRegex(ValueError, "destination_kind_denied"):
+            contract.validate_answer(answer("actual-project", kind="episode"), context)
+        with self.assertRaisesRegex(ValueError, "invalid_citation_reference"):
+            contract.validate_answer(answer("actual-project", evidence_ids=["project_focus"]), context)
+        for text in ("x"*2049, "\0"):
+            prompt, reason = contract.prepare(observation(), selected_stores=[{**project, "project_focus": text}])
+            self.assertIsNone(prompt)
+            self.assertEqual(reason, "invalid_project_focus")
+
+    def test_tag_guide_is_scoped_context_and_failure_disables_only_topics(self):
+        guided = store("guided", PROJECT)
+        guided["tag_guide"] = "# authored distinctions\nKeep exact editions distinct."
+        packet, context = self.prepared([guided])
+        self.assertEqual(packet["selected_stores"][0]["tag_guide"], guided["tag_guide"])
+        self.assertFalse(any(guided["tag_guide"] in binding.text for binding in context.bindings))
+        self.assertEqual(contract.validate_answer(answer("guided", tags=["editions"]), context)["proposal"].tags,
+                         ("editions",))
+        failed = store("same-owner", PROJECT, required_tags=["collaboration-preference"])
+        failed["tagging_enabled"] = False
+        packet, context = self.prepared([failed])
+        self.assertFalse(packet["selected_stores"][0]["tagging_enabled"])
+        self.assertEqual(contract.validate_answer(answer("same-owner"), context)["proposal"].tags,
+                         ("collaboration-preference",))
+        with self.assertRaisesRegex(ValueError, "destination_tagging_unavailable"):
+            contract.validate_answer(answer("same-owner", tags=["new-topic"]), context)
+        for changes in ({"tagging_enabled": 1}, {"tag_guide": "x"*2049},
+                        {"tagging_enabled": False, "tag_guide": "cannot be consulted"}):
+            prompt, reason = contract.prepare(observation(), selected_stores=[{**guided, **changes}])
+            self.assertIsNone(prompt)
+            self.assertEqual(reason, "invalid_selected_tag_guidance")
+
+    def test_user_only_capture_requires_root_user_not_later_relabelled_message(self):
+        selected = [store("arbitrary-user-lane", PROJECT, evidence_kinds=["user_statement"])]
+        source = observation()
+        source["evidence"][1] = {"kind": "user_statement", "ref": source["evidence"][1]["ref"],
+            "content": [{"content_index": 0, "text": "later message is not the admitted root"}]}
+        prompt, context = contract.prepare(source, selected_stores=selected)
+        self.assertIsNotNone(prompt)
+        self.assertEqual(contract.validate_answer(answer("arbitrary-user-lane"), context)["proposal"].evidence[0].kind,
+                         "user_statement")
+        with self.assertRaisesRegex(ValueError, "destination_root_user_evidence_required"):
+            contract.validate_answer(answer("arbitrary-user-lane", evidence_ids=["e002"]), context)
+
     def test_one_finite_schema_has_three_destinations_not_readonly(self):
         packet, context = self.prepared()
         self.assertEqual([s["name"] for s in packet["selected_stores"]], ["project", "personal", "scratch"])

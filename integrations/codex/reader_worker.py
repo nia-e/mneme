@@ -303,7 +303,7 @@ def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> 
         cue = ("Recent task: " + data["prior"] + "\n" if data["prior"] else "") + "Current task: " + _short(prompt, MAX_PROMPT)
         data["active"] = {"turn": turn, "request": digest, "epoch": data["epoch"],
                           "cue": cue, "closed": False}
-        if not substantive or not prompt.strip():
+        if not substantive or not prompt.strip() or config.get("schema") == "mneme.codex-hooks.config.v13" and config.get("recall_mode") != "automatic":
             return "skipped", True
         data["prior"] = _fragment(prompt)
         if data["unknown_usage"] or data["attempts"] >= resolve(config).attempts or data["input_tokens"] >= resolve(config).input_tokens or data["output_tokens"] >= resolve(config).output_tokens:
@@ -488,7 +488,8 @@ def _alive(pid: Any, identity=None) -> bool:
 def background(config: dict[str, Any], event: dict[str, Any]):
     """Async hook: wait briefly for sync notice, then launch at most one worker."""
     recording = config.get("recording_mode") == "automatic"
-    closing = recording and event.get("hook_event_name") in ("Stop", "SessionEnd")
+    maintenance = config.get("_background_maintenance") is True
+    closing = (recording or maintenance) and event.get("hook_event_name") in ("Stop", "SessionEnd")
     identity = ((event["session_id"], event.get("turn_id"))
                 if closing and isinstance(event.get("session_id"), str) and ID.fullmatch(event["session_id"])
                 else _identity(event, prompt=True))
@@ -507,7 +508,7 @@ def background(config: dict[str, Any], event: dict[str, Any]):
             pending = data["pending"]
             reader_work = (isinstance(pending, dict) and isinstance(active, dict)
                            and (closing or (active.get("turn") == turn and active.get("request") == digest)))
-            if not recording_work and not reader_work:
+            if not recording_work and not reader_work and not maintenance:
                 return "not_ready", False
             if _alive(data.get("worker_pid"), data.get("worker_identity")):
                 return "running", False
@@ -516,7 +517,7 @@ def background(config: dict[str, Any], event: dict[str, Any]):
                 return "no_config", False
             try:
                 command = [sys.executable, str(Path(__file__).resolve()), "--serve", "--config", str(config_path), "--session-id", session]
-                if config.get("memory_scope") in ("misc", "registry"):
+                if config.get("memory_scope") in ("misc", "registry") and "workspace_binding" in config:
                     binding = json.dumps(config["workspace_binding"], ensure_ascii=False, separators=(",", ":"))
                     if len(binding.encode()) > MAX_WORKSPACE_BINDING:
                         return "no_config", False
@@ -1034,7 +1035,8 @@ def _registry_read_start(config, session_id):
         return None
     try:
         from registry_runtime import selection
-        stores = selection(config).readable
+        selected = selection(config)
+        stores = getattr(selected, "recallable", selected.readable)
         if not stores:
             return None
         keys = [store.db_id or "project:" + store.name for store in stores]
@@ -1154,7 +1156,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
             if not ok:
                 break
             if job == "rotated":
-                handoff = config.get("recording_mode") == "automatic"
+                handoff = config.get("recording_mode") == "automatic" or config.get("_background_maintenance") is True
                 break
             if job is None or job == "end":
                 if config.get("recording_mode") == "automatic":

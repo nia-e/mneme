@@ -59,6 +59,7 @@ mod bootstrap;
 mod cli_capture;
 mod cli_client;
 mod cli_concern;
+mod cli_config;
 mod cli_edit_body;
 mod cli_edit_summary;
 mod cli_episode;
@@ -112,7 +113,7 @@ type Backend = (
     name = "mnemed",
     version,
     about = "A traversable memory graph for agents",
-    after_help = "Ordinary commands use the configured MCP owner: project .mneme/cli.json by default, or $XDG_CONFIG_HOME/mneme/cli.json (~/.config/mneme/cli.json) with --user. Missing or unavailable owners never fall back to opening a database. --db/MNEME_DB explicitly selects offline storage; --remote overrides enrollment. Bootstrap, creation, migration and index replacement retain explicit offline authority. See docs/remote-cli.md for connection configuration and deliberate surface differences.",
+    after_help = "Ordinary commands use the configured MCP owner: shared memory.toml configuration (user + project overlay) when present; --store NAME selects an admitted named store. Legacy project .mneme/cli.json remains an explicit pre-migration workflow when no declarative config exists. Missing or unavailable owners never fall back to opening a database. --db/MNEME_DB explicitly selects offline storage; --remote overrides enrollment. Bootstrap, creation, migration and index replacement retain explicit offline authority. See docs/remote-cli.md for connection configuration and deliberate surface differences.",
     before_help = "START HERE\n  Read:      recall-context TEXT for bounded model context; episode list for the timeline; library catalog for enrolled projects.\n  Inspect:   tui for the memory observatory; get ID for node details; body ID for a bounded body range.\n  Write:     save TEXT for a note; save --kind episode TEXT for an experience; init sets up project memory and Codex hippocampus (use --no-recording to disable automatic recording); capture init with --db PATH explicitly initializes absent storage. Compatibility: capture add --input PATH and episode append --input PATH.\n  Curate:    edit-summary ID for guarded summary replacement; edit-body ID for guarded body replacement; retag ID for guarded complete tag replacement; concern --input PATH for bounded advisory maintenance; status, then reconcile or merge reviewed conflicts.\n  Maintain:  decay and prune are explicit edge sweeps.\n\nUse 'mnemed COMMAND --help' for arguments and recovery details."
 )]
 struct Cli {
@@ -127,6 +128,15 @@ struct Cli {
     /// Emit JSON instead of human-readable text.
     #[arg(long, global = true)]
     json: bool,
+    /// Shared declarative memory configuration; defaults to ~/.config/mneme/memory.toml.
+    #[arg(long, global = true, conflicts_with_all = ["db", "remote"])]
+    memory_config: Option<PathBuf>,
+    /// Deliberate named-store access within the current profile/exclusion boundary.
+    #[arg(long, global = true, conflicts_with_all = ["db", "remote", "user"])]
+    store: Option<String>,
+    /// Narrow selection with the shared default, private or isolated profile.
+    #[arg(long, global = true, conflicts_with_all = ["db", "remote"])]
+    profile: Option<String>,
     #[command(flatten)]
     connection: remote_config::RemoteOptions,
     #[command(subcommand)]
@@ -186,6 +196,8 @@ fn project_db() -> std::io::Result<PathBuf> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect shared configuration or invoke a bounded, selection-pinned native operation.
+    Config(cli_config::ConfigArgs),
     /// Internal bounded local MCP client process.
     #[command(hide = true)]
     Client(cli_client::ClientArgs),
@@ -857,7 +869,25 @@ async fn main() -> Result<(), AnyErr> {
     #[cfg(windows)]
     require_windows_offline_operation_supported(&cli.command)?;
 
+    if let Command::Config(args) = &cli.command {
+        if cli.db.is_some()
+            || cli.user
+            || cli.connection.remote.is_some()
+            || (cli.store.is_some() && !args.is_call())
+            || cli.memory_config.is_some()
+        {
+            return Err("config commands use their own --config/--cwd selectors, not database or global owner selectors".into());
+        }
+        return cli_config::run(args, cli.profile.as_deref(), json).await;
+    }
+
     if let Command::Init(args) = &cli.command {
+        if cli.memory_config.is_some() || cli.store.is_some() || cli.profile.is_some() {
+            return cli_init::refuse(
+                "init is explicit project setup; do not mix declarative owner selectors",
+                json,
+            );
+        }
         if cli.user || cli.db.is_some() || cli.connection.remote.is_some() {
             return cli_init::refuse(
                 "init forbids --db/MNEME_DB, --user and --remote; use init --root PATH for local project setup",
@@ -868,6 +898,11 @@ async fn main() -> Result<(), AnyErr> {
     }
 
     if let Command::Client(args) = cli.command {
+        if cli.memory_config.is_some() || cli.store.is_some() || cli.profile.is_some() {
+            return Err(
+                "legacy client does not accept declarative selectors; use config call".into(),
+            );
+        }
         if cli.user || cli.db.is_some() || cli.connection.remote.is_some() || cli.json {
             return Err("client forbids database, remote, user, and JSON global options".into());
         }
@@ -875,23 +910,80 @@ async fn main() -> Result<(), AnyErr> {
     }
 
     if let Command::Tui(args) = &cli.command {
-        return cli_tui::run(args, &cli.connection, cli.user, cli.db.as_deref(), json).await;
+        return cli_tui::run(
+            args,
+            &cli.connection,
+            cli.user,
+            cli.db.as_deref(),
+            cli.memory_config.as_deref(),
+            cli.store.as_deref(),
+            cli.profile.as_deref(),
+            json,
+        )
+        .await;
     }
 
     if let Command::Stores(args) = &cli.command {
+        if args.config.is_none() && cli.connection.remote.is_none() && cli.db.is_none() {
+            if let Some(snapshot) =
+                cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref())?
+            {
+                return cli_config::render_selection(&snapshot, json);
+            }
+        }
         return cli_sources::run(args, &cli.connection, cli.user, cli.db.as_deref(), json);
     }
 
     // Library refs are a separate, immutable product. Never interpret global
     // database or remote selectors as fallbacks for their config path.
     if let Command::Library(args) = &cli.command {
-        if cli.db.is_some() || cli.user || cli.connection.remote.is_some() {
+        if cli.db.is_some() || cli.user || cli.connection.remote.is_some() || cli.store.is_some() {
+            return Err("library forbids database/remote/store selectors; use --memory-config PATH and library --library NAME, or deliberate legacy library --config PATH".into());
+        }
+        if args.config.is_none() {
+            if let Some(snapshot) =
+                cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref())?
+            {
+                return cli_library::run_configured(args, snapshot, json).await;
+            }
+        } else if cli.memory_config.is_some() || cli.profile.is_some() {
             return Err(
-                "library forbids --db/MNEME_DB, --user and --remote; use library --config PATH"
-                    .into(),
+                "do not mix declarative selection with explicit legacy library --config".into(),
             );
         }
         return cli_library::run(args, json).await;
+    }
+
+    if matches!(
+        cli.command,
+        Command::BootstrapInspect(_) | Command::BootstrapCreate(_) | Command::Demo { .. }
+    ) && (cli.memory_config.is_some() || cli.store.is_some() || cli.profile.is_some())
+    {
+        return Err(
+            "this explicit repository/demo command does not accept declarative owner selectors"
+                .into(),
+        );
+    }
+
+    // Declarative configuration is authoritative when present. No legacy owner,
+    // misc or local-storage fallback follows a declared selection refusal.
+    if cli.db.is_none() && cli.connection.remote.is_none() && !cli_config::independent(&cli.command)
+    {
+        if let Some(snapshot) =
+            cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref())?
+        {
+            return cli_config::run_command(
+                &cli.command,
+                snapshot,
+                cli.store.as_deref(),
+                cli.user,
+                json,
+            )
+            .await;
+        }
+        if cli.store.is_some() || cli.profile.is_some() {
+            return Err("--store/--profile requires a declarative memory.toml configuration; use --memory-config PATH".into());
+        }
     }
 
     // Remote mode is a client of the existing owner, never an alternative store
@@ -1039,7 +1131,7 @@ async fn main() -> Result<(), AnyErr> {
     }
 
     match cli.command {
-        Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) => {
+        Command::Config(_) | Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) => {
             unreachable!("library handled before connection/store admission")
         }
         Command::Snapshot { .. } => Err("snapshot create requires an existing MCP owner; omit --db and configure the owner, or select --remote URL".into()),
@@ -2284,7 +2376,7 @@ async fn dispatch(
         Command::Library(_) | Command::Tui(_) | Command::Stores(_) | Command::Snapshot { .. } => {
             unreachable!("handled before local store admission")
         }
-        Command::Init(_) | Command::Client(_) => {
+        Command::Config(_) | Command::Init(_) | Command::Client(_) => {
             unreachable!("init/client handled before remote/store admission")
         }
         Command::BootstrapInspect(_) => unreachable!("bootstrap-inspect handled in main"),

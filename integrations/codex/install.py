@@ -22,18 +22,19 @@ except ImportError:
 
 SCHEMA = "mneme.codex-install.v1"
 HOST_PLATFORM = "windows" if os.name == "nt" else "posix"
-CONFIG_REVISION = 24
-EXISTING_SERVICE_REVISION = 25
-EXISTING_SERVICE_REVISIONS = (21, 23, EXISTING_SERVICE_REVISION)
-SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
+CONFIG_REVISION = 26
+EXISTING_SERVICE_REVISION = 27
+EXISTING_SERVICE_REVISIONS = (21, 23, 25, EXISTING_SERVICE_REVISION)
+SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
 END = "# END mneme-codex-v1"
-PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py", "host_files.py", "host_process.py", "host_platform.py", "store_registry.py", "registry_config.py", "registry_runtime.py", "registry_reader.py", "registry_recording.py", "core_hook.py")
+PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py", "host_files.py", "host_process.py", "host_platform.py", "store_registry.py", "registry_config.py", "registry_runtime.py", "registry_reader.py", "registry_recording.py", "core_hook.py", "guidance.py")
 LEGACY_TOOLS = ["recall_context", "get", "capture", "supersede", "status"]
 EPISODE_TOOLS = [*LEGACY_TOOLS, "episode"]
 SAVE_TOOLS = [*EPISODE_TOOLS, "save"]
 TOOLS = [*SAVE_TOOLS, "concern"]
+NATIVE_TOOLS = ["core", "recall_context", "get", "list", "neighbors", "save", "episode", "status"]
 MAX_CONFIG_BYTES = 1024 * 1024
 CONFIG_NAMES = ("config.toml", "hooks.json")
 LEGACY_DESTINATIONS = (("bin/mnemed", True), ("bin/mneme-mcp", True),
@@ -51,7 +52,8 @@ V16_DESTINATIONS = (*V14_DESTINATIONS, ("lib/touchstone_contract.py", False))
 V19_DESTINATIONS = (*V16_DESTINATIONS, ("lib/target_policy.py", False))
 V20_DESTINATIONS = (*V19_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[21:24]))
 V22_DESTINATIONS = (*V20_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[24:28]))
-DESTINATIONS = (*V22_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[28:]))
+V24_DESTINATIONS = (*V22_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[28:37]))
+DESTINATIONS = (*V24_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[37:]))
 RECALL_MODES = ("reminder", "automatic", "shadow", "async")
 RECORDING_MODES = ("off", "automatic")
 SHADOW_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra")
@@ -146,6 +148,26 @@ def revalidate_store_registry(plan):
         raise ValueError("store registry changed since prepare; prepare a new plan")
 
 
+def memory_config_input(path, native_cli, cwd, snapshot=None):
+    """One native bounded selection; never interpret TOML policy in Python."""
+    from store_registry import native_select
+    path = Path(path)
+    if not path.is_absolute() or path.resolve(strict=True) != path:
+        raise ValueError("memory config must be a canonical absolute regular file")
+    if snapshot is None:
+        snapshot = native_select(str(path), str(native_cli), str(cwd)).snapshot
+    return {"path": str(path), "digest": snapshot["digest"], "sources": snapshot["sources"]}
+
+
+def revalidate_memory_config(plan):
+    if "memory_config" not in plan:
+        return
+    native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mnemed"))
+    pin = plan["memory_config"]
+    if memory_config_input(pin["path"], native["source"], plan["project_root"]) != pin:
+        raise ValueError("memory config changed since prepare; prepare a new plan")
+
+
 def existing_service_input(path):
     """One bounded, regular-file managed config read; never probe its owner."""
     from service import MAX_CONFIG_BYTES as limit, _unique_config_fields
@@ -185,8 +207,14 @@ def validate_existing_service(plan):
             or str(config.working_directory) != plan["project_root"] or config.port != plan["port"]):
         raise ValueError("existing service does not match the exact project, database and port")
     native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mneme-mcp"))
-    if str(config.binary) != native["source"]:
+    if "memory_config" not in plan and str(config.binary) != native["source"]:
         raise ValueError("existing service binary must be the selected MCP source")
+    if "memory_config" in plan:
+        owner = plan.get("existing_owner_binary")
+        if (not isinstance(owner, dict) or set(owner) != {"source", "sha256"}
+                or owner["source"] != str(config.binary)
+                or not isinstance(owner["sha256"], str) or not HEX_SHA256.fullmatch(owner["sha256"])):
+            raise ValueError("native install requires a separately pinned retained owner binary")
     return pin
 
 
@@ -198,6 +226,7 @@ def revalidate_existing_service(plan):
     if existing_service_input(pin["source"]) != pin:
         raise ValueError("existing service config changed; prepare a new plan")
     native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mneme-mcp"))
+    native = plan.get("existing_owner_binary", native)
     binary = Path(native["source"])
     if (binary.resolve() != binary or not is_executable(binary)
             or digest(binary.read_bytes()) != native["sha256"]):
@@ -315,6 +344,22 @@ def validate_plan(plan):
             raise ValueError("invalid store registry pin")
     elif "store_registry_sha256" in plan:
         raise ValueError("store registry pin has no target")
+    if "memory_config" in plan:
+        pin = plan["memory_config"]
+        if (revision < 26 or plan["recall_mode"] != "async"
+                or not isinstance(pin, dict) or set(pin) != {"path", "digest", "sources"}
+                or not isinstance(pin["path"], str) or not Path(pin["path"]).is_absolute()
+                or not isinstance(pin["digest"], str) or not HEX_SHA256.fullmatch(pin["digest"])
+                or not isinstance(pin["sources"], list) or len(pin["sources"]) > 8
+                or any(not isinstance(source, dict) or set(source) != {"role", "path", "sha256"}
+                    or not isinstance(source["role"], str) or len(source["role"]) > 128
+                    or not isinstance(source["path"], str) or not Path(source["path"]).is_absolute()
+                    or not isinstance(source["sha256"], str) or not HEX_SHA256.fullmatch(source["sha256"])
+                    for source in pin["sources"])
+                or "store_registry" in plan or "global_preferences" in plan):
+            raise ValueError("invalid native memory config pin")
+    elif "existing_owner_binary" in plan:
+        raise ValueError("retained owner binary requires native memory config")
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
     if not root.is_absolute() or not prefix.is_absolute() or not root.is_dir() or root.is_symlink():
         raise ValueError("plan paths must be absolute and project must be a real directory")
@@ -334,7 +379,9 @@ def validate_plan(plan):
     validate_tag_config(plan)
     if revision >= 24 and plan.get("host_platform") not in ("windows", "posix"):
         raise ValueError("invalid planned host platform")
-    expected_destinations = (current_destinations(plan_platform(plan)) if revision >= 24 else
+    expected_destinations = (current_destinations(plan_platform(plan)) if revision >= 26 else
+                             tuple((name + ".exe" if executable and plan_platform(plan) == "windows" else name, executable)
+                                   for name, executable in V24_DESTINATIONS) if revision >= 24 else
                              V22_DESTINATIONS if revision >= 22 else
                              V20_DESTINATIONS if revision >= 20 else
                              V19_DESTINATIONS if revision >= 17 else
@@ -397,6 +444,10 @@ def hook_handlers(command, *, async_mode, recording, revision=CONFIG_REVISION, r
 
 def planned_hook_handlers(plan):
     """Regenerate only the lifecycle definitions bound to this reviewed plan."""
+    if "memory_config" in plan:
+        # Native configuration is consumed by the one device hook actor; project
+        # MCP setup must not install an additive second reader/recorder lifecycle.
+        return {}
     prefix = Path(plan["prefix"])
     revision = plan.get("config_revision", 1)
     argv = [plan["python"], str(prefix / "lib/hooks.py"), "--config", str(prefix / "config/hooks.json")]
@@ -430,7 +481,11 @@ def config_outputs(plan, before):
     if SERVER in parsed.get("mcp_servers", {}) or BEGIN.encode() in old:
         raise ValueError("mneme_project configuration already exists; do not overwrite it")
     block = f"\n{BEGIN}\n[mcp_servers.{SERVER}]\n"
-    if revision >= 3:
+    if "memory_config" in plan:
+        block += (f"command = {toml_value(str(prefix / binary_destination(plan, 'mneme-mcp')))}\n"
+                  f"args = {toml_value(['--memory-config', plan['memory_config']['path'], '--cwd', str(root)])}\n"
+                  "startup_timeout_sec = 30\n")
+    elif revision >= 3:
         block += (f"command = {toml_value(plan['python'])}\n"
                   f"args = {toml_value([str(prefix / 'lib/launcher.py'), '--service-config', str(prefix / 'config/service.json')])}\n"
                   "startup_timeout_sec = 30\n")
@@ -439,7 +494,7 @@ def config_outputs(plan, before):
     # Reviewed older receipts must retain their exact tool authorization and
     # output hashes for recovery/uninstall. Episode enrollment is revision 7;
     # canonical SAVE authorization starts only with revision 12, concern with 13.
-    tools = TOOLS if revision >= 13 else SAVE_TOOLS if revision >= 12 else EPISODE_TOOLS if revision >= 7 else LEGACY_TOOLS
+    tools = NATIVE_TOOLS if "memory_config" in plan else TOOLS if revision >= 13 else SAVE_TOOLS if revision >= 12 else EPISODE_TOOLS if revision >= 7 else LEGACY_TOOLS
     block += f"enabled_tools = {json.dumps(tools)}\n"
     if revision >= 2:
         # No server default, sandbox change, or global approval. Only the
@@ -467,8 +522,15 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
             program_root=None, library_helper=None, enroll_existing=False,
             shadow_model=None, shadow_codex=None, reader_model=None, reader_codex=None,
             recording_mode="off", librarian_effort=None, global_preferences=None,
-            store_registry=None, existing_service_config=None, tag_stewardship=None, tag_guide_id=None):
+            store_registry=None, existing_service_config=None, tag_stewardship=None, tag_guide_id=None, memory_config=None):
     project_root, prefix = Path(project_root).absolute(), Path(prefix).absolute()
+    native_pin = None
+    if memory_config is not None:
+        if (store_registry is not None or global_preferences is not None or reader_model is not None
+                or librarian_effort is not None or recording_mode != "off"
+                or tag_stewardship is not None or tag_guide_id is not None
+                or recall_mode not in ("reminder", "async") or library_helper is not None or enroll_existing):
+            raise ValueError("native memory config cannot be combined with independent hook policy or enrollment")
     if not project_root.is_dir() or project_root.is_symlink():
         raise ValueError("project root must be an existing real directory")
     if prefix.exists():
@@ -481,6 +543,16 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         raise ValueError("recording mode must be off or automatic")
     if recording_mode == "automatic" and recall_mode != "async":
         raise ValueError("automatic recording requires --recall-mode async")
+    if memory_config is not None:
+        memory_path = Path(memory_config)
+        if not memory_path.is_absolute() or memory_path.resolve(strict=True) != memory_path:
+            raise ValueError("memory config must be a canonical absolute regular file")
+        from store_registry import native_select
+        snapshot = native_select(str(memory_config), str(Path(mnemed).resolve(strict=True)), str(project_root)).snapshot
+        native_pin = memory_config_input(memory_config, Path(mnemed).resolve(strict=True), project_root, snapshot)
+        background = snapshot["config"]["background"]
+        recall_mode, reader_model = "async", background.get("model") or MODEL
+        librarian_effort = background.get("effort") or "medium"
     from tag_config import prepared_fields
     tag_fields = prepared_fields(recording_mode, tag_stewardship, tag_guide_id)
     if recall_mode != "async" and tag_guide_id is not None:
@@ -586,7 +658,17 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         plan["store_registry"] = store_registry
         plan["store_registry_sha256"] = registry_pin
         plan["authority"] = "project operator with explicit named store registry; direct feedback disabled"
+    if native_pin is not None:
+        plan["memory_config"] = native_pin
+        plan["authority"] = "native config grants; one device hook actor; no project hook lifecycle"
+        plan["does_not"].append("install project hooks; device hooks are prepared separately")
     if existing_service_config is not None:
+        if native_pin is not None:
+            source = existing_service_input(existing_service_config)["config"]["binary"]
+            binary = Path(source)
+            if binary.resolve(strict=True) != binary or not is_executable(binary):
+                raise ValueError("retained owner binary must be a canonical executable")
+            plan["existing_owner_binary"] = {"source": source, "sha256": digest(binary.read_bytes())}
         plan["config_revision"] = EXISTING_SERVICE_REVISION
         plan["existing_service_config"] = existing_service_input(existing_service_config)
         revalidate_existing_service(plan)
@@ -678,6 +760,11 @@ def runtime_configs(plan):
         if "store_registry" in plan:
             hook.update(schema="mneme.codex-hooks.config.v12", store_registry=plan["store_registry"])
 
+    if "memory_config" in plan:
+        hook = {"schema": "mneme.codex-hooks.config.v13", "memory_config": plan["memory_config"]["path"],
+                "native_cli": str(prefix / binary_destination(plan, "mnemed")),
+                "state_dir": str(root / ".mneme/codex-hook-state"),
+                "reader_codex": reader_codex["source"], "reader_codex_sha256": reader_codex["sha256"]}
     return service, hook
 
 
@@ -706,6 +793,7 @@ def apply(plan):
     for row in plan["files"]:
         if digest(Path(row["source"]).read_bytes()) != row["sha256"]:
             raise ValueError("installation source changed; prepare a new plan")
+    revalidate_memory_config(plan)
     helper = plan["library_helper"]
     if helper is not None and digest(Path(helper["source"]).read_bytes()) != helper["sha256"]:
         raise ValueError("library helper changed; prepare a new plan")
@@ -865,6 +953,8 @@ def main():
                       help="async low/medium/high resource preset; default medium (not a spending cap)")
     prep.add_argument("--reader-codex", type=Path,
                       help="required absolute Codex executable for the async reader; its hash is pinned")
+    prep.add_argument("--memory-config", type=Path,
+                      help="native memory.toml policy; installs configured MCP only; device hooks prepared separately")
     prep.add_argument("--store-registry", type=Path,
                       help="explicit reviewed named-store registry; async only; not combined with global preferences")
     prep.add_argument("--global-preferences", type=Path,
@@ -891,7 +981,7 @@ def main():
                            recording_mode=args.recording_mode,
                            tag_stewardship=args.tag_stewardship, tag_guide_id=args.tag_guide_id,
                            existing_service_config=args.existing_service_config,
-                           store_registry=args.store_registry,
+                           store_registry=args.store_registry, memory_config=args.memory_config,
                            global_preferences=(global_preferences_input(args.global_preferences)
                                                if args.global_preferences is not None else None))
             args.output.parent.mkdir(parents=True, exist_ok=True)

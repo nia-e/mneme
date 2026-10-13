@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-use mneme_mcp_client::{ClientTimeouts, ConnectionOptions, RemoteClient};
+use mneme_mcp_client::{ClientTimeouts, ConnectionOptions, RemoteClient as NativeRemoteClient};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -19,6 +19,134 @@ const NEIGHBORS: usize = 32;
 const SUMMARY_BYTES: usize = 2048;
 const BODY_BYTES: usize = 8192;
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Both observatory routes use one interface. Configured calls stay behind the
+/// shared checked client; an exact cache witness persists across follow-ups.
+enum ReadClient {
+    Legacy(NativeRemoteClient),
+    Configured {
+        client: mneme_store_client::ConfiguredClient,
+        store: String,
+        catalog: Vec<Value>,
+        source: Option<Value>,
+        budget: mneme_store_client::OperationBudget,
+    },
+}
+impl ReadClient {
+    #[cfg(test)]
+    async fn connect(options: &ConnectionOptions) -> Result<Self, Error> {
+        Ok(Self::Legacy(NativeRemoteClient::connect(options).await?))
+    }
+    async fn connect_with_timeouts(
+        options: &ConnectionOptions,
+        timeouts: ClientTimeouts,
+    ) -> Result<Self, Error> {
+        Ok(Self::Legacy(
+            NativeRemoteClient::connect_with_timeouts(options, timeouts).await?,
+        ))
+    }
+    async fn configured(target: &crate::model::ConfiguredTarget) -> Result<Self, Error> {
+        let client = mneme_store_client::ConfiguredClient::for_explicit(
+            (*target.selection).clone(),
+            &target.store,
+        )?;
+        let mut budget = mneme_store_client::OperationBudget::new(1024 * 1024, TIMEOUT)?;
+        let catalog = client
+            .catalog_with_budget(&target.store, &mut budget)
+            .await?;
+        Ok(Self::Configured {
+            client,
+            store: target.store.clone(),
+            catalog,
+            source: None,
+            budget,
+        })
+    }
+    fn tool_catalog(&self) -> &[Value] {
+        match self {
+            Self::Legacy(client) => client.tool_catalog(),
+            Self::Configured { catalog, .. } => catalog,
+        }
+    }
+    fn advertises(&self, tool: &str) -> bool {
+        mneme_mcp_client::CatalogView(self.tool_catalog()).advertises(tool)
+    }
+    fn supports_expected_db_id(&self, tool: &str, action: Option<&str>) -> bool {
+        mneme_mcp_client::CatalogView(self.tool_catalog()).supports_expected_db_id(tool, action)
+    }
+    // Erase this adapter future at the real transport boundary. Otherwise a
+    // default-feature owner's retrieval future makes the observatory worker's
+    // Send proof exceed the compiler's recursion depth when nested under timeouts.
+    fn call_tool<'a>(
+        &'a mut self,
+        tool: &'a str,
+        mut arguments: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Error>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match self {
+                Self::Legacy(client) => client.call_tool(tool, arguments).await,
+                Self::Configured {
+                    client,
+                    store,
+                    source,
+                    budget,
+                    ..
+                } => {
+                    if let Some(witness) = source.as_ref() {
+                        arguments["_mneme_source"] = witness.clone();
+                    }
+                    arguments["db"] = json!(store);
+                    let result = client
+                        .call_with_budget(store, tool, arguments, budget)
+                        .await?;
+                    if let Some(witness) = result.get("_mneme_source") {
+                        if source.as_ref().is_some_and(|selected| selected != witness) {
+                            return Err(
+                                "observatory source edition changed; reopen deliberately".into()
+                            );
+                        }
+                        *source = Some(witness.clone());
+                    }
+                    if result.get("_mneme_source").is_some() && result.get("result").is_some() {
+                        Ok(result["result"].clone())
+                    } else {
+                        Ok(result)
+                    }
+                }
+            }
+        })
+    }
+    fn cache_source(&self) -> Option<&Value> {
+        if let Self::Configured { source, .. } = self {
+            source.as_ref()
+        } else {
+            None
+        }
+    }
+    fn begin_operation(&mut self) -> Result<(), Error> {
+        if let Self::Configured { budget, .. } = self {
+            *budget = mneme_store_client::OperationBudget::new(1024 * 1024, TIMEOUT)?;
+        }
+        Ok(())
+    }
+    async fn close(&mut self) {
+        match self {
+            Self::Legacy(client) => client.close().await,
+            Self::Configured { client, .. } => client.close().await,
+        }
+    }
+}
+
+/// Discard failed transports, not the immutable source selected by earlier
+/// successful reads. A later user request must not silently switch cache editions.
+async fn discard_client(client: &mut Option<ReadClient>) {
+    if let Some(ReadClient::Configured { client, .. }) = client {
+        client.close().await;
+    } else if let Some(mut connection) = client.take() {
+        connection.close().await;
+    }
+}
 
 #[derive(Default)]
 struct Observer {
@@ -59,9 +187,7 @@ pub async fn serve(target: Target, mut requests: Receiver<Request>, responses: S
         {
             Ok(response) => response,
             Err(error) => {
-                if let Some(mut connection) = client.take() {
-                    connection.close().await;
-                }
+                discard_client(&mut client).await;
                 Response::Error(text(&error.to_string(), 1024))
             }
         };
@@ -77,16 +203,21 @@ pub async fn serve(target: Target, mut requests: Receiver<Request>, responses: S
 async fn execute(
     target: &Target,
     request: &Request,
-    client: &mut Option<RemoteClient>,
+    client: &mut Option<ReadClient>,
     pinned_id: &mut Option<String>,
     observer: &mut Observer,
     verified_connection: &mut bool,
 ) -> Result<Response, Error> {
     validate_request(request)?;
+    if let Some(client) = client {
+        client.begin_operation()?;
+    }
     if client.is_none() {
         *verified_connection = false;
-        *client = Some(
-            RemoteClient::connect_with_timeouts(
+        *client = Some(if let Some(configured) = &target.configured {
+            ReadClient::configured(configured).await?
+        } else {
+            ReadClient::connect_with_timeouts(
                 &ConnectionOptions {
                     url: target.url.clone(),
                     ssh_mcp_port: target.ssh_mcp_port,
@@ -97,8 +228,8 @@ async fn execute(
                     request: TIMEOUT,
                 },
             )
-            .await?,
-        );
+            .await?
+        });
     }
     let connection = client.as_mut().ok_or("memory connection unavailable")?;
     // The first successful registry binds alias, identity and selected path.
@@ -113,8 +244,20 @@ async fn execute(
         (pinned_id.clone().unwrap(), Activity::default())
     } else {
         let catalog = connection.call_tool("databases", json!({})).await?;
-        let (identity, activity) = registry(&catalog, &target.database, pinned_id.as_deref())?;
-        if let Some(expected_path) = target.expected_path.as_deref() {
+        let source = connection.cache_source();
+        let registry_database = source
+            .and_then(|source| source["database"].as_str())
+            .unwrap_or(&target.database);
+        let (identity, mut activity) = registry(&catalog, registry_database, pinned_id.as_deref())?;
+        if let Some(source) = source {
+            activity.state = format!(
+                "snapshot {} / {} / {}",
+                text(source["source_device_id"].as_str().unwrap_or("?"), 64),
+                text(source["generation"].as_str().unwrap_or("?"), 64),
+                source["captured_at"]
+            );
+        }
+        if let Some(expected_path) = target.expected_path.as_deref().filter(|_| source.is_none()) {
             // Registry validation above established one unambiguous alias. A
             // selected global core additionally pins the configured store path;
             // do not trust an unrelated owner merely because it also has `user`.
@@ -158,7 +301,7 @@ async fn execute(
                         activity.missed = true;
                         // call_tool already closed this failed transport. The
                         // next request may reconnect, preserving identity/cursor.
-                        *client = None;
+                        discard_client(client).await;
                     }
                 }
             }
@@ -177,7 +320,7 @@ async fn execute(
             if !query_edges(connection, &target.database, &identity, &mut graph, TIMEOUT).await {
                 // An optional edge read must not discard successful search
                 // hits, nor leave a failed/cancelled exchange reusable.
-                *client = None;
+                discard_client(client).await;
             }
             Ok(Response::Loaded(graph))
         }
@@ -267,7 +410,7 @@ async fn execute(
 /// edges. All serial reads share one deadline; this is not a per-node timeout.
 /// False means the connection was failed/cancelled and must be discarded.
 async fn query_edges(
-    connection: &mut RemoteClient,
+    connection: &mut ReadClient,
     database: &str,
     identity: &str,
     graph: &mut Graph,
@@ -323,7 +466,7 @@ async fn query_edges(
         // The read budget has expired, but HTTP sessions are not released by
         // Drop (only SSH children are). Give DELETE an independent bounded
         // cleanup phase; this is not more retrieval time or an automatic retry.
-        // RemoteClient::close itself bounds DELETE at 3s; the 4s outer guard
+        // ReadClient::close itself bounds DELETE at 3s; the 4s outer guard
         // also protects this caller if that implementation later changes.
         if tokio::time::timeout(Duration::from_secs(4), connection.close())
             .await
@@ -341,7 +484,7 @@ async fn query_edges(
     }
 }
 
-fn require_guard(connection: &RemoteClient, tool: &str, action: Option<&str>) -> Result<(), Error> {
+fn require_guard(connection: &ReadClient, tool: &str, action: Option<&str>) -> Result<(), Error> {
     if !connection.supports_expected_db_id(tool, action) {
         return Err(format!(
             "selected owner does not advertise identity-guarded {tool}; update its mneme-mcp server"
@@ -626,6 +769,18 @@ pub(crate) fn node(value: &Value) -> Result<Node, Error> {
     })
 }
 
+fn append_cache_label(note: &mut String, value: &Value) {
+    if let Some(source) = value.get("_mneme_source") {
+        note.push_str(&format!(
+            " · snapshot owner={} device={} generation={} captured={}",
+            text(source["owner_db_id"].as_str().unwrap_or("?"), 26),
+            text(source["source_device_id"].as_str().unwrap_or("?"), 64),
+            text(source["generation"].as_str().unwrap_or("?"), 64),
+            source["captured_at"]
+        ));
+    }
+}
+
 fn query_graph(value: &Value) -> Result<Graph, Error> {
     if value["schema"] != "mneme.query.v3" {
         return Err("unsupported memory query response schema".into());
@@ -681,6 +836,7 @@ fn query_graph(value: &Value) -> Result<Graph, Error> {
     if graph.partial {
         graph.note.push_str(" · bounded/partial results");
     }
+    append_cache_label(&mut graph.note, value);
     Ok(graph)
 }
 
@@ -736,6 +892,7 @@ fn focus_graph(id: &str, value: &Value, neighbors: &Value) -> Result<Graph, Erro
     if graph.partial && !more && !body_partial && items.len() <= NEIGHBORS {
         graph.note.push_str(" · some summaries truncated");
     }
+    append_cache_label(&mut graph.note, value);
     Ok(graph)
 }
 

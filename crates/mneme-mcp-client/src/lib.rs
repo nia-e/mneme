@@ -13,6 +13,49 @@ use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 use url::{Host, Url};
 
+/// Shared receive-byte ceiling across handshakes, catalog pages, errors and calls.
+/// Bytes are charged before JSON/SSE decoding, so framing and escaped text are
+/// included; failed attempts never refund the allowance.
+#[derive(Clone, Debug)]
+pub struct ReceiveBudget(std::sync::Arc<std::sync::atomic::AtomicUsize>, usize);
+impl ReceiveBudget {
+    pub fn new(bytes: usize) -> Self {
+        Self(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            bytes,
+        )
+    }
+    pub fn used(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn remaining(&self) -> usize {
+        self.1.saturating_sub(self.used())
+    }
+    fn charge(&self, bytes: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut current = self.used();
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .ok_or("shared MCP receive budget exhausted")?;
+            match self.0.compare_exchange_weak(
+                current,
+                next,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return if next > self.1 {
+                        Err("shared MCP receive budget exhausted".into())
+                    } else {
+                        Ok(())
+                    };
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
 type AnyErr = Box<dyn std::error::Error + Send + Sync>;
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
@@ -493,53 +536,41 @@ pub struct ConnectionOptions {
     pub token_env: Option<String>,
 }
 
-pub struct RemoteClient {
-    http: reqwest::Client,
-    endpoint: Url,
-    token: Option<String>,
-    session: Option<String>,
-    protocol: Option<String>,
-    next_id: u64,
-    advertised: HashSet<String>,
-    catalog: Vec<Value>,
-    initialize_result: Value,
-    server_name: String,
-    capture_links_supported: bool,
-    ssh: Option<Child>,
-    request_timeout: Duration,
-    wire_policy: WirePolicy,
-}
-
-impl RemoteClient {
+/// Pure feature discovery shared by routed clients and UI adapters. This does
+/// not establish owner identity or grant authority.
+pub struct CatalogView<'a>(pub &'a [Value]);
+impl CatalogView<'_> {
     /// Feature discovery for optional read-only client affordances.
     pub fn advertises(&self, name: &str) -> bool {
-        self.advertised.contains(name)
+        self.0.iter().any(|tool| tool["name"] == name)
     }
 
     /// Feature discovery for linked capture. Older servers may accept unknown
     /// JSON fields without applying them, so tool-name presence is insufficient.
     pub fn supports_capture_links(&self) -> bool {
-        self.capture_links_supported
+        self.0
+            .iter()
+            .any(|tool| tool["name"] == "capture" && capture_links_schema_supported(tool))
     }
 
     /// Episode actions are profile-sensitive. A tool name alone does not say
     /// whether this server advertises an editorial write or only bounded reads.
     /// This is discovery, not authority: the server still authorizes every call.
     pub fn supports_episode_action(&self, action: &str) -> bool {
-        self.catalog.iter().any(|tool| {
+        self.0.iter().any(|tool| {
             tool.get("name").and_then(Value::as_str) == Some("episode")
                 && episode_action_advertised(tool, action)
         })
     }
 
     pub fn supports_concern_action(&self, action: &str) -> bool {
-        self.catalog
+        self.0
             .iter()
             .any(|tool| tool["name"] == "concern" && concern_action_advertised(tool, action))
     }
 
     pub fn supports_save_kind(&self, kind: &str) -> bool {
-        self.catalog
+        self.0
             .iter()
             .any(|tool| tool["name"].as_str() == Some("save") && save_kind_advertised(tool, kind))
     }
@@ -550,7 +581,7 @@ impl RemoteClient {
     }
 
     pub fn supports_save_links(&self, kind: &str) -> bool {
-        self.catalog.iter().any(|tool| {
+        self.0.iter().any(|tool| {
             tool["name"].as_str() == Some("save")
                 && save_kind_advertised(tool, kind)
                 && capture_links_schema_supported(tool)
@@ -559,32 +590,32 @@ impl RemoteClient {
 
     /// A complete guarded tag-set CAS contract is required before any write.
     pub fn supports_retag(&self) -> bool {
-        self.catalog
+        self.0
             .iter()
             .any(|tool| tool["name"] == "retag" && retag_advertised(tool))
     }
 
     pub fn supports_retag_content_guards(&self) -> bool {
-        self.catalog
+        self.0
             .iter()
             .any(|tool| tool["name"] == "retag" && retag_content_guards_advertised(tool))
     }
 
     pub fn supports_list_tags(&self) -> bool {
-        self.catalog
+        self.0
             .iter()
             .any(|tool| tool["name"] == "list" && list_tags_advertised(tool))
     }
 
     /// Full guarded body-edit advertisement is required; unsupported peers never receive writes.
     pub fn supports_edit_body(&self) -> bool {
-        self.catalog
+        self.0
             .iter()
             .any(|tool| tool["name"] == "edit_body" && edit_body_advertised(tool))
     }
 
     pub fn supports_edit_summary(&self) -> bool {
-        self.catalog
+        self.0
             .iter()
             .any(|tool| tool["name"] == "edit_summary" && edit_summary_advertised(tool))
     }
@@ -616,7 +647,7 @@ impl RemoteClient {
             ) => {}
             _ => return false,
         }
-        self.catalog.iter().any(|tool| {
+        self.0.iter().any(|tool| {
             if tool["name"].as_str() != Some(name) {
                 return false;
             }
@@ -637,6 +668,81 @@ impl RemoteClient {
                 _ => composed_guard_schema_supported(schema),
             }
         })
+    }
+}
+
+pub struct RemoteClient {
+    http: reqwest::Client,
+    endpoint: Url,
+    token: Option<String>,
+    session: Option<String>,
+    protocol: Option<String>,
+    next_id: u64,
+    advertised: HashSet<String>,
+    catalog: Vec<Value>,
+    initialize_result: Value,
+    server_name: String,
+    capture_links_supported: bool,
+    ssh: Option<Child>,
+    request_timeout: Duration,
+    wire_policy: WirePolicy,
+    receive_budget: Option<ReceiveBudget>,
+    lazy_native: bool,
+}
+
+impl RemoteClient {
+    pub fn advertises(&self, name: &str) -> bool {
+        CatalogView(&self.catalog).advertises(name)
+    }
+    pub fn supports_capture_links(&self) -> bool {
+        CatalogView(&self.catalog).supports_capture_links()
+    }
+    pub fn supports_episode_action(&self, action: &str) -> bool {
+        CatalogView(&self.catalog).supports_episode_action(action)
+    }
+    pub fn supports_concern_action(&self, action: &str) -> bool {
+        CatalogView(&self.catalog).supports_concern_action(action)
+    }
+    pub fn supports_save_kind(&self, kind: &str) -> bool {
+        CatalogView(&self.catalog).supports_save_kind(kind)
+    }
+    pub fn supports_save(&self) -> bool {
+        CatalogView(&self.catalog).supports_save()
+    }
+    pub fn supports_save_links(&self, kind: &str) -> bool {
+        CatalogView(&self.catalog).supports_save_links(kind)
+    }
+    pub fn supports_retag(&self) -> bool {
+        CatalogView(&self.catalog).supports_retag()
+    }
+    pub fn supports_retag_content_guards(&self) -> bool {
+        CatalogView(&self.catalog).supports_retag_content_guards()
+    }
+    pub fn supports_list_tags(&self) -> bool {
+        CatalogView(&self.catalog).supports_list_tags()
+    }
+    pub fn supports_edit_body(&self) -> bool {
+        CatalogView(&self.catalog).supports_edit_body()
+    }
+    pub fn supports_edit_summary(&self) -> bool {
+        CatalogView(&self.catalog).supports_edit_summary()
+    }
+    pub fn supports_expected_db_id(&self, name: &str, action: Option<&str>) -> bool {
+        CatalogView(&self.catalog).supports_expected_db_id(name, action)
+    }
+    /// Attach the next caller-owned allowance to an already initialized session.
+    /// No previously received bytes are refunded; future calls use this deadline.
+    pub fn set_operation_budget(
+        &mut self,
+        budget: ReceiveBudget,
+        remaining: Duration,
+    ) -> Result<(), AnyErr> {
+        if remaining.is_zero() || remaining > Duration::from_secs(30) || budget.remaining() == 0 {
+            return Err("operation budget exhausted or invalid".into());
+        }
+        self.receive_budget = Some(budget);
+        self.request_timeout = remaining;
+        Ok(())
     }
 
     /// The validated initialize result and complete, paginated tool catalog.
@@ -718,6 +824,58 @@ impl RemoteClient {
         })?
     }
 
+    /// Native-owner connection charged to one caller-owned operation budget.
+    pub async fn connect_owner_with_budget(
+        options: &ConnectionOptions,
+        timeouts: ClientTimeouts,
+        budget: ReceiveBudget,
+    ) -> Result<Self, AnyErr> {
+        Self::connect_budgeted_owner(options, timeouts, budget, false).await
+    }
+    /// Initialize only; known, closed native reads do not pay for an unrelated
+    /// full mutation catalog. Optional features and every write still discover
+    /// their exact advertised contract before submission.
+    pub async fn connect_native_reads_with_budget(
+        options: &ConnectionOptions,
+        timeouts: ClientTimeouts,
+        budget: ReceiveBudget,
+    ) -> Result<Self, AnyErr> {
+        Self::connect_budgeted_owner(options, timeouts, budget, true).await
+    }
+    async fn connect_budgeted_owner(
+        options: &ConnectionOptions,
+        timeouts: ClientTimeouts,
+        budget: ReceiveBudget,
+        lazy_native: bool,
+    ) -> Result<Self, AnyErr> {
+        if timeouts.connect.is_zero()
+            || timeouts.request.is_zero()
+            || timeouts.connect > Duration::from_secs(30)
+            || timeouts.request > Duration::from_secs(30)
+        {
+            return Err("owner MCP deadlines must be nonzero and at most 30 seconds".into());
+        }
+        tokio::time::timeout(
+            timeouts.connect,
+            Self::connect_inner_budgeted(
+                options,
+                timeouts,
+                WirePolicy {
+                    request_bytes: CODEX_REQUEST_BYTES,
+                    response_bytes: CODEX_RESPONSE_BYTES,
+                    expected_server: Some("mneme-mcp"),
+                    loopback_only: false,
+                },
+                Some(budget),
+                lazy_native,
+            ),
+        )
+        .await
+        .map_err(|_| -> AnyErr {
+            Box::new(AvailabilityError("owner MCP connection timed out".into()))
+        })?
+    }
+
     pub async fn connect(options: &ConnectionOptions) -> Result<Self, AnyErr> {
         Self::connect_with_timeouts(options, ClientTimeouts::default()).await
     }
@@ -748,6 +906,22 @@ impl RemoteClient {
         timeouts: ClientTimeouts,
         wire_policy: WirePolicy,
     ) -> Result<Self, AnyErr> {
+        Self::connect_inner_budgeted(options, timeouts, wire_policy, None, false).await
+    }
+
+    async fn connect_inner_budgeted(
+        options: &ConnectionOptions,
+        timeouts: ClientTimeouts,
+        wire_policy: WirePolicy,
+        receive_budget: Option<ReceiveBudget>,
+        lazy_native: bool,
+    ) -> Result<Self, AnyErr> {
+        if receive_budget
+            .as_ref()
+            .is_some_and(|budget| budget.remaining() == 0)
+        {
+            return Err("shared MCP receive budget exhausted".into());
+        }
         let parsed = Url::parse(&options.url).map_err(|_| "invalid remote URL")?;
         if wire_policy.loopback_only && !numeric_loopback_http(&parsed) {
             return Err("local MCP endpoint must be numeric loopback HTTP".into());
@@ -804,6 +978,8 @@ impl RemoteClient {
             ssh,
             request_timeout: timeouts.request,
             wire_policy,
+            receive_budget,
+            lazy_native,
         };
         if let Err(error) = remote.handshake().await {
             remote.close().await;
@@ -812,7 +988,63 @@ impl RemoteClient {
         Ok(remote)
     }
 
+    /// The initialized native baseline read grammar, not arbitrary pass-through.
+    /// Callers must complete domain admission and pin/verify the selected owner.
+    /// Unknown/mutation actions never bypass feature discovery. The native owner
+    /// remains the authority ceiling and authorizes its own typed request.
+    pub async fn call_native_read(&mut self, name: &str, args: Value) -> Result<Value, AnyErr> {
+        if !self.lazy_native {
+            return self.call_tool(name, args).await;
+        }
+        if self.server_name != "mneme-mcp"
+            || !matches!(
+                self.initialize_result["capabilityProfile"].as_str(),
+                Some("read-only" | "receipt-grounded" | "curator" | "operator")
+            )
+        {
+            return Err("known reads require an initialized native owner profile".into());
+        }
+        if !known_native_read(name, &args) {
+            return Err(
+                "operation is not a closed native baseline read; discover its tool contract".into(),
+            );
+        }
+        if !args.is_object() {
+            return Err("native read arguments must be an object".into());
+        }
+        if name != "databases"
+            && name != "activity"
+            && (args["expected_db_id"]
+                .as_str()
+                .is_none_or(|id| id.len() != 26)
+                || (name != "walk" || args["action"] == "start")
+                    && args["db"].as_str().is_none_or(str::is_empty))
+        {
+            return Err("known native read requires canonical db and expected_db_id pins".into());
+        }
+        let result = tokio::time::timeout(
+            self.request_timeout,
+            self.request("tools/call", json!({"name":name,"arguments":args})),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(Box::new(AvailabilityError(
+                "known native read timed out".into(),
+            )))
+        });
+        let result = result.and_then(|value| decode_tool_result(&value));
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| classify_error(error.as_ref()) != ClientErrorClass::Tool)
+        {
+            self.close().await;
+        }
+        result
+    }
+
     pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, AnyErr> {
+        self.ensure_catalog().await?;
         let params = json!({ "name": name, "arguments": args });
         self.validate_tool_call(&params)?;
         let response = self.raw_rpc("tools/call", params).await;
@@ -1053,7 +1285,28 @@ impl RemoteClient {
         }
         self.protocol = Some(protocol.to_owned());
         self.notify("notifications/initialized", json!({})).await?;
-
+        if self.lazy_native {
+            return Ok(());
+        }
+        self.load_catalog().await
+    }
+    pub async fn ensure_catalog(&mut self) -> Result<(), AnyErr> {
+        if !self.lazy_native {
+            return Ok(());
+        }
+        let result = tokio::time::timeout(self.request_timeout, self.load_catalog())
+            .await
+            .map_err(|_| -> AnyErr {
+                Box::new(AvailabilityError("native tool catalog timed out".into()))
+            })?;
+        if result.is_ok() {
+            self.lazy_native = false;
+        } else {
+            self.close().await;
+        }
+        result
+    }
+    async fn load_catalog(&mut self) -> Result<(), AnyErr> {
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_CATALOG_PAGES {
             let params = cursor
@@ -1194,6 +1447,9 @@ impl RemoteClient {
             .await
             .map_err(|error| request_error("remote MCP response failed", &error))?
         {
+            if let Some(budget) = &self.receive_budget {
+                budget.charge(chunk.len())?;
+            }
             if bytes.len().saturating_add(chunk.len()) > self.wire_policy.response_bytes {
                 return Err("remote MCP response exceeds wire limit".into());
             }
@@ -1217,6 +1473,28 @@ impl RemoteClient {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+pub fn known_native_read(name: &str, args: &Value) -> bool {
+    match name {
+        "databases" | "activity" | "core" | "get" | "status" | "query" | "recall_context"
+        | "recall" | "neighbors" | "contradictions" | "merges" => true,
+        "list" => matches!(
+            args["kind"].as_str(),
+            Some("nodes" | "touchstones" | "tags")
+        ),
+        "graph" => matches!(args["action"].as_str(), Some("topology" | "summaries")),
+        "episode" => matches!(
+            args["action"].as_str(),
+            Some("list" | "search" | "get" | "history" | "references")
+        ),
+        "walk" => matches!(
+            args["action"].as_str(),
+            Some("start" | "look" | "edges" | "body" | "go" | "back" | "done" | "abort")
+        ),
+        "remote_edges" => args["resolve"] != true,
+        _ => false,
     }
 }
 
@@ -2447,6 +2725,8 @@ mod tests {
             ssh: None,
             request_timeout: RPC_TIMEOUT,
             wire_policy: WirePolicy::default(),
+            receive_budget: None,
+            lazy_native: false,
         }
     }
 
@@ -3112,6 +3392,8 @@ mod tests {
             ssh: Some(child),
             request_timeout: RPC_TIMEOUT,
             wire_policy: WirePolicy::default(),
+            receive_budget: None,
+            lazy_native: false,
         };
         assert!(process_exists(pid));
         drop(remote);
@@ -3141,6 +3423,8 @@ mod tests {
             ssh: Some(child),
             request_timeout: RPC_TIMEOUT,
             wire_policy: WirePolicy::default(),
+            receive_budget: None,
+            lazy_native: false,
         };
         let result = tokio::time::timeout(Duration::from_secs(2), remote.handshake())
             .await

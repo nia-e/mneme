@@ -1,0 +1,874 @@
+use mneme_config::*;
+use std::path::{Path, PathBuf};
+
+const FIRST: &str = "01M3CV5EZP4HWAK56YJCMZQG2Y";
+const SECOND: &str = "01M3XW4C1X5E4YW0Q7Q6V5Y4XH";
+const THIRD: &str = "01M3CPEVDTM9PP4HJTMMBZ8HR9";
+fn entry(name: &str, id: &str, activation: &str) -> String {
+    format!(
+        "\n[stores.{name}]\nid='{id}'\nowner={{url='http://127.0.0.1:1',db='project'}}\nactive={{{activation}}}\n"
+    )
+}
+fn config(extra: &str) -> Config {
+    Config::parse(&format!("schema='mneme.config.v1'\n{extra}")).unwrap()
+}
+fn context(path: &Path) -> SelectionContext {
+    SelectionContext::new(path.to_owned())
+}
+fn store_names(s: &SelectionSnapshot) -> Vec<&str> {
+    s.active.iter().map(|s| s.name.as_str()).collect()
+}
+fn recipe(root: &Path) -> Config {
+    config(&format!(
+        "{}{}{}",
+        entry("personal", FIRST, "workspace='any'"),
+        entry("ordinary", SECOND, "workspace='no-project'"),
+        entry(
+            "work",
+            THIRD,
+            &format!("workspace='project',roots=['{}']", root.display())
+        )
+    ))
+}
+#[test]
+fn ordinary_recipe_uses_activation_not_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let cfg = recipe(&project);
+    let no_project = select(&cfg, &context(dir.path())).unwrap();
+    assert_eq!(store_names(&no_project), vec!["ordinary", "personal"]);
+    assert_eq!(no_project.read_default.as_deref(), Some("ordinary"));
+    let configured = select(&cfg, &context(&project)).unwrap();
+    assert_eq!(store_names(&configured), vec!["personal", "work"]);
+    assert_eq!(configured.read_default.as_deref(), Some("work"));
+    for store in &configured.active {
+        assert!(
+            store.eligible.read
+                && store.eligible.write
+                && store.eligible.core
+                && store.eligible.context
+                && store.eligible.recall
+                && store.eligible.record
+                && store.eligible.maintenance
+        );
+    }
+}
+#[test]
+fn background_off_keeps_foreground_core_context_and_explicit_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = recipe(&dir.path().join("project"));
+    cfg.background.enabled = false;
+    for s in select(&cfg, &context(dir.path())).unwrap().active {
+        assert!(s.eligible.core && s.eligible.context && s.eligible.read && s.eligible.write);
+        assert!(!s.eligible.recall && !s.eligible.record && !s.eligible.maintenance);
+    }
+}
+#[test]
+fn permission_delivery_background_matrix_is_exhaustive() {
+    let dir = tempfile::tempdir().unwrap();
+    for read in [false, true] {
+        for write in [false, true] {
+            for background in [false, true] {
+                for delivery in [false, true] {
+                    let mut cfg = config(&entry("not_global", FIRST, "workspace='any'"));
+                    cfg.background.enabled = background;
+                    let store = cfg.stores.get_mut("not_global").unwrap();
+                    store.permissions = Permissions { read, write };
+                    store.delivery = Delivery {
+                        core: delivery,
+                        context: delivery,
+                    };
+                    let selected = select(&cfg, &context(dir.path())).unwrap();
+                    let s = &selected.active[0];
+                    assert_eq!(s.eligible.read, read);
+                    assert_eq!(s.eligible.write, write);
+                    assert_eq!(s.eligible.core, read && delivery);
+                    assert_eq!(s.eligible.context, read && delivery);
+                    assert_eq!(s.eligible.recall, read && delivery && background);
+                    assert_eq!(s.eligible.record, write && background);
+                    assert_eq!(s.eligible.maintenance, read && write && background);
+                    for (op, allowed) in [
+                        (Operation::ExplicitRead, read),
+                        (Operation::ExplicitWrite, write),
+                        (Operation::Core, read && delivery),
+                        (Operation::Context, read && delivery),
+                        (Operation::Recall, read && delivery && background),
+                        (Operation::Record, write && background),
+                        (Operation::Maintenance, read && write && background),
+                    ] {
+                        assert_eq!(s.require_operation(op).is_ok(), allowed);
+                    }
+                }
+            }
+        }
+    }
+}
+#[test]
+fn each_background_lane_is_independent() {
+    let dir = tempfile::tempdir().unwrap();
+    for recall in [false, true] {
+        for record in [false, true] {
+            for maintenance in [false, true] {
+                let mut cfg = config(&entry("memory", FIRST, "workspace='any'"));
+                cfg.stores.get_mut("memory").unwrap().background = StoreBackground {
+                    recall,
+                    record,
+                    maintenance,
+                };
+                let s = select(&cfg, &context(dir.path())).unwrap().active.remove(0);
+                assert!(s.eligible.core && s.eligible.context);
+                assert_eq!(s.eligible.recall, recall);
+                assert_eq!(s.eligible.record, record);
+                assert_eq!(s.eligible.maintenance, maintenance);
+            }
+        }
+    }
+}
+#[test]
+fn disabled_project_is_configured_and_never_misc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = recipe(dir.path());
+    cfg.stores.get_mut("work").unwrap().active.enabled = false;
+    let s = select(&cfg, &context(dir.path())).unwrap();
+    assert!(s.project.configured);
+    assert_eq!(store_names(&s), vec!["personal"]);
+    assert_eq!(s.read_default, None);
+}
+#[test]
+fn independent_lane_scope_preserves_core_everywhere_but_local_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    let mut cfg = config(&entry("anything", FIRST, "workspace='any'"));
+    let store = cfg.stores.get_mut("anything").unwrap();
+    store.applicability.record.roots = vec![work.clone()];
+    store.applicability.context.roots = vec![work.clone()];
+    let outside = select(&cfg, &context(dir.path())).unwrap().active.remove(0);
+    assert!(outside.eligible.core);
+    assert!(!outside.eligible.context && !outside.eligible.recall && !outside.eligible.record);
+    let inside = select(&cfg, &context(&work)).unwrap().active.remove(0);
+    assert!(
+        inside.eligible.core
+            && inside.eligible.context
+            && inside.eligible.recall
+            && inside.eligible.record
+    );
+}
+#[test]
+fn default_private_isolated_and_empty_allowlist_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(&entry("personal", FIRST, "workspace='any'"));
+    let mut ctx = context(dir.path());
+    ctx.profile = "private".into();
+    assert_eq!(store_names(&select(&cfg, &ctx).unwrap()), vec!["personal"]);
+    ctx.profile = "isolated".into();
+    let s = select(&cfg, &ctx).unwrap();
+    assert!(s.active.is_empty());
+    assert!(s.explicit_store("personal").is_err());
+    cfg.workspace.allow_stores = Some(vec!["personal".into()]);
+    assert_eq!(store_names(&select(&cfg, &ctx).unwrap()), vec!["personal"]);
+    cfg.workspace.allow_stores = Some(vec![]);
+    ctx.profile = "default".into();
+    assert!(select(&cfg, &ctx).unwrap().active.is_empty());
+}
+#[test]
+fn exclusions_win_over_explicit_name_and_canonical_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(&entry("personal", FIRST, "workspace='any'"));
+    cfg.stores
+        .get_mut("personal")
+        .unwrap()
+        .active
+        .excluded_roots = vec![dir.path().to_owned()];
+    let s = select(&cfg, &context(dir.path())).unwrap();
+    assert!(s.active.is_empty());
+    assert!(s.explicit_store("personal").is_err());
+}
+#[test]
+fn nonactive_explicit_access_does_not_reactivate_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = recipe(dir.path());
+    cfg.stores.get_mut("work").unwrap().active.enabled = false;
+    let s = select(&cfg, &context(dir.path())).unwrap();
+    let ordinary = s.explicit_store("ordinary").unwrap();
+    assert!(ordinary.eligible.read && ordinary.eligible.write);
+    assert!(!ordinary.eligible.core && !ordinary.eligible.record && !ordinary.eligible.recall);
+    assert!(s.explicit_store("work").is_err());
+}
+#[test]
+fn snapshot_digest_covers_every_resolved_policy_and_selection_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(&entry("memory", FIRST, "workspace='any'"));
+    let s = select(&cfg, &context(dir.path())).unwrap();
+    s.verify_digest().unwrap();
+    let json = serde_json::to_vec(&s).unwrap();
+    let round: SelectionSnapshot = serde_json::from_slice(&json).unwrap();
+    round.verify_digest().unwrap();
+    assert_eq!(s, round);
+    let mut changes = vec![];
+    let mut changed = s.clone();
+    changed.config.stores.get_mut("memory").unwrap().owner.db = "other".into();
+    changes.push(changed);
+    let mut changed = s.clone();
+    changed.active[0].eligible.write = false;
+    changes.push(changed);
+    let mut changed = s.clone();
+    changed.origins.push(PathBuf::from("/other"));
+    changes.push(changed);
+    let mut changed = s.clone();
+    changed.profile = "private".into();
+    changes.push(changed);
+    for changed in changes {
+        assert!(changed.verify_digest().is_err());
+    }
+}
+#[test]
+fn strict_closed_duplicate_types_bounds_and_no_diagnostic_secrets() {
+    for bad in [
+        "schema='mneme.config.v1'\nunknown=true",
+        "schema='mneme.config.v1'\nschema='mneme.config.v1'",
+        "schema='mneme.config.v2'",
+        "schema='mneme.config.v1'\n[background]\nenabled='secret-token'",
+        "schema='mneme.config.v1'\n[workspace]\nprofile='secret-token'",
+    ] {
+        let e = Config::parse(bad).unwrap_err();
+        assert!(!e.to_string().contains("secret-token"));
+    }
+    assert!(Config::parse(&"x".repeat(MAX_CONFIG_BYTES + 1)).is_err());
+    for suffix in [
+        "permissions={read='yes'}",
+        "guidance={tag_guide={id='01M3CV5EZP4HWAK56YJCMZQG2Y',content='body'}}",
+        "retrieval={tags=['a','a']}",
+        "capture={max_summary_bytes=513}",
+        "capture={required_tags=['core']}",
+        "capture={kinds=['unknown']}",
+        "capture={max_body_bytes=-1}",
+    ] {
+        assert!(
+            Config::parse(&format!(
+                "schema='mneme.config.v1'\n{}{}",
+                entry("memory", FIRST, "workspace='any'"),
+                suffix
+            ))
+            .is_err(),
+            "{suffix}"
+        );
+    }
+}
+#[test]
+fn identity_owner_and_tag_guide_are_validated_without_contact() {
+    let base = format!(
+        "schema='mneme.config.v1'\n{}",
+        entry("memory", FIRST, "workspace='any'")
+    );
+    for (from, to) in [
+        (FIRST, "01m3cv5ezp4hwak56yjcmzqg2y"),
+        ("http://127.0.0.1:1", "https://secret-token@example.com"),
+        (
+            "http://127.0.0.1:1",
+            "https://example.com/?token=secret-token",
+        ),
+        ("http://127.0.0.1:1", "file:///tmp/db"),
+    ] {
+        assert!(Config::parse(&base.replace(from, to)).is_err());
+    }
+    assert!(
+        Config::parse(&format!(
+            "{base}{}",
+            entry("alias", FIRST, "workspace='any'")
+        ))
+        .is_err()
+    );
+    let remote=base.replace("owner={url='http://127.0.0.1:1',db='project'}","owner={url='ssh://mica@example.com:2222',ssh_mcp_port=18765,db='project',path='/home/mica/db',token_env='MNEME_TOKEN'}");
+    assert!(Config::parse(&remote).is_ok());
+    assert!(Config::parse(&remote.replace("/home/mica/db", r"C:\Users\mica\db")).is_ok());
+}
+#[test]
+fn overlay_same_schema_adds_project_roots_and_inherited_library_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = config(&format!(
+        "{}\n[libraries.reference]\ncatalog='{}'",
+        entry("personal", FIRST, "workspace='any'"),
+        dir.path().join("catalog.json").display()
+    ));
+    let overlay=Config::parse_overlay(&format!("schema='mneme.config.v1'\n[workspace]\nallow_stores=['personal','work']\n{}cache={{library='reference'}}",entry("work",SECOND,"workspace='project'"))).unwrap();
+    let merged = user.clone().merge_project(overlay, dir.path()).unwrap();
+    assert_eq!(
+        merged.stores["work"].active.roots,
+        vec![dir.path().to_owned()]
+    );
+    assert!(
+        select(&merged, &context(dir.path()))
+            .unwrap()
+            .project
+            .configured
+    );
+    assert!(
+        user.clone()
+            .merge_project(
+                config(&entry("personal", SECOND, "workspace='project'")),
+                dir.path()
+            )
+            .is_err()
+    );
+    assert!(
+        user.merge_project(
+            config(&entry("alias", FIRST, "workspace='project'")),
+            dir.path()
+        )
+        .is_err()
+    );
+}
+fn write_user(root: &Path, _cfg: &Config) -> PathBuf {
+    let p = root.join("user.toml");
+    std::fs::write(
+        &p,
+        format!(
+            "schema='mneme.config.v1'\n{}{}",
+            entry("personal", FIRST, "workspace='any'"),
+            entry("ordinary", SECOND, "workspace='no-project'")
+        ),
+    )
+    .unwrap();
+    p
+}
+#[test]
+fn filesystem_selection_is_metadata_only_owner_unreachable_does_not_change_activation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("work");
+    std::fs::create_dir_all(root.join(".mneme")).unwrap();
+    let user = write_user(dir.path(), &config(""));
+    std::fs::write(
+        root.join(".mneme/memory.toml"),
+        format!(
+            "schema='mneme.config.v1'\n{}",
+            entry("work", THIRD, "workspace='project'")
+        ),
+    )
+    .unwrap();
+    let s = select_workspace(&user, &root, None).unwrap();
+    assert_eq!(store_names(&s), vec!["personal", "work"]);
+    assert_eq!(s.sources.len(), 2);
+    assert!(s.active[1].eligible.record);
+    s.verify_digest().unwrap();
+}
+#[test]
+fn malformed_or_legacy_project_presence_never_means_misc() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("work");
+    std::fs::create_dir_all(root.join(".mneme")).unwrap();
+    let user = write_user(dir.path(), &config(""));
+    let s = select_workspace(&user, &root, None).unwrap();
+    assert_eq!(store_names(&s), vec!["personal"]);
+    assert!(s.project.configured);
+    std::fs::write(root.join(".mneme/memory.toml"), "schema='wrong'").unwrap();
+    assert!(select_workspace(&user, &root, None).is_err());
+}
+#[test]
+fn nested_git_or_mneme_boundary_fences_inherited_project_not_global_core() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("work");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(root.join(".mneme")).unwrap();
+    std::fs::create_dir(&nested).unwrap();
+    let user = write_user(dir.path(), &config(""));
+    std::fs::write(
+        root.join(".mneme/memory.toml"),
+        format!(
+            "schema='mneme.config.v1'\n{}",
+            entry("work", THIRD, "workspace='project'")
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        store_names(&select_workspace(&user, &nested, None).unwrap()),
+        vec!["personal", "work"]
+    );
+    std::fs::create_dir(nested.join(".git")).unwrap();
+    let s = select_workspace(&user, &nested, None).unwrap();
+    assert_eq!(store_names(&s), vec!["personal"]);
+    assert!(s.project.configured);
+    assert!(s.active[0].eligible.core);
+    std::fs::remove_dir(nested.join(".git")).unwrap();
+    std::fs::create_dir(nested.join(".mneme")).unwrap();
+    assert_eq!(
+        store_names(&select_workspace(&user, &nested, None).unwrap()),
+        vec!["personal"]
+    );
+}
+#[test]
+fn retained_v1_v2_privacy_and_library_boundaries_remain_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("work");
+    std::fs::create_dir_all(root.join(".mneme")).unwrap();
+    let user = write_user(dir.path(), &config(""));
+    let profile = root.join(".mneme/profile.json");
+    std::fs::write(
+        &profile,
+        r#"{"schema":"mneme.profile.v2","mode":"default","stores":[]}"#,
+    )
+    .unwrap();
+    assert!(
+        select_workspace(&user, &root, None)
+            .unwrap()
+            .active
+            .is_empty()
+    );
+    std::fs::write(
+        &profile,
+        r#"{"schema":"mneme.profile.v2","mode":"isolated","stores":["personal"]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        store_names(&select_workspace(&user, &root, None).unwrap()),
+        vec!["personal"]
+    );
+    std::fs::write(
+        &profile,
+        format!(
+            r#"{{"schema":"mneme.profile.v1","mode":"private","library_config":"{}"}}"#,
+            dir.path().join("library.json").display()
+        ),
+    )
+    .unwrap();
+    let s = select_workspace(&user, &root, None).unwrap();
+    assert!(s.active.is_empty());
+    assert!(s.project.legacy_library.is_some());
+    std::fs::write(
+        &profile,
+        r#"{"schema":"mneme.profile.v1","mode":"default","mode":"private"}"#,
+    )
+    .unwrap();
+    assert!(select_workspace(&user, &root, None).is_err());
+}
+#[test]
+fn codex_structural_routing_presence_is_frozen_but_prose_is_not_enrollment() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("work");
+    std::fs::create_dir_all(root.join(".codex")).unwrap();
+    let user = write_user(dir.path(), &config(""));
+    let codex = root.join(".codex/config.toml");
+    std::fs::write(
+        &codex,
+        "developer_instructions='mneme is mentioned in prose'",
+    )
+    .unwrap();
+    let s = select_workspace(&user, &root, None).unwrap();
+    assert!(!s.project.configured);
+    assert_eq!(store_names(&s), vec!["ordinary", "personal"]);
+    std::fs::write(&codex, "[mcp_servers.mneme]\nurl='http://127.0.0.1:1'").unwrap();
+    let t = select_workspace(&user, &root, None).unwrap();
+    assert!(t.project.configured);
+    assert_eq!(store_names(&t), vec!["personal"]);
+    assert_ne!(s.digest, t.digest);
+    std::fs::write(&codex, "garbage=!").unwrap();
+    assert!(select_workspace(&user, &root, None).is_err());
+}
+#[test]
+fn file_admission_refuses_oversize_and_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(Config::load(dir.path()).is_err());
+    let file = dir.path().join("big");
+    std::fs::write(&file, vec![b'x'; MAX_CONFIG_BYTES + 1]).unwrap();
+    assert!(Config::load(&file).is_err());
+}
+#[cfg(unix)]
+#[test]
+fn file_and_workspace_symlinks_refuse_and_alias_exclusion_frozen() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let user = write_user(dir.path(), &config(""));
+    let alias = dir.path().join("alias.toml");
+    symlink(&user, &alias).unwrap();
+    assert!(Config::load(&alias).is_err());
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    symlink(dir.path(), work.join(".mneme")).unwrap();
+    assert!(select_workspace(&user, &work, None).is_err());
+    let lexical = dir.path().join("private");
+    let actual = dir.path().join("actual");
+    std::fs::create_dir(&lexical).unwrap();
+    std::fs::create_dir(&actual).unwrap();
+    let link = lexical.join("alias");
+    symlink(&actual, &link).unwrap();
+    let mut cfg = config(&entry("personal", FIRST, "workspace='any'"));
+    cfg.stores
+        .get_mut("personal")
+        .unwrap()
+        .active
+        .excluded_roots = vec![lexical.clone()];
+    let mut ctx = context(&actual);
+    ctx.origins = vec![link, actual.clone()];
+    let s = select(&cfg, &ctx).unwrap();
+    assert!(s.active.is_empty());
+    assert_eq!(s.origins.len(), 2);
+}
+#[test]
+fn preference_capture_recipe_is_executable_policy_not_prose() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(&format!(
+        "{}capture={{kinds=['lesson'],evidence_kinds=['user_statement'],required_tags=['collaboration-preference'],allow_associations=false,max_summary_bytes=384,max_body_bytes=1024}}\nretrieval={{tags=['collaboration-preference']}}",
+        entry("not_global", FIRST, "workspace='any'")
+    ));
+    let s = select(&cfg, &context(dir.path())).unwrap();
+    let policy = &s.active[0].store.capture;
+    assert_eq!(policy.kinds, vec![CaptureKind::Lesson]);
+    assert_eq!(policy.evidence_kinds, vec![EvidenceKind::UserStatement]);
+    assert!(!policy.allow_associations);
+    assert_eq!(policy.max_body_bytes, 1024);
+    assert_eq!(
+        s.active[0].store.retrieval.as_ref().unwrap().tags,
+        vec!["collaboration-preference"]
+    );
+}
+
+#[test]
+fn overlay_narrows_background_and_workspace_never_widens_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut user = config(&entry("personal", FIRST, "workspace='any'"));
+    user.workspace.profile = Some("private".into());
+    user.workspace.allow_stores = Some(vec!["personal".into()]);
+    let overlay=Config::parse_overlay(&format!("schema='mneme.config.v1'\n[background]\nenabled=false\n[workspace]\nprofile='default'\nallow_stores=['personal','work']\n{}",entry("work",SECOND,"workspace='project'"))).unwrap();
+    let merged = user.merge_project(overlay, dir.path()).unwrap();
+    assert!(!merged.background.enabled);
+    assert_eq!(merged.workspace.profile.as_deref(), Some("private"));
+    assert_eq!(merged.workspace.allow_stores, Some(vec!["personal".into()]));
+    let s = select(&merged, &context(dir.path())).unwrap();
+    assert_eq!(store_names(&s), vec!["personal"]);
+    assert!(s.active[0].eligible.core);
+    assert!(!s.active[0].eligible.record);
+    let mut off = merged.clone();
+    off.background.enabled = false;
+    let overlay =
+        Config::parse_overlay("schema='mneme.config.v1'\n[background]\nenabled=true").unwrap();
+    assert!(
+        !off.merge_project(overlay, dir.path())
+            .unwrap()
+            .background
+            .enabled
+    );
+}
+#[test]
+fn duplicate_and_null_legacy_selectors_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("work");
+    std::fs::create_dir_all(root.join(".mneme")).unwrap();
+    let user = write_user(dir.path(), &config(""));
+    for invalid in [
+        r#"{"schema":"mneme.profile.v2","mode":"default","stores":null}"#,
+        r#"{"schema":"mneme.profile.v1","mode":"default","library_config":null}"#,
+    ] {
+        std::fs::write(root.join(".mneme/profile.json"), invalid).unwrap();
+        assert!(select_workspace(&user, &root, None).is_err());
+    }
+}
+
+#[test]
+fn aggregate_store_and_replica_bounds_are_pre_admission() {
+    let mut text = String::from("schema='mneme.config.v1'\n");
+    for n in 1..=65 {
+        text += &entry(
+            &format!("s{n}"),
+            &ulid::Ulid::from(n as u128).to_string(),
+            "workspace='any'",
+        );
+    }
+    assert!(Config::parse(&text).is_err());
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(&format!(
+        "{}\n[libraries.reference]\ncatalog='{}'",
+        entry("memory", FIRST, "workspace='any'"),
+        dir.path().join("catalog.json").display()
+    ));
+    for n in 0..17 {
+        cfg.libraries.get_mut("reference").unwrap().replicas.insert(
+            format!("r{n}"),
+            Replica {
+                url: "http://127.0.0.1:1".into(),
+                ssh_mcp_port: None,
+                token_env: None,
+            },
+        );
+    }
+    assert!(select(&cfg, &context(dir.path())).is_err());
+}
+#[test]
+fn library_admission_is_inventory_not_automatic_store_activation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(&format!(
+        "{}\n[libraries.reference]\ncatalog='{}'",
+        entry("memory", FIRST, "workspace='any'"),
+        dir.path().join("catalog.json").display()
+    ));
+    let mut ctx = context(dir.path());
+    assert_eq!(select(&cfg, &ctx).unwrap().libraries.len(), 1);
+    ctx.profile = "isolated".into();
+    assert!(select(&cfg, &ctx).unwrap().libraries.is_empty());
+    cfg.workspace.allow_libraries = Some(vec!["reference".into()]);
+    let s = select(&cfg, &ctx).unwrap();
+    assert_eq!(s.libraries.len(), 1);
+    assert!(s.active.is_empty());
+    ctx.profile = "default".into();
+    cfg.workspace.allow_libraries = Some(vec![]);
+    assert!(select(&cfg, &ctx).unwrap().libraries.is_empty());
+}
+#[test]
+fn ambiguous_default_requires_deliberate_owner_not_first_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(&format!(
+        "{}{}",
+        entry("one", FIRST, "workspace='no-project'"),
+        entry("two", SECOND, "workspace='no-project'")
+    ));
+    assert!(select(&cfg, &context(dir.path())).is_err());
+    cfg.read_default = "two".into();
+    assert_eq!(
+        select(&cfg, &context(dir.path()))
+            .unwrap()
+            .read_default
+            .as_deref(),
+        Some("two")
+    );
+}
+
+#[test]
+fn explicit_project_config_is_not_merged_with_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".mneme")).unwrap();
+    let file = dir.path().join(".mneme/memory.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "schema='mneme.config.v1'\n[background]\nenabled=false\n{}",
+            entry("work", FIRST, "workspace='project'")
+        ),
+    )
+    .unwrap();
+    let s = select_workspace(&file, dir.path(), None).unwrap();
+    assert_eq!(store_names(&s), vec!["work"]);
+    assert!(!s.active[0].eligible.record);
+    assert!(s.active[0].eligible.core);
+}
+
+#[test]
+fn frozen_product_request_revalidation_refuses_permission_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = write_user(dir.path(), &config(""));
+    let snapshot = select_workspace(&user, dir.path(), None).unwrap();
+    assert!(snapshot.request.is_some());
+    snapshot.revalidate_exact().unwrap();
+    let cloned: SelectionSnapshot =
+        serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    cloned.revalidate_exact().unwrap();
+    let text = std::fs::read_to_string(&user).unwrap().replace(
+        "active={workspace='any'}",
+        "active={workspace='any'}\npermissions={read=true,write=false}",
+    );
+    std::fs::write(&user, text).unwrap();
+    assert!(snapshot.revalidate_exact().is_err());
+    assert!(cloned.revalidate_exact().is_err());
+}
+#[test]
+fn frozen_request_refuses_new_nested_profile_and_new_native_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let nested = work.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let user = dir.path().join("user.toml");
+    std::fs::write(
+        &user,
+        format!(
+            "schema='mneme.config.v1'\n{}{}",
+            entry("personal", FIRST, "workspace='any'"),
+            entry(
+                "work",
+                SECOND,
+                &format!("workspace='project',roots=['{}']", work.display())
+            )
+        ),
+    )
+    .unwrap();
+    let snapshot = select_workspace(&user, &nested, None).unwrap();
+    assert_eq!(store_names(&snapshot), vec!["personal", "work"]);
+    snapshot.revalidate_exact().unwrap();
+    std::fs::create_dir(nested.join(".mneme")).unwrap();
+    std::fs::write(
+        nested.join(".mneme/profile.json"),
+        r#"{"schema":"mneme.profile.v2","mode":"isolated","stores":[]}"#,
+    )
+    .unwrap();
+    assert!(snapshot.revalidate_exact().is_err());
+    std::fs::remove_file(nested.join(".mneme/profile.json")).unwrap();
+    std::fs::write(
+        nested.join(".mneme/memory.toml"),
+        "schema='mneme.config.v1'\n[background]\nenabled=false",
+    )
+    .unwrap();
+    assert!(snapshot.revalidate_exact().is_err());
+}
+#[test]
+fn pure_select_has_explicit_immutable_not_filesystem_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = select(
+        &config(&entry("memory", FIRST, "workspace='any'")),
+        &context(dir.path()),
+    )
+    .unwrap();
+    assert!(snapshot.request.is_none());
+    std::fs::create_dir(dir.path().join(".mneme")).unwrap();
+    snapshot.revalidate_exact().unwrap();
+}
+
+#[test]
+fn tag_guide_remains_a_canonical_summary_node_and_hippocampus_is_not_a_node_selector() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(&format!(
+        "{}guidance={{tag_guide={{id='{}',content='summary'}}}}",
+        entry("memory", FIRST, "workspace='any'"),
+        SECOND
+    ));
+    let selected = select(&cfg, &context(dir.path())).unwrap();
+    assert_eq!(
+        selected.active[0]
+            .store
+            .guidance
+            .tag_guide
+            .as_ref()
+            .unwrap()
+            .id,
+        SECOND
+    );
+    assert!(
+        Config::parse(&format!(
+            "schema='mneme.config.v1'\n{}guidance={{hippocampus={{id='{}',content='body'}}}}",
+            entry("memory", FIRST, "workspace='any'"),
+            SECOND
+        ))
+        .is_err()
+    );
+}
+
+fn scoped_any_config(roots: &[&Path]) -> String {
+    let roots = roots
+        .iter()
+        .map(|p| format!("'{}'", p.display()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut text = format!(
+        "schema='mneme.config.v1'\n{}",
+        entry("personal", FIRST, "workspace='any'")
+    );
+    for operation in ["context", "recall", "record", "maintenance"] {
+        text += &format!("applicability.{operation}={{roots=[{roots}]}}\n");
+    }
+    text
+}
+fn assert_scoped_background(s: &SelectionSnapshot, allowed: bool) {
+    assert_eq!(store_names(s), vec!["personal"]);
+    let store = &s.active[0];
+    assert!(
+        store.eligible.core && store.eligible.read && store.eligible.write,
+        "broad core and manual grants stay available"
+    );
+    for (operation, eligible) in [
+        (Operation::Context, store.eligible.context),
+        (Operation::Recall, store.eligible.recall),
+        (Operation::Record, store.eligible.record),
+        (Operation::Maintenance, store.eligible.maintenance),
+    ] {
+        assert_eq!(eligible, allowed, "{operation:?}");
+        assert_eq!(
+            store.require_operation(operation).is_ok(),
+            allowed,
+            "{operation:?}"
+        );
+    }
+}
+#[test]
+fn positive_operation_roots_fence_nested_git_and_mneme_but_explicit_children_opt_in() {
+    for marker in [".git", ".mneme"] {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("workshop");
+        let ordinary = parent.join("ordinary");
+        let nested = parent.join("projects/child");
+        std::fs::create_dir_all(&ordinary).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, scoped_any_config(&[&parent])).unwrap();
+        assert_scoped_background(&select_workspace(&user, &parent, None).unwrap(), true);
+        assert_scoped_background(&select_workspace(&user, &ordinary, None).unwrap(), true);
+        std::fs::create_dir(nested.join(marker)).unwrap();
+        if marker == ".mneme" {
+            std::fs::write(
+                nested.join(".mneme/memory.toml"),
+                "schema='mneme.config.v1'",
+            )
+            .unwrap();
+        }
+        let denied = select_workspace(&user, &nested, None).unwrap();
+        assert_scoped_background(&denied, false);
+        std::fs::write(&user, scoped_any_config(&[&parent, &nested])).unwrap();
+        assert_scoped_background(&select_workspace(&user, &nested, None).unwrap(), true);
+        assert!(
+            denied.revalidate_exact().is_err(),
+            "new child grant must not hot-swap retained selection"
+        );
+    }
+}
+#[test]
+fn new_nested_marker_invalidates_retained_any_owner_operation_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("workshop");
+    let nested = parent.join("projects/child");
+    std::fs::create_dir_all(&nested).unwrap();
+    let user = dir.path().join("user.toml");
+    std::fs::write(&user, scoped_any_config(&[&parent])).unwrap();
+    let retained = select_workspace(&user, &nested, None).unwrap();
+    assert_scoped_background(&retained, true);
+    retained.revalidate_exact().unwrap();
+    std::fs::write(nested.join(".git"), "gitdir: unrelated-checkout").unwrap();
+    assert!(retained.revalidate_exact().is_err());
+    assert_scoped_background(&select_workspace(&user, &nested, None).unwrap(), false);
+}
+#[test]
+fn explicit_child_candidate_is_not_rejected_by_an_intermediate_ancestor_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("workshop");
+    let intermediate = parent.join("projects");
+    let child = intermediate.join("child");
+    std::fs::create_dir_all(child.join(".git")).unwrap();
+    std::fs::create_dir(intermediate.join(".git")).unwrap();
+    let user = dir.path().join("user.toml");
+    std::fs::write(&user, scoped_any_config(&[&parent, &child])).unwrap();
+    assert_scoped_background(&select_workspace(&user, &child, None).unwrap(), true);
+}
+#[cfg(unix)]
+#[test]
+fn nested_symlink_and_loopback_alias_cannot_escape_positive_operation_scope() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("workshop");
+    let child = parent.join("projects/child");
+    std::fs::create_dir_all(child.join(".git")).unwrap();
+    let user = dir.path().join("user.toml");
+    std::fs::write(&user, scoped_any_config(&[&parent])).unwrap();
+    let link = parent.join("alias-to-child");
+    symlink(&child, &link).unwrap();
+    assert_scoped_background(&select_workspace(&user, &link, None).unwrap(), false);
+    // Canonical cwd is exactly the allowed parent; its own marker is encountered
+    // via the alias before the enclosing lexical child's marker. Keep both.
+    std::fs::create_dir(parent.join(".git")).unwrap();
+    let loopback = child.join("back-to-parent");
+    symlink(&parent, &loopback).unwrap();
+    let denied = select_workspace(&user, &loopback, None).unwrap();
+    assert_eq!(denied.cwd, parent.canonicalize().unwrap());
+    assert_scoped_background(&denied, false);
+    assert!(
+        denied
+            .project
+            .boundaries
+            .iter()
+            .any(|p| p.ends_with("projects/child"))
+    );
+}

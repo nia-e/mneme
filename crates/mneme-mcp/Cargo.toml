@@ -9,6 +9,8 @@ name = "mneme-mcp"
 path = "src/main.rs"
 
 [dependencies]
+mneme-config.workspace = true
+mneme-store-client = { path = "../mneme-store-client" }
 mneme-core.workspace = true
 mneme-engine.workspace = true
 mneme-app.workspace = true

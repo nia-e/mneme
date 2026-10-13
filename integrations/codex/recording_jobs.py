@@ -160,6 +160,38 @@ def load_project_focus(config):
             os.close(directory)
 
 
+
+def project_focus_witness(root):
+    """Reuse the existing hippocampus file reader for an actual project owner.
+
+    Background callers bind this local instruction file separately from owner
+    purpose/tag guidance. A missing file is also frozen; adding one changes the
+    capture instructions rather than silently blessing an older assessment.
+    """
+    root = Path(root)
+    if not root.is_absolute():
+        raise ValueError("project capture root must be absolute")
+    text = load_project_focus({"memory_scope": "project", "recording_mode": "automatic",
+                               "memory_mode": "async", "project_root": root})
+    return text, {"root": str(root), "sha256": digest(encoded({"present": text is not None,
+                                                              "content": text}))}
+
+
+def revalidate_project_focus(store, job):
+    """Exact local-file stale-intent check; not an atomic native SAVE guard."""
+    frozen = job.get("project_focus_witness")
+    if store.workspace_root is None:
+        if frozen is not None:
+            raise ValueError("project capture policy scope changed")
+        return
+    if (not isinstance(frozen, dict) or set(frozen) != {"root", "sha256"}
+            or frozen["root"] != store.workspace_root):
+        raise ValueError("project capture policy binding changed; reload before work")
+    _, current = project_focus_witness(store.workspace_root)
+    if current != frozen:
+        raise ValueError("project capture policy changed; reload before work")
+
+
 def _config_digest(config):
     if "frozen_selection" in config:
         from registry_recording import config_digest
@@ -669,6 +701,10 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         summary["maintenance"] = [_maintenance_summary(item) for item in job["maintenance"]]
     if "intent_omissions" in job:
         summary["intent_omissions"] = job["intent_omissions"]
+    if "project_focus_witness" in job:
+        summary["project_focus"] = job["project_focus_witness"]
+    if "guidance_snapshot" in job:
+        summary["guidance"] = guidance_receipt(job["guidance_snapshot"])
     if "store_context" in job:
         summary["store_context"] = job["store_context"]
     if "maintenance_omitted_count" in job:
@@ -962,7 +998,9 @@ def _native_write(config, job, timeout):
         raise TimeoutError("native_deadline")
     # The native child pins its transport ceiling at startup. Give it the
     # write allowance now; the mutable Python timeout still bounds each phase.
-    client = (client_for_service(service, token=token, timeout=min(30, remaining)) if registry
+    client = (service.native_client(timeout=min(30, remaining), operation="record")
+              if policy is not None and getattr(policy, "native", False)
+              else client_for_service(service, token=token, timeout=min(30, remaining)) if registry
               else McpClient(service.url, token=token, timeout=min(30, remaining)))
     try:
         client.connect()
@@ -971,9 +1009,12 @@ def _native_write(config, job, timeout):
             if remaining <= 0:
                 raise TimeoutError("native_deadline")
             client.timeout = min(2, remaining)
+            if registry and getattr(policy, "native", False):
+                client.max_native_bytes = native_limit-native_charge
+            work_before = getattr(client, "work_bytes", None)
             catalog = client.call_tool("databases", {})
             if registry:
-                native_charge += len(encoded(catalog))
+                native_charge += (client.work_bytes - work_before if type(work_before) is int else len(encoded(catalog)))
                 if native_charge > native_limit:
                     raise ReadBudgetRefused("native_read_budget")
             policy.catalog_identity(catalog, job["db_id"])
@@ -999,6 +1040,53 @@ def _native_write(config, job, timeout):
             raise ValueError("config_changed")
         if registry:
             validate_payload(config, job)
+        if registry and getattr(policy, "native", False):
+            from guidance import revalidate_guidance
+            from types import SimpleNamespace
+            if "guidance_snapshot" not in job:
+                raise ReadBudgetRefused("guidance_witness_missing")
+            bounded = SimpleNamespace(db_id=job["db_id"], policy=policy,
+                                      deadline=deadline, remaining_bytes=native_limit-native_charge)
+            def guidance_call(name, args):
+                before = getattr(client, "work_bytes", None)
+                before_remaining = bounded.remaining_bytes
+                left = deadline - time.monotonic()
+                if left <= 0 or bounded.remaining_bytes <= 0:
+                    raise ReadBudgetRefused("native_read_budget")
+                client.timeout = min(30, left)
+                client.max_native_bytes = bounded.remaining_bytes
+                try:
+                    result = client.call_tool(name, args)
+                    charged = client.work_bytes-before if type(before) is int else len(encoded(result))
+                    bounded.remaining_bytes -= charged
+                    if bounded.remaining_bytes < 0:
+                        raise ReadBudgetRefused("native_read_budget")
+                    return result
+                except Exception:
+                    current = getattr(client, "work_bytes", None)
+                    if type(before) is int and type(current) is int and current > before:
+                        bounded.remaining_bytes = before_remaining-(current-before)
+                        if bounded.remaining_bytes < 0:
+                            raise ReadBudgetRefused("native_read_budget")
+                    else:
+                        bounded.remaining_bytes = 0
+                    raise
+            bounded.call = guidance_call
+            try:
+                revalidate_guidance(job["guidance_snapshot"], bounded, registry_store.guidance,
+                                    owner_binding=policy.canonical())
+            except ValueError as error:
+                raise ReadBudgetRefused(str(error)) from error
+            # SAVE has no native multi-guide guard. This fresh exact reread is
+            # deliberately a non-atomic stale-intent check, not policy locking.
+            validate_payload(config, job)
+            try:
+                revalidate_project_focus(registry_store, job)
+            except (ValueError, OSError) as error:
+                raise ReadBudgetRefused(str(error)) from error
+            if bounded.remaining_bytes <= 0:
+                raise ReadBudgetRefused("native_read_budget")
+            client.max_native_bytes = bounded.remaining_bytes
         receipt = client.save_verified(policy.db_alias if policy is not None else "project", payload, expected_db_id=job["db_id"])
         # The synchronous verified receipt is historical evidence of this
         # already-completed write. Later registry revocation cannot make the
@@ -1464,6 +1552,8 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                 db_id = preference_policy.db_id
             frozen = {"phase": "frozen", "db_id": db_id, "assessment_diagnostic": diagnostic}
             frozen.update(registry_frozen)
+            if registry_mode and _context.root_user_ref_json is not None:
+                frozen["root_user_ref_json"] = _context.root_user_ref_json
             if preference_policy is not None:
                 frozen["destination"] = destination
             if not registry_mode and destination == "global_preference":
@@ -1845,3 +1935,19 @@ def export_receipts(config, session_ids):
     if diagnostics or diagnostics_omitted:
         result = normalize_unresolved_export(result, diagnostics, omitted=diagnostics_omitted)
     return result
+
+
+def guidance_receipt(snapshot):
+    """Qualified revision evidence, not duplicated authored guide prose."""
+    from guidance import validate_snapshot
+    value = validate_snapshot(snapshot)
+    roles = {}
+    for role, row in value["roles"].items():
+        witness = row.get("witness")
+        roles[role] = {"outcome": row["outcome"],
+            **({"selector": row["selector"]} if "selector" in row else {}),
+            **({"witness": {key: val for key, val in witness.items() if key != "text"}}
+               if witness is not None else {})}
+    return {"schema": value["schema"], "db": value["db"], "db_id": value["db_id"],
+            "owner_binding_sha256": digest(encoded(value["owner_binding"])), "roles": roles,
+            "save_revalidation": "host_non_atomic"}

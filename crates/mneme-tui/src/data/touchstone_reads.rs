@@ -5,7 +5,7 @@ const UNAVAILABLE: &str = "selected owner does not advertise guarded native touc
 const SMALLER_PAGE: &str = "for a smaller explicit read, use mnemed --remote URL list --touchstones --limit 2 against this owner (add --user for the user database)";
 
 pub(super) async fn page(
-    connection: &mut RemoteClient,
+    connection: &mut ReadClient,
     target: &Target,
     identity: &str,
     after: &Option<String>,
@@ -28,7 +28,7 @@ pub(super) async fn page(
 }
 
 pub(super) async fn annotation(
-    connection: &mut RemoteClient,
+    connection: &mut ReadClient,
     target: &Target,
     identity: &str,
     id: &str,
@@ -49,7 +49,7 @@ pub(super) async fn annotation(
 }
 
 pub(super) async fn exact_target(
-    connection: &mut RemoteClient,
+    connection: &mut ReadClient,
     target: &Target,
     identity: &str,
     db_id: &str,
@@ -106,7 +106,7 @@ pub(super) async fn exact_target(
 }
 
 /// Names alone do not establish support: older owners may ignore unknown fields.
-fn native_touchstone_catalog(connection: &RemoteClient) -> bool {
+fn native_touchstone_catalog(connection: &ReadClient) -> bool {
     connection.supports_expected_db_id("list", None)
         && connection.supports_expected_db_id("get", None)
         && connection.tool_catalog().iter().any(|tool| {

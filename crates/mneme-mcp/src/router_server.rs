@@ -261,6 +261,7 @@ impl Route {
                 .map_err(|_| "upstream unavailable; check its existing service and credentials")?,
         }));
         let client = &mut flight.0.as_mut().expect("connected session").client;
+        mneme_store_client::native_profile(client, self.replica())?;
         if client.server_name() != "mneme-mcp" {
             return Err("upstream is not a native mneme-mcp owner".into());
         }
@@ -303,17 +304,12 @@ impl Route {
         if let Some(replica) = replica {
             replica.verify_databases(&databases).map_err(|_|"snapshot serving identity/path is unavailable or mismatched; no operation was sent")?;
         } else {
-            let db = self.native_db(None);
-            let rows = databases
-                .as_array()
-                .ok_or("invalid upstream database catalog")?;
-            let matches: Vec<_> = rows.iter().filter(|row| row["db"] == db).collect();
-            if matches.len() != 1
-                || matches[0]["db_id"] != self.expected
-                || matches[0]["state"] != "open"
-            {
-                return Err("upstream database identity/state mismatch; check pinned owner, do not follow a replacement".into());
-            }
+            mneme_store_client::verify_owner_databases(
+                &databases,
+                &self.native_db(None),
+                &self.expected,
+                None,
+            )?;
         }
         Ok(())
     }

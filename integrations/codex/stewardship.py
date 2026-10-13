@@ -385,7 +385,9 @@ class NativeOwner:
         token = os.environ.get(service.token_env) if service.token_env else None
         if service.token_env and not token:
             raise ValueError("owner_unavailable")
-        self.client = client_for_service(service, token=token, timeout=min(30,budget.native_seconds))
+        self.client = (service.native_client(timeout=min(30,budget.native_seconds), operation="maintenance")
+                       if getattr(self.policy, "native", False)
+                       else client_for_service(service, token=token, timeout=min(30,budget.native_seconds)))
         self.db_id = None
 
     def __enter__(self):
@@ -404,7 +406,10 @@ class NativeOwner:
     def authorize(self):
         # Native client validated the catalog during connect; never decode it
         # again or infer support from remote initialize fields/old owners.
-        capabilities=self.charge(self.client.owner_capabilities())
+        if getattr(getattr(self, "policy", None), "native", False):
+            self._admit()
+        before = getattr(self.client, "work_bytes", None)
+        capabilities=self.charge(self.client.owner_capabilities(), before)
         if not all(capabilities.get(key) is True for key in ("retag_content_guards","tag_vocabulary")):
             raise ValueError("strong_retag_unavailable")
 
@@ -418,9 +423,15 @@ class NativeOwner:
         if remaining<=0 or self.remaining_bytes<=0:
             raise TimeoutError("native_budget")
         self.client.timeout = min(30,remaining)
+        if getattr(self.policy, "native", False):
+            self.client.max_native_bytes = self.remaining_bytes
 
-    def charge(self, value):
-        self.remaining_bytes -= len(encoded(value))
+    def charge(self, value, work_before=None):
+        cost = self.client.work_bytes-work_before if type(work_before) is int else len(encoded(value))
+        if type(cost) is not int or cost < 0:
+            self.remaining_bytes = 0
+            raise ValueError("native_accounting_unknown")
+        self.remaining_bytes -= cost
         if self.remaining_bytes < 0:
             raise ValueError("native_byte_budget")
         return value
@@ -429,8 +440,20 @@ class NativeOwner:
     def call(self, name, args):
         self._admit()
         if name != "databases":
-            args = {"db":self.policy.db_alias,"expected_db_id":self.db_id,**args}
-        return self.charge(self.client.call_tool(name,args))
+            args = {**args,"db":self.policy.db_alias,"expected_db_id":self.db_id}
+        before = getattr(self.client, "work_bytes", None)
+        before_remaining = self.remaining_bytes
+        try:
+            return self.charge(self.client.call_tool(name,args), before)
+        except Exception:
+            current = getattr(self.client, "work_bytes", None)
+            if type(before) is int and type(current) is int and current > before:
+                self.remaining_bytes = before_remaining-(current-before)
+                if self.remaining_bytes < 0:
+                    raise ValueError("native_byte_budget")
+            else:
+                self.remaining_bytes = 0
+            raise
 
     def page(self, cursor, limit):
         result = self.call("list",{"kind":"nodes","status":"active","limit":limit,**({"after":cursor} if cursor else {})})
@@ -510,6 +533,8 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                 journal.page(ids,cursor)
             previous_guide=journal.get("guide") or ""
             pool=[]
+            guidance_ids = ({selector["id"] for selector in selected.guidance.values()}
+                            if selected is not None and getattr(selected, "native_binding", None) is not None else set())
             served=False
             def serve(identifier):
                 nonlocal served
@@ -525,7 +550,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                     serve(identifier)
                     journal.defer(identifier,None,previous_guide,"read_deferred")
                     continue
-                if target is None or identifier==config.get("tag_guide_id"):
+                if target is None or identifier==config.get("tag_guide_id") or identifier in guidance_ids:
                     serve(identifier)
                     journal.mark(identifier,fingerprint,previous_guide,"ineligible")
                     continue
@@ -533,8 +558,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
             context=tag_context.collect(config,expected_db_id=owner.db_id,
                 timeout=max(.001,owner.deadline-time.monotonic()),max_bytes=max(1,min(context_room,owner.remaining_bytes)),
                 cue=" ".join(t["summary"] for t in pool)[:budget.stewardship_prompt_bytes],
-                seed_tags=tuple(dict.fromkeys(tag for t in pool for tag in t["tags"])))
-            owner.remaining_bytes -= context.decoded_bytes
+                seed_tags=tuple(dict.fromkeys(tag for t in pool for tag in t["tags"])), owner=owner)
             if not context.enabled or context.db_id != owner.db_id or owner.remaining_bytes<=0 or not allowed():
                 journal.put("last_outcome","context_unavailable_or_interrupted")
                 return False
@@ -574,6 +598,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                 journal.put("last_outcome","foreground_or_session_budget")
                 return False
             serve(targets[0]["id"])
+            native_seconds_left = max(0, owner.deadline-time.monotonic())
             try:
                 # The runtime owns its finite provider deadline (currently
                 # 45s); native I/O effort must not truncate the inference turn.
@@ -595,9 +620,9 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                     journal.defer(target["id"],target["content_fingerprint"],guide,"assessment_deferred")
                 journal.put("last_outcome","assessment_deferred")
                 return True
-            # The read deadline excludes the model turn, but does not mint an
-            # unbounded retry period. One fresh bounded write window, no retry.
-            owner.deadline=time.monotonic()+budget.native_seconds
+            # Pause the existing native allowance during inference; rechecks
+            # and writes consume what reads left, not a fresh allowance.
+            owner.deadline=time.monotonic()+native_seconds_left
             lookup={target["id"]:target for target in targets}
             for index, decision in enumerate(decisions):
                 if not allowed():
@@ -619,6 +644,11 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                     continue
                 seq=journal.intent(target,guide,decision["tags"])
                 try:
+                    if context.guidance_json is not None:
+                        from guidance import revalidate_guidance
+                        selected_now = _selected_owner(config)
+                        revalidate_guidance(json.loads(context.guidance_json), owner,
+                            selected_now.guidance, owner_binding=owner.policy.canonical())
                     receipt=owner.retag(target,decision["tags"],context.content_guards)
                     status=_acknowledgement(receipt,owner.db_id,target,decision["tags"])
                 except Exception as error:

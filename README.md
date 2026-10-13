@@ -40,6 +40,11 @@ Automatic memory uses Codex models and can send session context to your configur
 provider. Use `mnemed init --no-recording` to disable automatic saves while keeping
 recall. See the [Codex guide](integrations/codex/README.md) for configuration.
 
+For multiple existing owners, see [one declarative memory configuration](docs/declarative-config.md).
+It separates store activation, grants and delivery, with one native selector and
+one device hook actor. Existing hippocampus background instructions stay in their
+project file.
+
 For **other MCP clients or standalone CLI use**, follow the
 [CLI and MCP guide](docs/cli-and-mcp.md).
 

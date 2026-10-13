@@ -226,12 +226,12 @@ def _revalidate_config_guard(guard):
             or any(char not in "0123456789abcdef" for char in guard["sha256"])):
         raise ValueError("invalid core configuration pin")
     with _absolute_path(guard["path"]).open("rb") as source:
-        raw = source.read(MAX_CONFIG + 1)
-    if len(raw) > MAX_CONFIG or hashlib.sha256(raw).hexdigest() != guard["sha256"]:
+        raw = source.read(64 * 1024 + 1)
+    if len(raw) > 64 * 1024 or hashlib.sha256(raw).hexdigest() != guard["sha256"]:
         raise ValueError("core configuration changed; select again")
 
 
-def _collect_registry_scope(selection, store, deadline, limit, *, config_guard=None):
+def _collect_registry_scope(selection, store, deadline, limit, *, config_guard=None, shared_work=None):
     from memory import BridgeError, _core_response
     from store_registry import revalidate
 
@@ -244,15 +244,44 @@ def _collect_registry_scope(selection, store, deadline, limit, *, config_guard=N
         timeout = deadline - time.monotonic()
         if timeout <= 0:
             break
-        client = client_for_service(config, timeout=timeout)
+        client = config.native_client(timeout=timeout, operation="core") if hasattr(config, "native_client") else client_for_service(config, timeout=timeout)
+        def read(name, args):
+            if shared_work is not None and (shared_work["bytes"] >= shared_work["limit"] or shared_work.get("unknown")):
+                raise ValueError("core native shared allowance exhausted")
+            before_work = getattr(client, "work_bytes", None)
+            charged = False
+            try:
+                if shared_work is not None and hasattr(client, "max_native_bytes"):
+                    client.max_native_bytes = shared_work["limit"] - shared_work["bytes"]
+                value = client.call_tool(name, args)
+                if shared_work is not None:
+                    shared_work["bytes"] += client.measured_size(value) if hasattr(client, "measured_size") else len(_json(value).encode())
+                    charged = True
+                    if shared_work["bytes"] > shared_work["limit"]:
+                        raise ValueError("core native shared allowance exhausted")
+                return value
+            except (McpError, OSError, ValueError, TimeoutError):
+                if shared_work is not None and not charged:
+                    after_work = getattr(client, "work_bytes", None)
+                    if type(before_work) is int and type(after_work) is int and after_work > before_work:
+                        # Native refusal envelopes include exact consumed work.
+                        # Charge that failed owner without poisoning later reads;
+                        # absent/unchanged accounting remains conservatively fatal.
+                        shared_work["bytes"] += after_work - before_work
+                    else:
+                        shared_work["unknown"] = True
+                raise
         try:
             client.connect()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             client.timeout = remaining
-            catalog = client.call_tool("databases", {})
-            if (not _expected_catalog(config, catalog)
+            catalog = read("databases", {})
+            if hasattr(config, "native_client"):
+                from target_policy import TargetPolicy
+                TargetPolicy.from_selected(chosen, current).catalog_identity(catalog)
+            elif (not _expected_catalog(config, catalog)
                     or chosen.db_id is not None and catalog[0].get("db_id") != chosen.db_id):
                 raise ValueError("unexpected selected owner catalog")
             # Recheck selection before the core request too, after readiness
@@ -267,10 +296,11 @@ def _collect_registry_scope(selection, store, deadline, limit, *, config_guard=N
             args = {"db": chosen.db_alias, "max_body_bytes": body_limit}
             if chosen.db_id is not None:
                 args["expected_db_id"] = chosen.db_id
-            native = _core_response(client.call_tool("core", args), max_body_bytes=body_limit)
+            native = _core_response(read("core", args), max_body_bytes=body_limit)
+            section = _pack(_registry_target(chosen), native, limit)
             _revalidate_config_guard(config_guard)
             revalidate(selection, operation="core", store_name=store.name)
-            return _pack(_registry_target(chosen), native, limit)
+            return section
         except McpTransportError:
             # A passive read may wait for an independently started owner, but
             # this path has no service-start authority, local or remote.
@@ -296,8 +326,18 @@ def _registry_child_main():
             raise ValueError("invalid registry collector request")
         deadline = time.monotonic() + request["timeout"]
         _revalidate_config_guard(request.get("config_guard"))
-        selection = selection_from_dict(request["selection"])
+        witness = request["selection"]
+        if isinstance(witness, dict) and witness.get("schema") == "mneme.native-core-selection.v1":
+            from store_registry import native_select
+            if set(witness) != {"schema", "config_path", "native_cli", "cwd", "digest", "binary_pin"}:
+                raise ValueError("invalid compact core selection witness")
+            selection = native_select(_absolute_path(witness["config_path"]), _absolute_path(witness["native_cli"]), _absolute_path(witness["cwd"]))
+            if selection.digest != witness["digest"] or selection.binary_pin != witness["binary_pin"]:
+                raise ValueError("core selection changed; use a fresh session")
+        else:
+            selection = selection_from_dict(witness)
         remaining_bytes = MAX_REGISTRY_OUTPUT
+        shared_work = {"bytes": 0, "limit": 128 * 1024}
         for index, store in enumerate(selection.core):
             target = _registry_target(store)
             minimum = len(_json(_unavailable(target)).encode("utf-8")) + 1
@@ -307,7 +347,7 @@ def _registry_child_main():
             try:
                 section = _collect_registry_scope(selection, store, scope_deadline,
                                                   min(MAX_SCOPE_BYTES, remaining_bytes - 1),
-                                                  config_guard=request.get("config_guard"))
+                                                  config_guard=request.get("config_guard"), shared_work=shared_work)
             except (McpError, OSError, ValueError, KeyError, TypeError, RuntimeError):
                 section = _unavailable(target)
             line = _json(section)
@@ -447,7 +487,11 @@ def collect_registry_core(selection, timeout=WALL_TIMEOUT, *, config_guard=None)
     if not _valid_timeout(timeout):
         raise ValueError("timeout must be finite and in (0, %g]" % WALL_TIMEOUT)
     _revalidate_config_guard(config_guard)
-    payload = _json({"selection": selection.to_dict(), "timeout": timeout,
+    from store_registry import NativeSelection
+    witness = ({"schema": "mneme.native-core-selection.v1", "config_path": selection.registry_path,
+                "native_cli": selection.native_cli, "cwd": selection.cwd, "digest": selection.digest, "binary_pin": selection.binary_pin}
+               if isinstance(selection, NativeSelection) else selection.to_dict())
+    payload = _json({"selection": witness, "timeout": timeout,
                      "config_guard": config_guard}).encode("utf-8")
     if len(payload) > MAX_REGISTRY_REQUEST:
         raise ValueError("selected core request exceeds byte limit")
@@ -572,11 +616,11 @@ def handle_hook_event(event, config, timeout=WALL_TIMEOUT):
 def _hook_config(path, event):
     from hooks import _bounded_json, _config as load_hook_config, HookError, MAX_CONFIG as MAX_HOOK_CONFIG
     from misc_binding import choose_workspace
-    from registry_runtime import SCHEMA
+    from registry_runtime import SCHEMA, NATIVE_SCHEMA
 
     try:
         raw = _bounded_json(path, MAX_HOOK_CONFIG)
-        if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+        if not isinstance(raw, dict) or raw.get("schema") not in (SCHEMA, NATIVE_SCHEMA):
             raise ValueError("startup registry hook requires v12 configuration")
         binding = choose_workspace(event.get("cwd")) if raw.get("memory_scope") == "registry" else None
         if raw.get("memory_scope") == "registry" and binding is None:

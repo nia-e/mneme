@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Dispatch the one device misc librarian only for unconfigured workspaces.
+"""Dispatch one device actor; native configuration selects applicable stores.
 
-Project hooks are additive in Codex. This front door therefore declines their
-workspaces before loading the misc owner or starting the existing lifecycle.
+Legacy misc/registry configs still decline configured workspaces. Native configs
+cover all workspaces and must replace, not duplicate, project hook actors.
 """
 import argparse
 import json
@@ -25,6 +25,14 @@ def handle_event(event, config_path, *, reader_background=False, core=False):
     if core and (reader_background or event["hook_event_name"] != "SessionStart"):
         return {}
     raw = hooks._bounded_json(Path(config_path), hooks.MAX_CONFIG)
+    if isinstance(raw, dict) and raw.get("schema") == "mneme.codex-hooks.config.v13":
+        # No Python discovery/selection here. Disabled, isolated, exclusions and
+        # per-operation permissions come from the bounded native selection.
+        config = hooks._config(Path(config_path), cwd=event.get("cwd"))
+        if core:
+            import core_hook
+            return core_hook.handle_hook_event(event, config)
+        return hooks.handle_event(event, config, reader_background=reader_background)
     if isinstance(raw, dict) and raw.get("schema") == hooks.CONFIG_SCHEMA_V12:
         from registry_runtime import validate_static
         static = validate_static(raw)
@@ -54,7 +62,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--reader-background", action="store_true")
-    parser.add_argument("--core", action="store_true", help="passive registry core for unconfigured workspaces")
+    parser.add_argument("--core", action="store_true", help="passive selected-store core; independent of background recording")
     args = parser.parse_args(argv)
     event = None
     try:

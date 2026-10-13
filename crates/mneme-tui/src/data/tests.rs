@@ -528,6 +528,7 @@ impl MockOwner {
             token_env: None,
             expected_db_id: None,
             expected_path: None,
+            configured: None,
         }
     }
 }
@@ -1160,7 +1161,7 @@ async fn edge_reads_share_one_deadline_and_keep_completed_results() {
         ..EdgeFixture::default()
     });
     let target = owner.target();
-    let mut connection = RemoteClient::connect(&ConnectionOptions {
+    let mut connection = ReadClient::connect(&ConnectionOptions {
         url: target.url,
         ssh_mcp_port: target.ssh_mcp_port,
         token_env: None,

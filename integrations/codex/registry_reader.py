@@ -22,7 +22,8 @@ def _current(config, snapshot, *, operation=None, store_name=None):
         raise ValueError("selected owner policy changed")
     if operation is not None:
         subsets = {"read": current.readable, "core": current.core,
-                   "record": current.recordable, "maintenance": current.maintainable}
+                   "record": current.recordable, "maintenance": current.maintainable,
+                   "recall": getattr(current, "recallable", current.readable)}
         if operation not in subsets or not any(store.name == store_name for store in subsets[operation]):
             raise ValueError("selected owner does not permit this operation")
     return current
@@ -102,7 +103,7 @@ def execute(config, cue, runtime, reserve, emitted, *, start_owner=None):
     shared = {"deadline": time.monotonic() + budget.native_seconds, "decoded_bytes": 0}
     cards, owners, paths, routing, conditional, concern_rows, case_keys = [], set(), {}, {}, {}, [], set()
     owner_diagnostics = []
-    readable = list(selection.readable)
+    readable = list(getattr(selection, "recallable", selection.readable))
     if start_owner is not None:
         for index, store in enumerate(readable):
             if store.name == start_owner:
@@ -118,7 +119,7 @@ def execute(config, cue, runtime, reserve, emitted, *, start_owner=None):
         coverage["attempted"] += 1
         try:
             # Complete selection and operation admission precede every contact.
-            _current(config, selection, operation="read", store_name=store.name)
+            _current(config, selection, operation="recall" if store.native_binding is not None else "read", store_name=store.name)
             target = TargetPolicy.from_selected(store, selection)
             native = collect_reader(Path(store.service_config), store.read.cue or cue,
                 Path(selection.cwd), timeout=min(remaining, budget.native_seconds), budget=budget,

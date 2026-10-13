@@ -5,6 +5,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+mneme-config = { path = "../mneme-config" }
+mneme-store-client = { path = "../mneme-store-client" }
 mneme-core.workspace = true
 mneme-engine.workspace = true
 mneme-app.workspace = true

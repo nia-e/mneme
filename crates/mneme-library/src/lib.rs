@@ -295,12 +295,49 @@ impl Ranker for CommonFastReranker {
     }
 }
 
+/// Canonical owner binding derived from native-ID configuration, not a second
+/// device/project topology configuration.
+#[derive(Clone)]
+pub struct NativeOwnerRoute {
+    pub endpoint: Endpoint,
+    pub database: String,
+    pub expected_path: Option<PathBuf>,
+}
+
 pub struct LibraryRuntime {
     config: LibraryConfig,
     source: Arc<dyn Source>,
     ranker: Option<Arc<dyn Ranker>>,
+    /// Configured collection reads may only expose explicitly admitted IDs.
+    read_authority: Option<HashSet<String>>,
+    admission_guard: Option<Arc<dyn Fn() -> Result<(), LibraryError> + Send + Sync>>,
+    native_owners: BTreeMap<String, NativeOwnerRoute>,
 }
 impl LibraryRuntime {
+    /// Use an explicitly configured collection without a second operator config.
+    /// The existing catalog owns its identity; no store or remote owner is opened.
+    pub fn from_catalog(
+        catalog_path: PathBuf,
+        replicas: BTreeMap<String, Endpoint>,
+    ) -> Result<Self, LibraryError> {
+        let bytes = read_metadata(&catalog_path, 512 * 1024, "library catalog", "512 KiB")?;
+        let catalog: Catalog =
+            serde_json::from_slice(&bytes).map_err(|e| err(format!("library catalog: {e}")))?;
+        let runtime = Self::new(LibraryConfig {
+            schema: "mneme.library.config.v1".into(),
+            library_id: catalog.library_id,
+            device_id: "configured-reader".into(),
+            catalog_path,
+            owners: BTreeMap::new(),
+            owner_routes: BTreeMap::new(),
+            replicas,
+            limits: Limits::default(),
+            core: None,
+            rerank: false,
+        })?;
+        runtime.read_catalog()?;
+        Ok(runtime)
+    }
     pub fn from_path(path: &Path) -> Result<Self, LibraryError> {
         let bytes = read_metadata(path, 64 * 1024, "library config", "64 KiB")?;
         let mut config: LibraryConfig =
@@ -325,7 +362,56 @@ impl LibraryRuntime {
             config,
             source: Arc::new(RemoteSource),
             ranker,
+            read_authority: None,
+            admission_guard: None,
+            native_owners: BTreeMap::new(),
         })
+    }
+    /// Retain host selection fencing when the collection outlives its frontend.
+    pub fn with_admission_guard(
+        mut self,
+        guard: Arc<dyn Fn() -> Result<(), LibraryError> + Send + Sync>,
+    ) -> Self {
+        self.admission_guard = Some(guard);
+        self
+    }
+    pub fn with_native_owners(
+        mut self,
+        owners: BTreeMap<String, NativeOwnerRoute>,
+    ) -> Result<Self, LibraryError> {
+        let catalog = self.read_catalog()?;
+        let mut ids = HashSet::new();
+        for entry in catalog.entries.iter().filter(|entry| !entry.withdrawn) {
+            if !ids.insert(&entry.db_id) {
+                return Err(err(
+                    "native identity maps to multiple collection descriptors",
+                ));
+            }
+            if let Some(owner) = owners.get(&entry.db_id) {
+                if owner.database != entry.database {
+                    return Err(err(
+                        "configured owner alias differs from the catalog descriptor; verify and refresh that descriptor",
+                    ));
+                }
+                self.config
+                    .owner_routes
+                    .entry(entry.owner_device_id.clone())
+                    .or_default()
+                    .insert(entry.db_id.clone(), owner.endpoint.clone());
+            }
+        }
+        self.native_owners = owners;
+        Ok(self)
+    }
+    pub fn with_read_authority(mut self, ids: HashSet<String>) -> Self {
+        self.read_authority = Some(ids);
+        self
+    }
+    fn configured_endpoint(&self, entry: &Entry) -> Option<&Endpoint> {
+        self.native_owners
+            .get(&entry.db_id)
+            .map(|owner| &owner.endpoint)
+            .or_else(|| owner_endpoint(&self.config, entry))
     }
     pub fn with_source(mut self, source: Arc<dyn Source>) -> Self {
         self.source = source;
@@ -336,13 +422,16 @@ impl LibraryRuntime {
         self
     }
     fn read_catalog(&self) -> Result<Catalog, LibraryError> {
+        if let Some(guard) = &self.admission_guard {
+            guard()?;
+        }
         let bytes = read_metadata(
             &self.config.catalog_path,
             512 * 1024,
             "library catalog",
             "512 KiB",
         )?;
-        let cat: Catalog =
+        let mut cat: Catalog =
             serde_json::from_slice(&bytes).map_err(|e| err(format!("library catalog: {e}")))?;
         if cat.schema != "mneme.library.catalog.v1" || cat.library_id != self.config.library_id {
             return Err(err("library catalog schema or library_id mismatch"));
@@ -363,6 +452,32 @@ impl LibraryRuntime {
             if e.replicas.len() > 8 {
                 return Err(err("too many replicas"));
             }
+            let mut pins = HashSet::new();
+            for replica in &e.replicas {
+                if !pins.insert((&replica.source_device_id, &replica.generation)) {
+                    return Err(err("ambiguous snapshot reference in library catalog"));
+                }
+            }
+        }
+        if let Some(ids) = &self.read_authority {
+            cat.entries.retain(|entry| ids.contains(&entry.db_id));
+        }
+        if !self.native_owners.is_empty() {
+            let mut ids = HashSet::new();
+            for entry in cat.entries.iter().filter(|entry| !entry.withdrawn) {
+                if !ids.insert(&entry.db_id) {
+                    return Err(err("ambiguous native identity in configured collection"));
+                }
+                if self
+                    .native_owners
+                    .get(&entry.db_id)
+                    .is_some_and(|owner| owner.database != entry.database)
+                {
+                    return Err(err(
+                        "configured collection owner alias changed; review the descriptor",
+                    ));
+                }
+            }
         }
         Ok(cat)
     }
@@ -375,7 +490,7 @@ impl LibraryRuntime {
             .into_iter()
             .filter(|entry| !entry.withdrawn)
             .map(|entry| {
-                let route = owner_endpoint(&self.config, &entry).cloned();
+                let route = self.configured_endpoint(&entry).cloned();
                 (entry, route)
             })
             .collect())
@@ -397,7 +512,7 @@ impl LibraryRuntime {
     pub fn catalog(&self) -> Result<Value, LibraryError> {
         let cat = self.read_catalog()?;
         Ok(
-            json!({"schema":"mneme.library.catalog.v1","library_id":cat.library_id,"revision":cat.revision,"entries":cat.entries.iter().filter(|e|!e.withdrawn).map(|e|json!({"project_id":e.project_id,"db_id":e.db_id,"owner_device_id":e.owner_device_id,"display_name":e.display_name,"revision":e.revision,"live_route":if owner_endpoint(&self.config,e).is_some(){"configured"}else{"unrouted"},"replicas":e.replicas.iter().map(|r|json!({"source_device_id":r.source_device_id,"generation":r.generation,"captured_at":r.captured_at})).collect::<Vec<_>>()})).collect::<Vec<_>>() }),
+            json!({"schema":"mneme.library.catalog.v1","library_id":cat.library_id,"revision":cat.revision,"entries":cat.entries.iter().filter(|e|!e.withdrawn).map(|e|json!({"project_id":e.project_id,"db_id":e.db_id,"owner_device_id":e.owner_device_id,"display_name":e.display_name,"revision":e.revision,"live_route":if self.configured_endpoint(e).is_some(){"configured"}else{"unrouted"},"replicas":e.replicas.iter().map(|r|json!({"source_device_id":r.source_device_id,"generation":r.generation,"captured_at":r.captured_at})).collect::<Vec<_>>()})).collect::<Vec<_>>() }),
         )
     }
     pub async fn dispatch(&self, name: &str, args: Value) -> Result<Value, LibraryError> {
@@ -449,22 +564,42 @@ impl LibraryRuntime {
             .min(64);
         let timeout = Duration::from_millis(self.config.limits.timeout_ms);
         let source = self.source.clone();
-        let cfg = Arc::new(self.config.clone());
-        let results =
-            stream::iter(
-                selected.into_iter().map(|entry| {
-                    let source = source.clone();
-                    let cfg = cfg.clone();
-                    let tags = q.tags.clone();
-                    let text = q.text.clone();
-                    async move {
-                        retrieve_one(source, cfg, entry, text, tags, per, timeout, context).await
-                    }
-                }),
-            )
-            .buffered(self.config.limits.concurrent)
-            .collect::<Vec<_>>()
-            .await;
+        let mut configured = self.config.clone();
+        for entry in &cat.entries {
+            if let Some(owner) = self.native_owners.get(&entry.db_id) {
+                configured
+                    .owner_routes
+                    .entry(entry.owner_device_id.clone())
+                    .or_default()
+                    .insert(entry.db_id.clone(), owner.endpoint.clone());
+            }
+        }
+        let cfg = Arc::new(configured);
+        let native_owners = Arc::new(self.native_owners.clone());
+        let results = stream::iter(selected.into_iter().map(|entry| {
+            let source = source.clone();
+            let cfg = cfg.clone();
+            let native_owners = native_owners.clone();
+            let tags = q.tags.clone();
+            let text = q.text.clone();
+            async move {
+                retrieve_one(
+                    source,
+                    cfg,
+                    native_owners,
+                    entry,
+                    text,
+                    tags,
+                    per,
+                    timeout,
+                    context,
+                )
+                .await
+            }
+        }))
+        .buffered(self.config.limits.concurrent)
+        .collect::<Vec<_>>()
+        .await;
         let mut primary = Vec::new();
         let mut coverage = Vec::new();
         let mut episodes = Vec::new();
@@ -607,9 +742,18 @@ impl LibraryRuntime {
             == e.owner_device_id
             && g.generation.is_none()
         {
-            let ep = owner_endpoint(&self.config,e)
+            let ep = self.configured_endpoint(e)
                 .ok_or_else(|| err("live route not configured for this project; provision owner_routes or query a snapshot"))?;
-            (ep, &e.database, "live", None, None, None)
+            (
+                ep,
+                &e.database,
+                "live",
+                None,
+                None,
+                self.native_owners
+                    .get(&e.db_id)
+                    .and_then(|owner| owner.expected_path.as_deref()),
+            )
         } else {
             let generation = g
                 .generation
@@ -810,6 +954,7 @@ fn verify_database_row(
 async fn retrieve_one(
     source: Arc<dyn Source>,
     cfg: Arc<LibraryConfig>,
+    native_owners: Arc<BTreeMap<String, NativeOwnerRoute>>,
     e: Entry,
     text: String,
     tags: Vec<String>,
@@ -826,7 +971,18 @@ async fn retrieve_one(
     let mut result = match endpoint {
         Some(ep) => {
             query_source_bounded(
-                &*source, ep, db, &e.db_id, None, &text, &tags, per, timeout, context,
+                &*source,
+                ep,
+                db,
+                &e.db_id,
+                native_owners
+                    .get(&e.db_id)
+                    .and_then(|owner| owner.expected_path.as_deref()),
+                &text,
+                &tags,
+                per,
+                timeout,
+                context,
             )
             .await
         }

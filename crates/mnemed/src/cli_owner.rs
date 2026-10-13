@@ -371,7 +371,8 @@ pub(crate) fn resolve(
     }
     if matches!(
         command,
-        Command::Client(_)
+        Command::Config(_)
+            | Command::Client(_)
             | Command::Library(_)
             | Command::Tui(_)
             | Command::BootstrapInspect(_)

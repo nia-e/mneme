@@ -472,9 +472,67 @@ fn save_receipt_evidence(prepared: &PreparedSave, receipt: &Value) -> Value {
     evidence
 }
 
+trait SaveConnection {
+    fn features(&self) -> Result<mneme_mcp_client::CatalogView<'_>, ClientFailure>;
+    async fn tool(&mut self, name: &str, arguments: Value) -> Result<Value, ClientFailure>;
+}
+impl SaveConnection for Option<RemoteClient> {
+    fn features(&self) -> Result<mneme_mcp_client::CatalogView<'_>, ClientFailure> {
+        Ok(mneme_mcp_client::CatalogView(
+            self.as_ref()
+                .ok_or_else(|| ClientFailure::input("connect before MCP requests"))?
+                .tool_catalog(),
+        ))
+    }
+    async fn tool(&mut self, name: &str, arguments: Value) -> Result<Value, ClientFailure> {
+        call_tool(self, name, arguments).await
+    }
+}
+struct ConfiguredSave<'a> {
+    client: &'a mneme_store_client::ConfiguredClient,
+    store: &'a str,
+    catalog: Vec<Value>,
+    budget: &'a mut mneme_store_client::OperationBudget,
+}
+impl SaveConnection for ConfiguredSave<'_> {
+    fn features(&self) -> Result<mneme_mcp_client::CatalogView<'_>, ClientFailure> {
+        Ok(mneme_mcp_client::CatalogView(&self.catalog))
+    }
+    async fn tool(&mut self, name: &str, mut arguments: Value) -> Result<Value, ClientFailure> {
+        arguments["db"] = json!(self.store);
+        self.client
+            .call_owner_with_budget(self.store, name, arguments, self.budget)
+            .await
+            .map_err(|error| map_remote(error.as_ref()))
+    }
+}
+/// Reuse the exact native SAVE verification and uncertainty evidence; the
+/// configured adapter never exposes raw transport or removes owner ceilings.
+pub(crate) async fn verified_configured_save(
+    request: &Value,
+    client: &mneme_store_client::ConfiguredClient,
+    store: &str,
+    budget: &mut mneme_store_client::OperationBudget,
+) -> Result<Value, Value> {
+    let catalog = client
+        .catalog_owner_with_budget(store, budget)
+        .await
+        .map_err(|error| json!({"kind":"protocol","message":error.to_string()}))?;
+    let mut adapter = ConfiguredSave {
+        client,
+        store,
+        catalog,
+        budget,
+    };
+    verified_save(request, &mut adapter).await.map_err(|error| {
+        let envelope = response(Value::Null, Err(error));
+        envelope["error"].clone()
+    })
+}
+
 async fn verified_save(
     request: &Value,
-    client: &mut Option<RemoteClient>,
+    client: &mut impl SaveConnection,
 ) -> Result<Value, ClientFailure> {
     let db = registry_name(request)?;
     let expected_db_id = expected_db_id(request)?;
@@ -492,9 +550,7 @@ async fn verified_save(
     let frozen = prepared.into_json();
     let prepared =
         PreparedSave::parse(&frozen, "").map_err(|e| ClientFailure::input(e.to_string()))?;
-    let remote = client
-        .as_ref()
-        .ok_or_else(|| ClientFailure::input("connect before MCP requests"))?;
+    let remote = client.features()?;
     if !remote.supports_save_kind(kind.as_str())
         || (frozen.get("links").is_some() && !remote.supports_save_links(kind.as_str()))
         || match kind {
@@ -506,8 +562,7 @@ async fn verified_save(
             "server does not advertise compatible SAVE and exact readback; refusing write without fallback",
         ));
     }
-    if frozen.get("touchstone").is_some()
-        && !crate::remote_touchstone::advertised(remote.tool_catalog(), "save")
+    if frozen.get("touchstone").is_some() && !crate::remote_touchstone::advertised(remote.0, "save")
     {
         return Err(ClientFailure::protocol(
             "server does not advertise native touchstone SAVE; refusing write without fallback",
@@ -540,16 +595,14 @@ async fn verified_save(
     }
     attach_expected_db_id(&mut attempted, expected_db_id);
     // Exactly one mutation; uncertainty must never cause automatic retry.
-    let receipt = call_tool(client, "save", arguments)
-        .await
-        .map_err(|mut error| {
-            if error.kind != "tool" {
-                // This process knows which identity it attempted, but no valid
-                // receipt proved acceptance. Preserve it without making that claim.
-                error.attempted = Some(attempted);
-            }
-            error
-        })?;
+    let receipt = client.tool("save", arguments).await.map_err(|mut error| {
+        if error.kind != "tool" {
+            // This process knows which identity it attempted, but no valid
+            // receipt proved acceptance. Preserve it without making that claim.
+            error.attempted = Some(attempted);
+        }
+        error
+    })?;
     let mut accepted = save_receipt_evidence(&prepared, &receipt);
     accepted["readback_status"] = json!("not_attempted");
     accepted["retryable"] = json!(false);
@@ -581,7 +634,8 @@ async fn verified_save(
             let mut arguments =
                 json!({"db":db, "id":expected_id, "body":true, "max_body_bytes":256*1024});
             attach_expected_db_id(&mut arguments, expected_db_id);
-            let node = call_tool(client, "get", arguments)
+            let node = client
+                .tool("get", arguments)
                 .await
                 .map_err(|e| e.with_accepted(&accepted))?;
             if node.get("db").and_then(Value::as_str) != Some(db)
@@ -603,7 +657,8 @@ async fn verified_save(
                     "offset":collected.offset(), "max_bytes":mneme_core::episode::MAX_EPISODE_BODY_BYTES,
                 });
                 attach_expected_db_id(&mut arguments, expected_db_id);
-                let node = call_episode(client, arguments)
+                let node = client
+                    .tool("episode", arguments)
                     .await
                     .map_err(|e| e.with_accepted(&accepted))?;
                 if node.get("db").and_then(Value::as_str) != Some(db)
