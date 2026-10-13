@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bounded, optional async reader state and one reusable worker per root session.
 
-The foreground functions perform local, nonblocking state transactions only. They
-never call Mneme, Codex, or wait for a worker. A failed optional transaction skips.
+Foreground state-lock acquisition is bounded. Native configuration revalidation
+may run, but no owner/provider work or worker-completion wait occurs here.
+Optional delivery does not wait for a state lock.
 """
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ MAX_ATTEMPTS = LibrarianBudget().attempts
 MAX_INPUT = LibrarianBudget().input_tokens
 MAX_OUTPUT = LibrarianBudget().output_tokens
 MAX_WORKERS = 2
+STATE_LOCK_SECONDS = 0.5
 
 
 def _short(value: str, limit: int) -> str:
@@ -226,8 +228,9 @@ def _config_current(config):
         return None
 
 
-def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = True, allow_stale: bool = False):
-    """Return (success, result); never wait for another hook or worker."""
+def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = True,
+           allow_stale: bool = False, lock_timeout: float = 0):
+    """Return (success, result); retry only lock contention within this allowance."""
     try:
         pin = None if allow_stale else _config_current(config)
         if not allow_stale and pin is None:
@@ -238,7 +241,7 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
         path, lock = _paths(config, session_id)
         fd = host_files.open_regular(lock, os.O_RDWR | (os.O_CREAT if create else 0))
         with os.fdopen(fd, "rb+") as stream:
-            host_files.lock_file(stream, blocking=False)
+            host_files.lock_file_bounded(stream, timeout=lock_timeout)
             if path.exists():
                 if path.is_symlink() or path.stat().st_size > MAX_STATE:
                     return False, None
@@ -252,9 +255,16 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
                 data = _new()
             else:
                 return False, None
+            rebound = not allow_stale and data.get("config_pin") != pin
+            if rebound:
+                # A waiter may have fallen behind a new policy's writer. Only
+                # a rebind needs another native selection under this lock;
+                # never replace a newer ledger pin with a pre-wait snapshot.
+                # Old paid results settle through explicit allow_stale calls.
+                if lock_timeout and _config_current(config) != pin:
+                    return False, None
             from recording_jobs import _bind_workspace
             bound = _bind_workspace(config, data)
-            rebound = not allow_stale and data.get("config_pin") != pin
             if rebound:
                 # Invalidate payload/history, NOT outstanding paid-call identities or totals.
                 data.update(config_pin=pin, generation=secrets.token_hex(16),
@@ -310,6 +320,8 @@ def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> 
             return "budget", True
         data["pending"] = {"turn": turn, "request": digest, "epoch": data["epoch"]}
         return "queued", True
+    # Prompt admission remains best effort: retrying it could reorder an old
+    # prompt behind a newer lifecycle event. Closures may wait; notices do not.
     ok, result = _state(config, session, mark)
     return {"outcome": result if ok else "busy"}
 
@@ -427,11 +439,12 @@ def reset(config: dict[str, Any], session_id: str) -> None:
                     prior="", emitted=[], ended=False)
         if was_ended:
             data["generation"] = secrets.token_hex(16)
-            data["worker_pid"] = None
-            data["worker_identity"] = None
+            # The old generation may still own both leases. Leave its identity
+            # until that owner retires; an early child would lose the lease and
+            # strand this generation's pending work.
         data["fence"] = _fence(config, session_id)
         return None, True
-    _state(config, session_id, clear)
+    _state(config, session_id, clear, lock_timeout=STATE_LOCK_SECONDS)
 
 
 def close_turn(config: dict[str, Any], session_id: str, turn_id: str) -> None:
@@ -447,7 +460,7 @@ def close_turn(config: dict[str, Any], session_id: str, turn_id: str) -> None:
             _count(data, "dropped")
         data["ready"] = None
         return None, True
-    ok, _ = _state(config, session_id, close, create=False)
+    ok, _ = _state(config, session_id, close, create=False, lock_timeout=STATE_LOCK_SECONDS)
     if not ok:
         # We cannot establish which turn owns a busy/malformed optional state.
         # Drop a possibly newer optional packet rather than emit after Stop.
@@ -468,7 +481,7 @@ def end_session(config: dict[str, Any], session_id: str) -> None:
         data.update(active=None, pending=None, ready=None, prior="", ended=True,
                     fence=_fence(config, session_id))
         return None, True
-    _state(config, session_id, clear, create=False)
+    _state(config, session_id, clear, create=False, lock_timeout=STATE_LOCK_SECONDS)
     # Keep the small ledger until a new session generation is established, so an
     # in-flight old worker cannot resurrect cards after SessionEnd.
 
@@ -485,11 +498,25 @@ def _alive(pid: Any, identity=None) -> bool:
     return True
 
 
-def background(config: dict[str, Any], event: dict[str, Any]):
+def _runnable_pending(config, session_id, data):
+    """Only actual unsettled reader work can renew an ordinary retiring worker."""
+    pending, active = data.get("pending"), data.get("active")
+    budget = resolve(config)
+    marker = _fence(config, session_id)
+    return (not data.get("ended") and isinstance(pending, dict) and isinstance(active, dict)
+            and not active.get("closed")
+            and all(active.get(k) == pending.get(k) for k in ("turn", "request", "epoch"))
+            and data.get("inflight") is None and data.get("reservation") is None
+            and not data["unknown_usage"] and data["attempts"] < budget.attempts
+            and data["input_tokens"] < budget.input_tokens and data["output_tokens"] < budget.output_tokens
+            and marker is not None and data["fence"] == marker)
+
+
+def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: bool = False):
     """Async hook: wait briefly for sync notice, then launch at most one worker."""
     recording = config.get("recording_mode") == "automatic"
     maintenance = config.get("_background_maintenance") is True
-    closing = (recording or maintenance) and event.get("hook_event_name") in ("Stop", "SessionEnd")
+    closing = (recording or maintenance or pending_only) and event.get("hook_event_name") in ("Stop", "SessionEnd")
     identity = ((event["session_id"], event.get("turn_id"))
                 if closing and isinstance(event.get("session_id"), str) and ID.fullmatch(event["session_id"])
                 else _identity(event, prompt=True))
@@ -500,15 +527,16 @@ def background(config: dict[str, Any], event: dict[str, Any]):
     deadline = time.monotonic() + 0.5
     while time.monotonic() < deadline:
         recording_work = False
-        if recording:
+        if recording and not pending_only:
             import recording_jobs
             recording_work = recording_jobs.has_work(config, session)
         def launch(data):
             active = data["active"]
             pending = data["pending"]
-            reader_work = (isinstance(pending, dict) and isinstance(active, dict)
+            reader_work = (_runnable_pending(config, session, data) if pending_only else
+                           isinstance(pending, dict) and isinstance(active, dict)
                            and (closing or (active.get("turn") == turn and active.get("request") == digest)))
-            if not recording_work and not reader_work and not maintenance:
+            if not recording_work and not reader_work and (pending_only or not maintenance):
                 return "not_ready", False
             if _alive(data.get("worker_pid"), data.get("worker_identity")):
                 return "running", False
@@ -1090,6 +1118,8 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
     slot = None
     runtime = None
     handoff = False
+    idle_retirement = False
+    generation_retirement = False
     try:
         slot = _slot(config)
         if slot is None:
@@ -1152,10 +1182,11 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                 return (pending, active["cue"],
                         (data["context_generation"], context_token),
                         emitted, marker), True
-            ok, job = _state(config, session_id, take, create=False)
+            ok, job = _state(config, session_id, take, create=False, lock_timeout=STATE_LOCK_SECONDS)
             if not ok:
                 break
             if job == "rotated":
+                generation_retirement = True
                 handoff = config.get("recording_mode") == "automatic" or config.get("_background_maintenance") is True
                 break
             if job is None or job == "end":
@@ -1363,7 +1394,9 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     changed = True
                 return None, changed
             _state(config, session_id, publish, create=False)
-        if time.monotonic() - last_activity >= idle_seconds:
+        else:
+            idle_retirement = True
+        if idle_retirement:
             def expire(data):
                 if data.get("generation") != generation or data.get("pending") is not None:
                     return None, False
@@ -1371,27 +1404,49 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     _count(data, "dropped")
                 data.update(active=None, ready=None, prior="", inflight=None)
                 return None, True
-            _state(config, session_id, expire, create=False)
+            _state(config, session_id, expire, create=False, lock_timeout=STATE_LOCK_SECONDS)
     finally:
         if runtime is not None:
             try:
                 runtime.close()
             except Exception:
                 pass
+        pending_handoff = False
+        def release_leases():
+            nonlocal slot, fd
+            if slot is not None:
+                old, slot = slot, None
+                os.close(old)
+            if fd is not None:
+                old, fd = fd, None
+                os.close(old)
         def exited(data):
-            if data.get("worker_pid") == os.getpid() or handoff:
+            nonlocal pending_handoff
+            pending_handoff = ((idle_retirement or generation_retirement)
+                               and _runnable_pending(config, session_id, data))
+            # A foreground wake before this transaction saw a live worker and
+            # may have returned "running". Capture its pending work. Release
+            # BOTH leases before publishing PID=None: a new child must not hit
+            # our old worker lease or count our retiring slot against capacity.
+            release_leases()
+            if data.get("worker_pid") == os.getpid():
                 data["worker_pid"] = None
                 data["worker_identity"] = None
                 return None, True
             return None, False
-        _state(config, session_id, exited, create=False)
-        if slot is not None:
-            os.close(slot)
-        os.close(fd)
-        if handoff:
+        try:
+            retired, _ = _state(config, session_id, exited, create=False,
+                                lock_timeout=STATE_LOCK_SECONDS)
+        finally:
+            # Busy/invalid state cannot justify a wake, but cannot retain leases.
+            release_leases()
+        if retired and (handoff or pending_handoff):
             # One bounded wake only after releasing the old lease. It admits no
             # new source job and cannot reset counters or reuse old ready cards.
-            result = background(config, {"hook_event_name": "SessionEnd", "session_id": session_id})
+            # Admitted recording jobs or maintenance alone must not turn idle
+            # retirement into an unlimited respawn loop.
+            result = background(config, {"hook_event_name": "SessionEnd", "session_id": session_id},
+                                **({} if handoff else {"pending_only": True}))
             _state(config, session_id, lambda data: (data.update(handoff=result["outcome"]), True), create=False)
 
 

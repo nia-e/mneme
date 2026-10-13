@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -25,6 +26,175 @@ REAL_MONOTONIC = time.monotonic
 class RecordingJobsTests(unittest.TestCase, RecordingFixture):
     def setUp(self):
         RecordingFixture.__init__(self, self)
+
+    def after_recording_lock_contention(self, action):
+        """Release the actual queue lock only after the caller encounters it."""
+        contended = threading.Event()
+        results, errors = [], []
+        real_lock = host_files.lock_file
+        def observed_lock(*args, **kwargs):
+            try:
+                return real_lock(*args, **kwargs)
+            except BlockingIOError:
+                contended.set()
+                raise
+        def run():
+            try:
+                results.append(action())
+            except BaseException as error:
+                errors.append(error)
+        with (jobs._directory(self.config) / ".lock").open("r+") as stream:
+            real_lock(stream, blocking=False)
+            with patch.object(host_files, "lock_file", side_effect=observed_lock):
+                worker = threading.Thread(target=run, daemon=True)
+                worker.start()
+                try:
+                    self.assertTrue(contended.wait(1), "lifecycle operation never reached the held lock")
+                finally:
+                    host_files.unlock_file(stream)
+                    worker.join(2)
+                self.assertFalse(worker.is_alive(), "lifecycle lock wait did not terminate")
+        if errors:
+            raise errors[0]
+        self.assertEqual(len(results), 1)
+        return results[0]
+
+    def test_close_waits_for_transient_contention_without_resetting_accounting(self):
+        self.begin()
+        self.source_complete()
+        def retained_accounting(state):
+            state.update(usage_unknown=True, receipt_omissions=3)
+            state["counts"].update(assessed=2, deferred=4)
+        self.mutate(retained_accounting)
+        before = self.state()
+        result = self.after_recording_lock_contention(
+            lambda: jobs.close_turn(self.config, SESSION, "turn-1"))
+        self.assertTrue(result)
+        after = self.state()
+        self.assertEqual(after["jobs"][0]["phase"], "observing")
+        self.assertEqual({key: value for key, value in before.items() if key != "jobs"},
+                         {key: value for key, value in after.items() if key != "jobs"})
+        for key, value in before["jobs"][0].items():
+            if key != "phase":
+                self.assertEqual(after["jobs"][0][key], value)
+        self.identity.assert_not_called()
+        self.overlap.assert_not_called()
+
+    def test_notice_refuses_contention_instead_of_queueing_stale_open_turn(self):
+        self.startup()
+        self.source_start()
+        path = jobs._path(self.config, SESSION)
+        before = path.read_bytes()
+        with (jobs._directory(self.config) / ".lock").open("r+") as stream:
+            host_files.lock_file(stream, blocking=False)
+            with patch.object(host_files, "lock_file_bounded", side_effect=AssertionError("must not queue admission")):
+                self.assertEqual(jobs.notice(self.config, self.event()), {"outcome": "busy_or_capacity"})
+        self.assertEqual(path.read_bytes(), before)
+        self.source_complete()
+        self.assertTrue(jobs.close_turn(self.config, SESSION, "turn-1"))
+        self.assertEqual(jobs.notice(self.config, self.event()),
+                         {"outcome": "deferred", "reason": "not_current_open_turn"})
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_session_start_waits_for_transient_contention_without_fresh_reset(self):
+        self.begin()
+        self.mutate(lambda state: state.update(ended=True))
+        before = self.state()
+        self.after_recording_lock_contention(
+            lambda: jobs.session_start(self.config, {"session_id": SESSION, "source": "resume"}))
+        self.assertEqual(self.state(), {**before, "ended": False})
+
+    def test_session_end_waits_and_closes_all_admitted_jobs_without_deadline_renewal(self):
+        self.begin()
+        self.source_complete()
+        self.source_start("turn-2")
+        self.assertEqual(jobs.notice(self.config, self.event("turn-2")), {"outcome": "admitted"})
+        before = self.state()
+        self.assertTrue(self.after_recording_lock_contention(
+            lambda: jobs.close_turn(self.config, SESSION, ended=True)))
+        after = self.state()
+        self.assertTrue(after["ended"])
+        self.assertEqual([job["phase"] for job in after["jobs"]], ["observing", "observing"])
+        self.assertEqual([job["admission"] for job in after["jobs"]],
+                         [job["admission"] for job in before["jobs"]])
+        self.assertEqual(after["counts"], before["counts"])
+        self.now += 10
+        self.monotonic += 10
+        self.assertTrue(jobs.close_turn(self.config, SESSION, ended=True))
+        self.assertEqual(self.state(), after)
+
+    def test_close_timeout_is_reported_without_mutation_and_explicit_retry_closes(self):
+        self.begin()
+        self.source_complete()
+        path = jobs._path(self.config, SESSION)
+        before = path.read_bytes()
+        with (jobs._directory(self.config) / ".lock").open("r+") as stream:
+            host_files.lock_file(stream, blocking=False)
+            started = REAL_MONOTONIC()
+            with patch.object(jobs, "LIFECYCLE_LOCK_SECONDS", .03):
+                self.assertFalse(jobs.close_turn(self.config, SESSION, "turn-1"))
+            elapsed = REAL_MONOTONIC() - started
+            self.assertGreaterEqual(elapsed, .02)
+            self.assertLess(elapsed, .5)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(jobs._cancel_path(self.config, SESSION).exists())
+        self.assertTrue(jobs.has_work(self.config, SESSION))
+        worked, runtime = self.step()
+        self.assertFalse(worked)  # Source closure alone still does not authorize work.
+        self.assertEqual(runtime.calls, [])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(jobs.close_turn(self.config, SESSION, "turn-1"))
+        self.assertEqual(self.state()["jobs"][0]["phase"], "observing")
+
+    def test_duplicate_close_keeps_original_deadlines_and_does_not_rewrite(self):
+        self.closed()
+        path = jobs._path(self.config, SESSION)
+        before = path.read_bytes()
+        self.now += 10
+        self.monotonic += 10
+        with patch.object(jobs, "_write", wraps=jobs._write) as write:
+            self.assertTrue(jobs.close_turn(self.config, SESSION, "turn-1"))
+        write.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_duplicate_old_stop_does_not_close_newly_admitted_turn(self):
+        self.closed()
+        self.source_start("turn-2")
+        self.assertEqual(jobs.notice(self.config, self.event("turn-2")), {"outcome": "admitted"})
+        before = self.state()
+        self.assertTrue(jobs.close_turn(self.config, SESSION, "turn-1"))
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.state()["jobs"][-1]["phase"], "admitted")
+
+    def test_close_write_failure_is_reported_without_persisted_mutation(self):
+        self.begin()
+        before = jobs._path(self.config, SESSION).read_bytes()
+        with patch.object(jobs, "_write", side_effect=OSError("fixture write refused")):
+            self.assertFalse(jobs.close_turn(self.config, SESSION, "turn-1"))
+        self.assertEqual(jobs._path(self.config, SESSION).read_bytes(), before)
+
+    def test_cancel_wait_writes_one_fence_and_preserves_source_and_accounting(self):
+        self.begin()
+        before = self.state()
+        with patch.object(jobs, "_signal_cancel", wraps=jobs._signal_cancel) as signal:
+            self.assertTrue(self.after_recording_lock_contention(
+                lambda: jobs.close_turn(self.config, SESSION, "turn-1", cancel=True)))
+        signal.assert_called_once_with(self.config, SESSION, "turn-1")
+        after = self.state()
+        self.assertEqual(after["jobs"], [])
+        self.assertEqual(after["counts"], {**before["counts"], "cancelled": 1})
+        for key in ("watermark", "pin", "fresh", "usage_unknown"):
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(after["receipts"][-1]["source_key"], before["jobs"][0]["key"])
+        self.assertEqual(jobs._cancel_marker(self.config, SESSION)["turn_id"], "turn-1")
+
+    def test_cancel_fence_failure_cannot_report_durable_success(self):
+        self.begin()
+        with patch.object(jobs, "_signal_cancel", side_effect=OSError("fixture fence refused")):
+            self.assertFalse(jobs.close_turn(self.config, SESSION, "turn-1", cancel=True))
+        self.assertEqual(self.state()["jobs"], [])
+        self.assertEqual(self.state()["counts"]["cancelled"], 1)
+        self.assertFalse(jobs._cancel_path(self.config, SESSION).exists())
 
     def test_possibility_is_one_ordinary_note_with_exact_category_tag(self):
         self.closed()
@@ -197,7 +367,8 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         with (jobs._directory(self.config) / ".lock").open("r+") as stream:
             host_files.lock_file(stream, blocking=False)
             started = REAL_MONOTONIC()
-            jobs.close_turn(self.config, SESSION, turn, cancel=True)
+            with patch.object(jobs, "LIFECYCLE_LOCK_SECONDS", .03):
+                self.assertFalse(jobs.close_turn(self.config, SESSION, turn, cancel=True))
             return {"elapsed": REAL_MONOTONIC() - started,
                     "marker": jobs._cancel_marker(self.config, SESSION),
                     "state": self.state()}

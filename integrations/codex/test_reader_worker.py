@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import host_files
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -10,6 +11,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent))
 import reader_worker as reader
@@ -1131,6 +1133,323 @@ class ReaderStateTests(unittest.TestCase):
                 self.assertEqual(data["reasoning_output_tokens"], None if unknown else 2)
                 if data["ready"] is not None:
                     self.assertEqual(data["ready"]["turn"], "t2")
+
+
+class ReaderWakeTests(unittest.TestCase):
+    setUp = ReaderStateTests.setUp
+    event = ReaderStateTests.event
+    set_state = ReaderStateTests.set_state
+    state = ReaderStateTests.state
+
+    def after_short_contention(self, operation, *, while_locked=lambda: None):
+        """Release a real temporary-file lock only after the caller hit it."""
+        _, path = reader._paths(self.config, "s1")
+        contended = threading.Event()
+        results, errors = [], []
+        original_lock = host_files.lock_file
+        def observed_lock(*args, **kwargs):
+            try:
+                return original_lock(*args, **kwargs)
+            except BlockingIOError:
+                contended.set()
+                raise
+        def run():
+            try:
+                results.append(operation())
+            except BaseException as error:
+                errors.append(error)
+        with path.open("rb+") as held:
+            original_lock(held)
+            with patch.object(host_files, "lock_file", side_effect=observed_lock):
+                worker = threading.Thread(target=run)
+                worker.start()
+                try:
+                    self.assertTrue(contended.wait(1), "caller never reached the held lock")
+                    self.assertEqual(results, [])
+                    while_locked()
+                finally:
+                    host_files.unlock_file(held)
+                    worker.join(2)
+                self.assertFalse(worker.is_alive())
+        if errors:
+            raise errors[0]
+        return results[0]
+
+    def assert_leases_available(self):
+        lease = reader._paths(self.config, "s1")[0].with_suffix(".worker.lock")
+        with lease.open("rb+") as stream:
+            host_files.lock_file(stream, blocking=False)
+        slot = reader._slot(self.config)
+        self.assertIsNotNone(slot)
+        os.close(slot)
+
+    def test_notice_contention_stays_immediate_without_late_prompt_admission(self):
+        reader.notice(self.config, self.event("t1"), True)
+        before = self.state()
+        _, path = reader._paths(self.config, "s1")
+        with path.open("rb+") as held:
+            host_files.lock_file(held)
+            with patch.object(host_files, "lock_file_bounded", wraps=host_files.lock_file_bounded) as lock:
+                self.assertEqual(reader.notice(self.config, self.event("t2"), True), {"outcome": "busy"})
+            self.assertEqual(lock.call_args.kwargs, {"timeout": 0})
+        self.assertEqual(self.state(), before)
+        # The skipped prompt still invalidates old output, but does not acquire
+        # admission later after a Stop or newer prompt may have passed it.
+        self.assertNotEqual(reader._fence(self.config, "s1"), before["fence"])
+        self.assertEqual(reader.consume(self.config, self.event("t1"))["outcome"], "stale")
+        self.assertEqual(self.state()["attempts"], 0)
+
+    def test_waiting_state_refuses_config_changed_while_lock_was_held(self):
+        reader.notice(self.config, self.event(), True)
+        path, _ = reader._paths(self.config, "s1")
+        current_bytes = []
+        def change_policy():
+            self.config["service_config"].write_text('{"new_policy":true}')
+            new = dict(self.config)
+            new.pop("_reader_config_pin", None)
+            data = self.state()
+            data["config_pin"] = reader._config_current(new)
+            path.write_text(json.dumps(data))
+            current_bytes.append(path.read_bytes())
+        mutations = []
+        result = self.after_short_contention(lambda: reader._state(self.config, "s1",
+            lambda data: (mutations.append(data), True), lock_timeout=reader.STATE_LOCK_SECONDS),
+            while_locked=change_policy)
+        self.assertEqual(result, (False, None))
+        self.assertEqual(mutations, [])
+        self.assertEqual(path.read_bytes(), current_bytes[0])
+
+    def test_waiting_stale_paid_settlement_remains_admitted(self):
+        reader.notice(self.config, self.event(), True)
+        self.set_state(lambda data: data.update(attempts=1, reservation={"recording": "paid"}))
+        def settle(data):
+            self.assertEqual(data["reservation"], {"recording": "paid"})
+            data["reservation"] = None
+            result = {"usage": {"input_tokens": 7, "output_tokens": 2,
+                                "cached_input_tokens": 3, "reasoning_output_tokens": 1}}
+            reader._settle_usage(data, result, (7, 2))
+            return True, True
+        result = self.after_short_contention(lambda: reader._state(self.config, "s1", settle,
+            allow_stale=True, lock_timeout=reader.STATE_LOCK_SECONDS),
+            while_locked=lambda: self.config["service_config"].write_text('{"changed":true}'))
+        self.assertEqual(result, (True, True))
+        self.assertEqual((self.state()["attempts"], self.state()["input_tokens"],
+                          self.state()["output_tokens"]), (1, 7, 2))
+        self.assertIsNone(self.state()["reservation"])
+
+    def test_matching_policy_does_not_repeat_native_validation_under_state_lock(self):
+        reader.notice(self.config, self.event(), False)
+        with patch.object(reader, "_config_current", wraps=reader._config_current) as current:
+            self.assertEqual(reader._state(self.config, "s1", lambda data: (None, False),
+                lock_timeout=reader.STATE_LOCK_SECONDS), (True, None))
+        current.assert_called_once_with(self.config)
+
+    def test_worker_take_survives_short_contention_and_selects_once(self):
+        reader.notice(self.config, self.event(), True)
+        with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}):
+            self.after_short_contention(lambda: reader.serve(
+                self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.05))
+        self.assertEqual(self.state()["attempts"], 1)
+        self.assertEqual(sum(len(runtime.calls) for runtime in FakeRuntime.instances), 1)
+        self.assertIsNone(self.state()["pending"])
+
+    def test_idle_exit_hands_off_latest_pending_after_releasing_both_leases(self):
+        self.config.update(_config_path=self.root / "hook.json", _background_maintenance=True)
+        self.config["_config_path"].write_text("{}")
+        reader.notice(self.config, self.event("initial"), False)
+        self.set_state(lambda data: data.update(worker_pid=os.getpid()))
+        original_state, original_write, original_background = reader._state, reader._write, reader.background
+        wake_results, release_probes = [], []
+        ticks = iter((0.0, 0.0, 0.0))
+        def state(*args, **kwargs):
+            if args[2].__name__ == "expire":
+                self.assertEqual(reader.notice(self.config, self.event("late"), True)["outcome"], "queued")
+                wake_results.append(original_background(self.config, {
+                    "hook_event_name": "Stop", "session_id": "s1"}))
+            return original_state(*args, **kwargs)
+        def write(path, data):
+            if data.get("worker_pid") is None and not release_probes:
+                # The other slot is held below. A fresh worker needs OUR slot,
+                # not just an unlocked per-session lease, before seeing PID=None.
+                self.assert_leases_available()
+                release_probes.append(True)
+            return original_write(path, data)
+        def wake(config, event, **kwargs):
+            self.assertEqual(kwargs, {"pending_only": True})
+            self.assert_leases_available()
+            # A prompt after the retirement snapshot supersedes its old pending
+            # request; the bounded wake must consume latest work, not retarget it.
+            self.assertEqual(reader.notice(config, self.event("latest"), True)["outcome"], "queued")
+            result = original_background(config, event, **kwargs)
+            wake_results.append(result)
+            return result
+        other_slot = reader._directory(self.config) / "slot-1.lock"
+        with other_slot.open("a+b") as held:
+            host_files.lock_file(held)
+            with patch.object(reader, "_state", side_effect=state), \
+                 patch.object(reader, "_write", side_effect=write), \
+                 patch.object(reader, "background", side_effect=wake), \
+                 patch.object(reader.time, "monotonic", side_effect=lambda: next(ticks, 301.0)), \
+                 patch.object(reader.time, "sleep"), \
+                 patch.object(reader.host_process, "spawn", return_value=SimpleNamespace(pid=987654)) as spawn, \
+                 patch.object(reader.host_process, "spawned_identity", return_value=None):
+                reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=300)
+        self.assertEqual(wake_results, [{"outcome": "running"}, {"outcome": "launched"}])
+        self.assertEqual(release_probes, [True])
+        spawn.assert_called_once()
+        self.assertEqual(self.state()["pending"]["turn"], "latest")
+        self.assertEqual(self.state()["worker_pid"], 987654)
+        self.assertEqual(self.state()["attempts"], 0)
+        self.assertEqual(FakeRuntime.instances, [])
+
+    def test_idle_admitted_recording_and_maintenance_do_not_renew_worker(self):
+        self.config.update(recording_mode="automatic", _background_maintenance=True)
+        reader.notice(self.config, self.event(), False)
+        ticks = iter((0.0, 0.0, 0.0))
+        with patch("recording_jobs.has_work", return_value=True), \
+             patch("recording_jobs.step", return_value=False) as step, \
+             patch.object(reader.time, "monotonic", side_effect=lambda: next(ticks, 301.0)), \
+             patch.object(reader.time, "sleep"), patch.object(reader, "background") as wake:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=300)
+        step.assert_called_once()
+        wake.assert_not_called()
+        self.assertEqual(self.state()["attempts"], 0)
+
+    def test_idle_pending_without_allowance_or_with_paid_work_does_not_renew(self):
+        for change in ({"unknown_usage": True}, {"attempts": reader.resolve(self.config).attempts},
+                       {"reservation": {"recording": "paid"}}, {"ended": True}):
+            with self.subTest(change=change):
+                reader.reset(self.config, "s1")
+                self.set_state(lambda data: data.update(unknown_usage=False, attempts=0, reservation=None))
+                reader.notice(self.config, self.event(), True)
+                self.set_state(lambda data: data.update(change))
+                before = self.state()
+                with patch.object(reader, "background") as wake:
+                    reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=0)
+                wake.assert_not_called()
+                for key in ("attempts", "input_tokens", "output_tokens", "unknown_usage", "reservation"):
+                    self.assertEqual(self.state()[key], before[key])
+
+    def test_capacity_refusal_with_failed_pending_drop_does_not_self_respawn(self):
+        reader.notice(self.config, self.event(), True)
+        original = reader._state
+        def state(*args, **kwargs):
+            return (False, None) if args[2].__name__ == "capacity" else original(*args, **kwargs)
+        with patch.object(reader, "_state", side_effect=state), patch.object(reader, "_slot", return_value=None), \
+             patch.object(reader, "background") as wake:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.1)
+        wake.assert_not_called()
+        self.assertIsNotNone(self.state()["pending"])
+        self.assertEqual(self.state()["attempts"], 0)
+        self.assert_leases_available()
+
+    def test_exhausted_take_wait_does_not_self_respawn(self):
+        reader.notice(self.config, self.event(), True)
+        original = reader._state
+        waits = []
+        def state(*args, **kwargs):
+            if args[2].__name__ == "take":
+                waits.append(kwargs["lock_timeout"])
+                return False, None
+            return original(*args, **kwargs)
+        with patch.object(reader, "_state", side_effect=state), patch.object(reader, "background") as wake:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.1)
+        self.assertEqual(waits, [reader.STATE_LOCK_SECONDS])
+        wake.assert_not_called()
+        self.assertIsNotNone(self.state()["pending"])
+        self.assertEqual(self.state()["attempts"], 0)
+        self.assert_leases_available()
+
+    def test_unexpected_runtime_failure_releases_leases_without_wake(self):
+        reader.notice(self.config, self.event(), True)
+        self.set_state(lambda data: data.update(worker_pid=os.getpid()))
+        def fail_runtime(*_):
+            raise RuntimeError("runtime failed")
+        with patch.object(reader, "background") as wake, self.assertRaisesRegex(RuntimeError, "runtime failed"):
+            reader.serve(self.config, "s1", runtime_factory=fail_runtime, idle_seconds=.1)
+        wake.assert_not_called()
+        self.assertIsNone(self.state()["worker_pid"])
+        self.assertEqual(self.state()["attempts"], 0)
+        self.assert_leases_available()
+
+    def test_failed_retirement_transaction_releases_leases_without_wake(self):
+        reader.notice(self.config, self.event(), True)
+        original = reader._state
+        def state(*args, **kwargs):
+            if args[2].__name__ == "exited":
+                self.assertEqual(kwargs["lock_timeout"], reader.STATE_LOCK_SECONDS)
+                return False, None
+            return original(*args, **kwargs)
+        with patch.object(reader, "_state", side_effect=state), patch.object(reader, "background") as wake:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=0)
+        wake.assert_not_called()
+        self.assertIsNotNone(self.state()["pending"])
+        self.assertEqual(self.state()["attempts"], 0)
+        self.assert_leases_available()
+
+    def test_generation_handoff_never_clears_a_newer_worker_pid(self):
+        self.config["recording_mode"] = "automatic"
+        reader.notice(self.config, self.event(), False)
+        self.set_state(lambda data: data.update(worker_pid=987654, worker_identity={"new": True}))
+        original = reader._state
+        def state(*args, **kwargs):
+            return (True, "rotated") if args[2].__name__ == "take" else original(*args, **kwargs)
+        def wake(*args, **kwargs):
+            self.assertEqual(self.state()["worker_pid"], 987654)
+            self.assertEqual(self.state()["worker_identity"], {"new": True})
+            self.assert_leases_available()
+            return {"outcome": "running"}
+        with patch.object(reader, "_state", side_effect=state), patch.object(reader, "background", side_effect=wake) as handoff:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.1)
+        handoff.assert_called_once()
+        self.assertEqual(self.state()["worker_pid"], 987654)
+
+    def test_recall_only_generation_handoff_keeps_owner_pid_until_runtime_and_leases_close(self):
+        self.config.update(_config_path=self.root / "hook.json")
+        self.config["_config_path"].write_text("{}")
+        reader.notice(self.config, self.event(), True)
+        self.set_state(lambda data: data.update(worker_pid=os.getpid(), worker_identity=None))
+        generation = self.state()["generation"]
+        wakes = []
+        original_background = reader.background
+        owner = self
+        class RotatingRuntime(FakeRuntime):
+            def select(self, dialogue, cards):
+                reader.end_session(owner.config, "s1")
+                reader.reset(owner.config, "s1")
+                owner.assertNotEqual(owner.state()["generation"], generation)
+                owner.assertEqual(owner.state()["worker_pid"], os.getpid())
+                owner.assertEqual(reader.notice(owner.config, owner.event("t2"), True)["outcome"], "queued")
+                wakes.append(original_background(owner.config, owner.event("t2")))
+                return super().select(dialogue, cards)
+        def wake(config, event, **kwargs):
+            self.assertEqual(kwargs, {"pending_only": True})
+            self.assertTrue(FakeRuntime.instances[0].closed)
+            self.assert_leases_available()
+            result = original_background(config, event, **kwargs)
+            wakes.append(result)
+            return result
+        with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}), \
+             patch.object(reader, "background", side_effect=wake), \
+             patch.object(reader.host_process, "spawn", return_value=SimpleNamespace(pid=987654)) as spawn, \
+             patch.object(reader.host_process, "spawned_identity", return_value=None):
+            reader.serve(self.config, "s1", runtime_factory=RotatingRuntime, idle_seconds=.5)
+        self.assertEqual(wakes, [{"outcome": "running"}, {"outcome": "launched"}])
+        spawn.assert_called_once()
+        self.assertEqual(self.state()["pending"]["turn"], "t2")
+        self.assertEqual(self.state()["worker_pid"], 987654)
+        self.assertEqual((self.state()["attempts"], self.state()["input_tokens"]), (1, 10))
+        self.assertIsNone(self.state()["ready"])
+
+    def test_recall_only_generation_without_pending_does_not_renew(self):
+        reader.notice(self.config, self.event(), False)
+        original = reader._state
+        def state(*args, **kwargs):
+            return (True, "rotated") if args[2].__name__ == "take" else original(*args, **kwargs)
+        with patch.object(reader, "_state", side_effect=state), patch.object(reader, "background") as wake:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.1)
+        wake.assert_not_called()
+        self.assert_leases_available()
 
 
 class ReaderConcernTests(unittest.TestCase):

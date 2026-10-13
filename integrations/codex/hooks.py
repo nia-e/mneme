@@ -409,7 +409,8 @@ def _atomic_write_raw(path: Path, raw: bytes) -> None:
 
 
 @contextmanager
-def _locked_state(state_dir: Path, session_id: str, *, blocking: bool = True, create: bool = True):
+def _locked_state(state_dir: Path, session_id: str, *, blocking: bool = True, create: bool = True,
+                  lock_timeout: float = 0):
     if create:
         host_files.ensure_state_directory(state_dir)
     path = _state_path(state_dir, session_id)
@@ -420,7 +421,10 @@ def _locked_state(state_dir: Path, session_id: str, *, blocking: bool = True, cr
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise HookError("invalid hook state lock")
         try:
-            host_files.lock_file(file, blocking=blocking)
+            if lock_timeout:
+                host_files.lock_file_bounded(file, timeout=lock_timeout)
+            else:
+                host_files.lock_file(file, blocking=blocking)
         except BlockingIOError as exc:
             raise HookError("hook state busy") from exc
         if path.is_symlink() or path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
@@ -428,8 +432,9 @@ def _locked_state(state_dir: Path, session_id: str, *, blocking: bool = True, cr
         yield path
 
 
-def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = True):
-    with _locked_state(state_dir, session_id, blocking=blocking) as path:
+def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = True,
+                lock_timeout: float = 0):
+    with _locked_state(state_dir, session_id, blocking=blocking, lock_timeout=lock_timeout) as path:
         if path.exists():
             data = _bounded_json(path, MAX_STATE)
             if not isinstance(data, dict) or data.get("schema") != STATE_SCHEMA or not isinstance(data.get("turns"), dict):
@@ -1186,6 +1191,28 @@ def _stop_checkpoint(config: dict[str, Any], session_id: str, turn_id: str,
     return {"decision": "block", "reason": guidance(token)}
 
 
+def _close_async_turn(config, session_id, turn_id, *, cancel=False):
+    # Each ledger has its own short lock; failure of an optional recall update
+    # must not prevent the recorder from observing the same lifecycle boundary.
+    try:
+        _reader_worker().close_turn(config, session_id, turn_id)
+    except Exception:
+        pass
+    if config.get("recording_mode") == "automatic":
+        try:
+            _recording_jobs().close_turn(config, session_id, turn_id, cancel=cancel)
+        except Exception:
+            pass
+
+
+def _wake_async(config, event):
+    # Detaches/reuses a worker only; never runs inference in a foreground hook.
+    try:
+        _reader_worker().background(config, event)
+    except Exception:
+        pass
+
+
 def _handle_async(event: dict[str, Any], config: dict[str, Any],
                   *, background: bool = False) -> dict[str, Any]:
     name = event.get("hook_event_name")
@@ -1203,10 +1230,16 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
     if background:
         recording = config.get("recording_mode") == "automatic"
         if (recording or config.get("_background_maintenance")) and name in ("Stop", "SessionEnd"):
-            try:
-                _reader_worker().background(config, event)
-            except Exception:
-                pass
+            # Async dispatch is a second idempotent closure opportunity, not just
+            # a wake for work that a contending foreground hook may never close.
+            if name == "Stop" and _valid_id(event.get("turn_id")):
+                _close_async_turn(config, session_id, event["turn_id"])
+            elif name == "SessionEnd":
+                try:
+                    _reader_worker().end_session(config, session_id)
+                except Exception:
+                    pass
+            _wake_async(config, event)
             return {}
         if name != "UserPromptSubmit" or not _valid_id(event.get("turn_id")):
             return {}
@@ -1276,10 +1309,17 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
         substantive = _substantive(prompt)
         try:
             _reader_worker().notice(config, event, substantive)
-            if config.get("recording_mode") == "automatic":
-                _recording_jobs().notice(config, event)
         except Exception:
             pass
+        if config.get("recording_mode") == "automatic":
+            try:
+                _recording_jobs().notice(config, event)
+            except Exception:
+                pass
+        # Do not depend on a separately scheduled sibling winning admission.
+        # The async hook remains an independent retry; launch is idempotent.
+        if substantive or config.get("recording_mode") == "automatic" or config.get("_background_maintenance"):
+            _wake_async(config, event)
         if not substantive:
             return {}
         base = ("Selected Mneme stores retain their explicit permitted operations."
@@ -1335,12 +1375,9 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
         except Exception:
             return {}
     if name in ("Stop", "Interrupt"):
-        try:
-            _reader_worker().close_turn(config, session_id, turn_id)
-            if config.get("recording_mode") == "automatic":
-                _recording_jobs().close_turn(config, session_id, turn_id, cancel=name == "Interrupt")
-        except Exception:
-            pass
+        _close_async_turn(config, session_id, turn_id, cancel=name == "Interrupt")
+        if name == "Stop" and (config.get("recording_mode") == "automatic" or config.get("_background_maintenance")):
+            _wake_async(config, event)
         if config.get("schema") == CONFIG_SCHEMA_V13 or config.get("recording_mode") == "automatic" or name == "Interrupt" or event.get("stop_hook_active") is True:
             return {}
         try:

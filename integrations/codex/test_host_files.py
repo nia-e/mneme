@@ -7,6 +7,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -18,6 +20,64 @@ class CheckedFiles(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_bounded_lock_acquires_after_real_contention(self):
+        path = self.root / "bounded.lock"
+        first = host_files.open_regular(path, os.O_CREAT | os.O_RDWR)
+        second = host_files.open_regular(path, os.O_RDWR)
+        try:
+            host_files.lock_file(first, blocking=False)
+            release = threading.Timer(.04, host_files.unlock_file, args=(first,))
+            release.start()
+            try:
+                host_files.lock_file_bounded(second, timeout=.5)
+            finally:
+                release.join(1)
+            with self.assertRaises(BlockingIOError):
+                host_files.lock_file(first, blocking=False)
+        finally:
+            os.close(second)
+            os.close(first)
+
+    def test_bounded_lock_expires_without_releasing_holder(self):
+        path = self.root / "held.lock"
+        first = host_files.open_regular(path, os.O_CREAT | os.O_RDWR)
+        second = host_files.open_regular(path, os.O_RDWR)
+        try:
+            host_files.lock_file(first, blocking=False)
+            started = time.monotonic()
+            with self.assertRaises(BlockingIOError):
+                host_files.lock_file_bounded(second, timeout=.04)
+            self.assertLess(time.monotonic() - started, .4)
+            with self.assertRaises(BlockingIOError):
+                host_files.lock_file(second, blocking=False)
+        finally:
+            os.close(second)
+            os.close(first)
+
+    def test_bounded_lock_only_retries_contention(self):
+        with patch.object(host_files, "lock_file", side_effect=PermissionError("denied")) as lock, \
+                patch.object(host_files, "_lock_sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                host_files.lock_file_bounded(123, timeout=.5, exclusive=False)
+            lock.assert_called_once_with(123, exclusive=False, blocking=False)
+            sleep.assert_not_called()
+        with patch.object(host_files, "lock_file", side_effect=BlockingIOError) as lock:
+            with self.assertRaises(BlockingIOError):
+                host_files.lock_file_bounded(123, timeout=0)
+            self.assertEqual(lock.call_count, 1)
+        for invalid in (-1, True, None, float("nan"), float("inf")):
+            with self.subTest(timeout=invalid), self.assertRaises(ValueError):
+                host_files.lock_file_bounded(123, timeout=invalid)
+
+    def test_bounded_lock_does_not_acquire_after_suspension_past_deadline(self):
+        with patch.object(host_files, "_lock_monotonic", side_effect=[1, 1.01, 2]), \
+                patch.object(host_files, "_lock_sleep") as sleep, \
+                patch.object(host_files, "lock_file", side_effect=[BlockingIOError(), None]) as lock:
+            with self.assertRaises(BlockingIOError):
+                host_files.lock_file_bounded(123, timeout=.5)
+            self.assertEqual(lock.call_count, 1)
+            sleep.assert_called_once_with(.01)
 
     def test_regular_round_trip_and_directory_rejected(self):
         path = self.root / "file"

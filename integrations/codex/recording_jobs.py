@@ -52,6 +52,7 @@ FLUSH_SECONDS = 5
 MAX_POLLS = 3
 MAX_SCAN_WORK = 32 * 1024 * 1024
 MAX_EVENT_WORK = 12288
+LIFECYCLE_LOCK_SECONDS = .5
 COUNTERS = ("admitted", "assessed", "abstained", "verified", "deferred", "cancelled", "unresolved", "capacity")
 ID = re.compile(r"[A-Za-z0-9_:.-]{1,160}\Z")
 ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
@@ -361,8 +362,8 @@ def _bind_workspace(config, data):
     return True
 
 
-def _transaction(config, session, mutate, *, create=False, fresh=False):
-    """Single nonblocking directory lock also serializes bounded ledger retirement."""
+def _transaction(config, session, mutate, *, create=False, fresh=False, lock_timeout=0):
+    """One directory lock; lifecycle callers may wait briefly for contention."""
     # Revoking a registry destination stops admission/writes, not accounting for
     # work already paid for. Otherwise a config edit after inference strands a
     # known result as an apparent interrupted intent and loses its cancellation.
@@ -377,7 +378,10 @@ def _transaction(config, session, mutate, *, create=False, fresh=False):
             return True, None
         host_files.ensure_state_directory(directory)
         fd = host_files.open_regular(directory / ".lock", os.O_CREAT | os.O_RDWR)
-        host_files.lock_file(fd, blocking=False)
+        if lock_timeout > 0:
+            host_files.lock_file_bounded(fd, timeout=lock_timeout)
+        else:
+            host_files.lock_file(fd, blocking=False)
         path = _path(config, session)
         if path.exists():
             data = _load(path, session)
@@ -755,7 +759,8 @@ def session_start(config, event):
         # Existing state never receives another fresh-first-turn exception.
         data["ended"] = False
         return None, True
-    _transaction(config, event.get("session_id"), start, create=True, fresh=source == "startup")
+    _transaction(config, event.get("session_id"), start, create=True, fresh=source == "startup",
+                 lock_timeout=LIFECYCLE_LOCK_SECONDS)
 
 
 def notice(config, event):
@@ -843,6 +848,8 @@ def notice(config, event):
                                         workspace_binding=dict(data["workspace_binding"]))
             _count(data, "admitted")
             return "admitted", True
+        # Do not wait with this earlier open-turn snapshot: a Stop could close
+        # first, find no job, and then be overtaken by stale admission.
         ok, outcome = _transaction(config, session, accept, create=True)
         return {"outcome": outcome if ok else "busy_or_capacity"}
     except (OSError, ValueError, TypeError, UnicodeError):
@@ -878,38 +885,52 @@ def attach_delivery(config, packet):
         return {"outcome": "invalid_or_unavailable"}
 
 
-def close_turn(config, session, turn=None, *, cancel=False, ended=False):
+def close_turn(config, session, turn=None, *, cancel=False, ended=False) -> bool:
+    """Close retained work durably, or report refusal after a bounded lock wait.
+
+    A duplicate Stop never renews a closed job's deadlines. Cancellation writes
+    its fence once before waiting, rather than replaying the entire operation
+    and invalidating work that a newer prompt admitted during contention.
+    """
     if (("frozen_selection" not in config and not enabled(config))
             or not isinstance(session, str) or not ID.fullmatch(session)
             or (turn is not None and (not isinstance(turn, str) or not ID.fullmatch(turn)))):
-        return
+        return False
+    fenced = True
     if cancel:
         try:
             _signal_cancel(config, session, turn)
         except (OSError, ValueError):
             # Still attempt the normal locked cancellation. A failed fence write
             # cannot be represented as successful durable cancellation.
-            pass
+            fenced = False
     now = time.time()
     monotonic, boot = time.monotonic(), _boot_id()
     def close(data):
-        if ended:
+        changed = False
+        if ended and not data["ended"]:
             data["ended"] = True
+            changed = True
         for job in list(data["jobs"]):
             if turn is not None and job["turn_id"] != turn:
                 continue
             if cancel and job["phase"] == "assessing":
-                job["cancel_requested"] = True
+                if not job.get("cancel_requested"):
+                    job["cancel_requested"] = True
+                    changed = True
             elif cancel and job["phase"] not in ("write_intent", "unresolved"):
                 _finish(data, job, "cancelled", "interrupted")
+                changed = True
             elif job["phase"] == "admitted":
                 if boot is None:
                     _finish(data, job, "deferred", "clock_witness_unavailable")
                 else:
                     job.update(phase="observing", closed_at=now, deadline=now + CLOSE_SECONDS, next_poll=now,
                                closed_monotonic=monotonic, monotonic_deadline=monotonic + CLOSE_SECONDS, boot_id=boot)
-        return None, True
-    _transaction(config, session, close)
+                changed = True
+        return None, changed
+    ok, _ = _transaction(config, session, close, lock_timeout=LIFECYCLE_LOCK_SECONDS)
+    return ok and fenced
 
 
 def has_work(config, session):

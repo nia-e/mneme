@@ -662,6 +662,7 @@ class HookTests(unittest.TestCase):
             self.assertEqual(hooks.handle_event(self.event("SessionEnd", turn_id=None), config), {})
         self.assertEqual(calls, [("reset", "session_1"), ("notice", "turn_1", False),
                                  ("notice", "turn_1", True), ("background", "turn_1"),
+                                 ("background", "turn_1"),
                                  ("consume", "turn_1"), ("close", "session_1", "turn_1"),
                                  ("close", "session_1", "turn_1"),
                                  ("close", "session_1", "turn_1"), ("end", "session_1")])
@@ -685,7 +686,7 @@ class HookTests(unittest.TestCase):
             (self.root / ".mneme/profile.json").write_text(json.dumps({"schema": "mneme.profile.v1", "mode": "isolated"}))
             self.assertEqual(hooks.handle_event(prompt, config, reader_background=True), {})
             self.assertIn("--outcome none", json.dumps(hooks.handle_event(prompt, config)))
-        self.assertEqual(calls, ["background", "notice"])
+        self.assertEqual(calls, ["background", "notice", "background"])
 
     def test_async_incompatible_or_unreadable_ledger_warns_only_at_session_entry(self):
         config = self.async_config()
@@ -850,7 +851,9 @@ class HookTests(unittest.TestCase):
                 self.assertEqual(hooks.handle_event(self.event(name), config, reader_background=True), {})
             hooks.handle_event(self.event("Interrupt"), config)
         self.assertIn("no, R5", calls)
-        self.assertEqual(calls.count("wake"), 3)
+        # Prompt/Stop foreground paths detach too, rather than depending on a
+        # separately scheduled async sibling winning admission.
+        self.assertEqual(calls.count("wake"), 6)
         self.assertIn(("close", True), calls)
 
     def test_recording_scope_and_continuation_never_admit(self):

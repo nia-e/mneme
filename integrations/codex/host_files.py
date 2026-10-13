@@ -11,11 +11,13 @@ import contextlib
 import ctypes
 import errno
 import functools
+import math
 import os
 from pathlib import Path
 import stat
 import sys
 import tempfile
+from time import monotonic as _lock_monotonic, sleep as _lock_sleep
 
 WINDOWS = os.name == "nt"
 
@@ -289,6 +291,33 @@ def lock_file(file, *, exclusive=True, blocking=True):
         if code == 33:
             raise BlockingIOError(errno.EWOULDBLOCK, "file lock is held")
         raise api.error(code)
+
+
+def lock_file_bounded(file, *, timeout, exclusive=True):
+    """Wait only for contention, on this same admitted handle, for at most timeout.
+
+    Lifecycle notifications must not vanish merely because their sibling hook
+    held a short lock. Unlike blocking locks this cannot hold up a hook forever;
+    path, permission and other failures are never retried.
+    """
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout < 0):
+        raise ValueError("invalid lock timeout")
+    deadline = _lock_monotonic() + timeout
+    last_busy = None
+    while True:
+        # A suspended process must not acquire after its allowance has expired.
+        # The first attempt is still permitted for an explicit zero timeout.
+        if last_busy is not None and _lock_monotonic() >= deadline:
+            raise last_busy
+        try:
+            return lock_file(file, exclusive=exclusive, blocking=False)
+        except BlockingIOError as error:
+            remaining = deadline - _lock_monotonic()
+            if remaining <= 0:
+                raise
+            last_busy = error
+            _lock_sleep(min(.01, remaining))
 
 
 def unlock_file(file):

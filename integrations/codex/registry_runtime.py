@@ -151,12 +151,18 @@ def admit_session(config, event):
         if previous is None:
             if data.get("turns") or data.get("context_epoch", 0):
                 raise HookError("registry upgrade requires quiesced workers and a fresh session; retain old ledgers")
+            # Only first admission mints a binding. Existing matching bindings
+            # require no native revalidation inside this shared critical section.
+            if selection(config).digest != selected.digest:
+                raise HookError("named-store selection changed during admission")
             data["registry_binding"] = witness
             return None, True
         if previous != witness:
             raise HookError("registry selection changed; quiesce worker and start a fresh session")
         return None, False
-    _with_state(config["state_dir"], event["session_id"], bind, blocking=False)
+    # Foreground admission and its async wake arrive concurrently. Losing this
+    # short lock must not silently discard either half of the lifecycle event.
+    _with_state(config["state_dir"], event["session_id"], bind, blocking=False, lock_timeout=.5)
 
 
 NATIVE_SCHEMA = "mneme.codex-hooks.config.v13"
