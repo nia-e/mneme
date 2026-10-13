@@ -863,7 +863,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
                     }
                     Event::Mouse(mouse) => {
                         if app.source_menu.is_some() { chosen_source = source_picker::mouse(&mut app, mouse); }
-                        else if !detail_scroll::mouse(&mut app, mouse, input_pump.wheel_reports.max(1)) { input::mouse(&mut app, mouse); }
+                        else { input::mouse_with_wheel_reports(&mut app, mouse, input_pump.wheel_reports.max(1)); }
                     },
                     Event::Resize(_, _) => {
                         let mut layout = app.layout.borrow_mut();

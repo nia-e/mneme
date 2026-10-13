@@ -30,6 +30,8 @@ for scripts.
 | `i` | Toggle Map's text inspector, or open a scene/touchstone detail |
 | `e` | Focus the selected memory's connections in Map |
 | `h` | Hide/show archived nodes in Map |
+| `+` / `=` / `-`, wheel over Map | Zoom the camera without rearranging nodes |
+| `f` / `0` | Fit the shown loaded field / restore 100% scale |
 | `n` / `m` | Continue paused Map loading; `n` pages Touchstones |
 | `r` | Refresh the current view |
 | Tab | Choose among Known sources |
@@ -42,6 +44,14 @@ In Map, click a marker or index row to select it. Drag the field to pan;
 Shift+arrows pans from the keyboard. Ctrl+Left/Right traverses visible markers by
 column; Ctrl+Up/Down by row. `,` / `.` selects among all loaded, non-hidden nodes,
 including offscreen ones, and brings selection into view.
+
+`+` (or `=`) / `-` zoom around the center of the field; wheel/trackpad over the
+map zooms around the pointer. `f` fits the currently shown loaded field, including
+offscreen nodes; it does not load the rest of the store. `0` restores 100% scale.
+Zoom changes the camera, not the layout: nodes keep their world positions, while
+markers, labels and the selected circle stay readable at terminal-cell size.
+Zoom in for a neighborhood, or fit the field for an overview. Text panes keep
+their existing wheel-scrolling behavior.
 
 In an open detail, Page Up/Down moves a viewport page, Home/End jumps to the ends,
 and wheel/trackpad scrolls over the text pane. Scrolling does not fetch more body
@@ -59,9 +69,9 @@ remain placeholders. Enter explicitly reads the selected neighborhood and body;
 
 During the initial crawl, use the loaded index to select memories. The field
 settles when loading finishes, pauses or fails. Later nodes are added without
-moving existing ones; selection, panning and resizing do not re-solve the layout.
+moving existing ones; selection, panning, zooming and resizing do not re-solve the layout.
 Refresh can settle a changed field. Enter opens a neighborhood; Back restores the
-previous arrangement.
+previous arrangement and camera, including its zoom.
 
 Lines are stored relationships. Groups summarize only loaded links, ignoring
 direction for layout. A label is an existing authored tag shared distinctively

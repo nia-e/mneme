@@ -115,9 +115,9 @@ impl LayoutCache {
     }
 }
 
-/// Camera translations do not change solver inputs. Coordinates use terminal
+/// Camera transforms do not change solver inputs. Coordinates use terminal
 /// columns horizontally and twice terminal rows vertically (roughly square).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct Camera {
     pub(crate) center: Option<Point>,
     pub(crate) viewport: (u16, u16),
@@ -128,6 +128,38 @@ pub(crate) struct Camera {
     pub(crate) map_area: Option<ratatui::layout::Rect>,
     drag: Option<MapDrag>,
     selected: Option<String>,
+    zoom: f64,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            center: None,
+            viewport: (0, 0),
+            index_only: false,
+            index_ids: Vec::new(),
+            hits: Vec::new(),
+            markers: Vec::new(),
+            map_area: None,
+            drag: None,
+            selected: None,
+            zoom: 1.0,
+        }
+    }
+}
+
+const MIN_ZOOM: f64 = 1.0e-6;
+const MAX_ZOOM: f64 = 8.0;
+
+/// Inverse of the renderer's 2x4 Braille-dot raster cell choice. The cursor
+/// anchors the same screen-space cell center used for marker/halo placement.
+pub(crate) fn map_cell_center(column: u16, row: u16, width: u16, height: u16) -> Point {
+    let w = f64::from(width.max(1));
+    let h = f64::from(height.max(1)) * 2.0;
+    Point {
+        x: (f64::from(column) * 2.0 + 0.5) * w / (w * 2.0 - 1.0),
+        y: h - (f64::from(row) * 4.0 + 1.5) * h / (h * 2.0 - 1.0),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -180,13 +212,136 @@ impl LayoutCache {
         // Anchor to the press, not the previous report: event coalescing has
         // exactly the same result, without cumulative floating-point drift.
         let center = Point {
-            x: drag.center.x - f64::from(dx),
-            y: drag.center.y + 2.0 * f64::from(dy),
+            x: drag.center.x - f64::from(dx) / self.camera.zoom,
+            y: drag.center.y + 2.0 * f64::from(dy) / self.camera.zoom,
         };
         if self.camera.center != Some(center) {
             self.camera.center = Some(center);
             self.invalidate_hits();
         }
+    }
+
+    pub(crate) fn zoom_factor(&self) -> f64 {
+        self.camera.zoom
+    }
+
+    fn next_zoom(&self, factor: f64) -> Option<f64> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return None;
+        }
+        let zoom = (self.camera.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        (zoom != self.camera.zoom).then_some(zoom)
+    }
+
+    fn set_camera_transform(&mut self, center: Point, zoom: f64) -> bool {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !zoom.is_finite()
+            || !(MIN_ZOOM..=MAX_ZOOM).contains(&zoom)
+            || (self.camera.center == Some(center) && self.camera.zoom == zoom)
+        {
+            return false;
+        }
+        self.camera.center = Some(center);
+        self.camera.zoom = zoom;
+        self.cancel_drag();
+        self.invalidate_hits();
+        true
+    }
+
+    /// Zoom around the viewport center; this never changes world coordinates.
+    pub(crate) fn zoom_by(&mut self, factor: f64) -> bool {
+        let Some(center) = self.camera.center else {
+            return false;
+        };
+        let Some(zoom) = self.next_zoom(factor) else {
+            return false;
+        };
+        if self.camera.viewport.0 == 0 || self.camera.viewport.1 == 0 {
+            return false;
+        }
+        self.set_camera_transform(center, zoom)
+    }
+
+    /// Wheel zoom is accepted only in the current map, and keeps the exact
+    /// world point under the cursor's Braille cell center stationary on screen.
+    pub(crate) fn zoom_at(&mut self, factor: f64, column: u16, row: u16) -> bool {
+        let (Some(area), Some(center)) = (self.camera.map_area, self.camera.center) else {
+            return false;
+        };
+        if area.width == 0
+            || area.height == 0
+            || (area.width, area.height) != self.camera.viewport
+            || !area.contains((column, row).into())
+        {
+            return false;
+        }
+        let Some(zoom) = self.next_zoom(factor) else {
+            return false;
+        };
+        let screen = map_cell_center(column - area.x, row - area.y, area.width, area.height);
+        let dx = screen.x - f64::from(area.width) * 0.5;
+        let dy = screen.y - f64::from(area.height);
+        let inverse_delta = self.camera.zoom.recip() - zoom.recip();
+        self.set_camera_transform(
+            Point {
+                x: center.x + dx * inverse_delta,
+                y: center.y + dy * inverse_delta,
+            },
+            zoom,
+        )
+    }
+
+    /// 100% scale, keeping the current viewport center rather than recomposing.
+    pub(crate) fn reset_zoom(&mut self) -> bool {
+        let Some(center) = self.camera.center else {
+            return false;
+        };
+        self.set_camera_transform(center, 1.0)
+    }
+
+    /// Fit the supplied loaded scene only; no graph solve, topology read, or
+    /// provider fetch. Reject an invalid/unrepresentable fit as a whole rather
+    /// than silently omitting a far or nonfinite point from the bounds.
+    pub(crate) fn fit_points(&mut self, points: &[Point]) -> bool {
+        let (width, height) = self.camera.viewport;
+        if points.is_empty()
+            || width == 0
+            || height == 0
+            || points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+        {
+            return false;
+        }
+        let (mut left, mut right, mut bottom, mut top) = (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for point in points {
+            left = left.min(point.x);
+            right = right.max(point.x);
+            bottom = bottom.min(point.y);
+            top = top.max(point.y);
+        }
+        // Halving before subtracting/adding avoids overflowing finite endpoints.
+        let half_x = right * 0.5 - left * 0.5;
+        let half_y = top * 0.5 - bottom * 0.5;
+        let center = Point {
+            x: left * 0.5 + right * 0.5,
+            y: bottom * 0.5 + top * 0.5,
+        };
+        // Five screen-space units keep the existing halo and numeric labels off
+        // the rim. Tiny viewports retain a positive proportional interior.
+        let room_x = (f64::from(width) * 0.5 - 5.0).max(f64::from(width) * 0.1);
+        let room_y = (f64::from(height) - 5.0).max(f64::from(height) * 0.2);
+        let zoom = (if half_x > 0.0 { room_x / half_x } else { 1.0 })
+            .min(if half_y > 0.0 { room_y / half_y } else { 1.0 })
+            .min(1.0);
+        if zoom < MIN_ZOOM {
+            return false;
+        }
+        self.set_camera_transform(center, zoom)
     }
 
     pub(crate) fn invalidate_hits(&mut self) {
@@ -330,8 +485,8 @@ impl LayoutCache {
         let center = self.camera.center.get_or_insert(initial_center);
         if let Some((id, point)) = selected {
             if resized || self.camera.selected.as_deref() != Some(id) {
-                let half_x = (f64::from(width) / 2.0 - 5.0).max(0.0);
-                let half_y = (f64::from(height) - 5.0).max(0.0);
+                let half_x = (f64::from(width) / 2.0 - 5.0).max(0.0) / self.camera.zoom;
+                let half_y = (f64::from(height) - 5.0).max(0.0) / self.camera.zoom;
                 // A press still selects its node, but grabbing an already
                 // visible marker must not snap the world underneath the hand.
                 if self.camera.drag.is_none() {
@@ -344,46 +499,73 @@ impl LayoutCache {
         points
             .iter()
             .map(|p| Point {
-                x: p.x - center.x + f64::from(width) / 2.0,
-                y: p.y - center.y + f64::from(height),
+                x: (p.x - center.x) * self.camera.zoom + f64::from(width) / 2.0,
+                y: (p.y - center.y) * self.camera.zoom + f64::from(height),
             })
             .collect()
     }
 
     pub(crate) fn pan(&mut self, dx: f64, dy: f64) {
-        if let Some(center) = &mut self.camera.center {
-            center.x += dx;
-            center.y += dy;
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
         }
-        self.invalidate_hits();
+        if let Some(center) = self.camera.center {
+            self.set_camera_transform(
+                Point {
+                    x: center.x + dx / self.camera.zoom,
+                    y: center.y + dy / self.camera.zoom,
+                },
+                self.camera.zoom,
+            );
+        }
     }
 }
 
 const WORLD_CLEARANCE: f64 = 7.0;
 /// Bounded local search, followed by an O(1) vacant-envelope fallback. Failure
 /// to find a near slot changes placement, never loaded-node coverage.
-#[derive(Default)]
 struct Packing {
     cells: std::collections::HashMap<(i32, i32), Vec<Point>>,
     max_x: Option<f64>,
+    clearance: f64,
+}
+impl Default for Packing {
+    fn default() -> Self {
+        Self::with_clearance(WORLD_CLEARANCE)
+    }
 }
 impl Packing {
+    fn with_clearance(clearance: f64) -> Self {
+        Self {
+            cells: Default::default(),
+            max_x: None,
+            clearance,
+        }
+    }
     fn occupy(&mut self, point: Point) {
         self.cells
             .entry((
-                (point.x / WORLD_CLEARANCE).floor() as i32,
-                (point.y / WORLD_CLEARANCE).floor() as i32,
+                (point.x / self.clearance).floor() as i32,
+                (point.y / self.clearance).floor() as i32,
             ))
             .or_default()
             .push(point);
         self.max_x = Some(self.max_x.map_or(point.x, |x| x.max(point.x)));
     }
     fn place(&mut self, origin: Point) -> Point {
+        self.place_with_step(origin, self.clearance)
+    }
+    fn place_near(&mut self, origin: Point) -> Point {
+        // Settled interiors already have useful geometry. Search for the
+        // smallest local correction before falling back to a vacant envelope.
+        self.place_with_step(origin, self.clearance * 0.25)
+    }
+    fn place_with_step(&mut self, origin: Point, step: f64) -> Point {
         let mut candidate = origin;
         for attempt in 0..128 {
             let cell = (
-                (candidate.x / WORLD_CLEARANCE).floor() as i32,
-                (candidate.y / WORLD_CLEARANCE).floor() as i32,
+                (candidate.x / self.clearance).floor() as i32,
+                (candidate.y / self.clearance).floor() as i32,
             );
             let free = (-1..=1).all(|dx| {
                 (-1..=1).all(|dy| {
@@ -392,7 +574,7 @@ impl Packing {
                         .is_none_or(|neighbors| {
                             neighbors.iter().all(|point| {
                                 (point.x - candidate.x).hypot(point.y - candidate.y)
-                                    >= WORLD_CLEARANCE
+                                    >= self.clearance
                             })
                         })
                 })
@@ -401,7 +583,7 @@ impl Packing {
                 self.occupy(candidate);
                 return candidate;
             }
-            let radius = WORLD_CLEARANCE * ((attempt + 1) as f64).sqrt();
+            let radius = step * ((attempt + 1) as f64).sqrt();
             let angle = (attempt + 1) as f64 * 2.399963229728653;
             candidate = Point {
                 x: origin.x + radius * angle.cos(),
@@ -409,7 +591,7 @@ impl Packing {
             };
         }
         candidate = Point {
-            x: self.max_x.unwrap_or(origin.x) + WORLD_CLEARANCE * 2.0,
+            x: self.max_x.unwrap_or(origin.x) + self.clearance * 2.0,
             y: origin.y,
         };
         self.occupy(candidate);
@@ -468,15 +650,8 @@ pub(crate) fn link_distance(weight: f64, width: u16, height: u16, node_count: us
     spacing(width, height, node_count) * (1.25 - 0.55 * weight)
 }
 
-/// Compose district centers across the full padded rectangle, then give each
-/// district a small irregular interior. No corner-assigned global hash anchors.
-fn anchors(key: &LayoutKey, groups: &DisplayGroups) -> Vec<Point> {
-    let width = f64::from(key.width);
-    let height = 2.0 * f64::from(key.height);
-    let center = Point {
-        x: width * 0.5,
-        y: height * 0.5,
-    };
+/// Display groups and standalone notes are equally real placement units.
+fn layout_units(key: &LayoutKey, groups: &DisplayGroups) -> Vec<(u64, Vec<usize>)> {
     let mut units: Vec<(u64, Vec<usize>)> = groups
         .groups
         .iter()
@@ -496,7 +671,23 @@ fn anchors(key: &LayoutKey, groups: &DisplayGroups) -> Vec<Point> {
             units.push((stable_hash(id), vec![index]));
         }
     }
-    units.sort_by_key(|unit| unit.0);
+    for (_, members) in &mut units {
+        members.sort_unstable();
+    }
+    units.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.first().cmp(&b.1.first())));
+    units
+}
+
+/// Compose district centers, then give each district a small irregular interior.
+/// No corner-assigned global hash anchors or expansion into spare canvas area.
+fn anchors(key: &LayoutKey, groups: &DisplayGroups) -> Vec<Point> {
+    let width = f64::from(key.width);
+    let height = 2.0 * f64::from(key.height);
+    let center = Point {
+        x: width * 0.5,
+        y: height * 0.5,
+    };
+    let units = layout_units(key, groups);
     let mut points = vec![center; key.ids.len()];
     let centers = districts::centers(key, &units);
     let focus_unit = key.focus.and_then(|focus| {
@@ -508,27 +699,16 @@ fn anchors(key: &LayoutKey, groups: &DisplayGroups) -> Vec<Point> {
         let origin = centers[unit_index];
         let radius =
             spacing(key.width, key.height, key.ids.len()) * (members.len() as f64).sqrt() * 0.27;
-        for &index in members {
-            let hash = stable_hash(&key.ids[index]);
+        for (index, offset) in district_interior(key, members, radius) {
             points[index] = Point {
-                x: origin.x + (fraction(hash) - 0.5) * radius * 2.0,
-                y: origin.y + (fraction(hash ^ 0x9e3779b97f4a7c15) - 0.5) * radius * 2.0,
+                x: origin.x + offset.x,
+                y: origin.y + offset.y,
             };
         }
         if focus_unit == Some(unit_index) {
             if let Some(focus) = key.focus {
                 points[focus] = center;
             }
-        }
-        let movable: Vec<_> = members
-            .iter()
-            .copied()
-            .filter(|i| key.focus != Some(*i))
-            .collect();
-        let average = mean(movable.iter().map(|&i| points[i]));
-        for &index in &movable {
-            points[index].x += origin.x - average.x;
-            points[index].y += origin.y - average.y;
         }
     }
     if key.ids.len() == 2 {
@@ -566,6 +746,41 @@ fn anchors(key: &LayoutKey, groups: &DisplayGroups) -> Vec<Point> {
     }
     points
 }
+/// Shared exact seed geometry: district packing measures the same recentered
+/// square-hash interior that anchors places, rather than assuming a radius is an
+/// enclosing disk. Focus is fixed at its district origin, not in the mean.
+fn district_interior(key: &LayoutKey, members: &[usize], radius: f64) -> Vec<(usize, Point)> {
+    let mut points: Vec<_> = members
+        .iter()
+        .map(|&index| {
+            let hash = stable_hash(&key.ids[index]);
+            (
+                index,
+                Point {
+                    x: (fraction(hash) - 0.5) * radius * 2.0,
+                    y: (fraction(hash ^ 0x9e3779b97f4a7c15) - 0.5) * radius * 2.0,
+                },
+            )
+        })
+        .collect();
+    points.sort_by_key(|(index, _)| *index);
+    let average = mean(
+        points
+            .iter()
+            .filter(|(index, _)| key.focus != Some(*index))
+            .map(|(_, point)| *point),
+    );
+    for (index, point) in &mut points {
+        if key.focus == Some(*index) {
+            *point = Point::default();
+        } else {
+            point.x -= average.x;
+            point.y -= average.y;
+        }
+    }
+    points
+}
+
 fn mean(points: impl Iterator<Item = Point>) -> Point {
     let (sum, count) = points.fold((Point::default(), 0), |(sum, count), p| {
         (
@@ -763,8 +978,39 @@ fn settle(
             }
         }
     }
-    if key.ids.len() > 128 {
-        // Local packing catches close pairs beyond the force-work budget.
+    if previous.is_none() && key.ids.len() > 2 {
+        let units = layout_units(key, groups);
+        if units.len() > 2 || key.ids.len() > 128 {
+            // Give crowded interiors the same minimum marker spacing at every
+            // field size, not only beyond the force-work cutoff. Keep the
+            // specialized one/two-unit composition unchanged for small fields.
+            // A global node-by-node spill scatters later groups into earlier
+            // ones after their centers were carefully separated.
+            for (_, members) in &units {
+                if key.ids.len() <= 128 && members.len() <= 2 {
+                    continue;
+                }
+                let clearance = if key.ids.len() > 128 {
+                    WORLD_CLEARANCE
+                } else {
+                    (spacing * 0.48).min(WORLD_CLEARANCE)
+                };
+                let mut occupied = Packing::with_clearance(clearance);
+                if let Some(focus) = key.focus.filter(|focus| members.contains(focus)) {
+                    occupied.occupy(points[focus]);
+                }
+                for &index in members {
+                    if key.focus != Some(index) {
+                        points[index] = occupied.place_near(points[index]);
+                    }
+                }
+            }
+        }
+        // Measure the actual settled interiors, then translate whole districts.
+        // Nothing may pack individual nodes again after this final clearance pass.
+        districts::arrange_settled(key, &units, &mut points);
+    } else if key.ids.len() > 128 {
+        // Keep the existing warm-start path; it does not recompose districts.
         let mut occupied = Packing::default();
         for point in &mut points {
             *point = occupied.place(*point);
@@ -1121,6 +1367,71 @@ mod tests {
         assert_eq!(cache.solves, 1); // deliberate reset permits a fresh full composition
     }
 
+    #[test]
+    fn initial_district_packing_keeps_focus_and_marker_clearance_on_both_size_paths() {
+        for count in [96, 156] {
+            let focus_index = count - 25;
+            let graph = Graph {
+                nodes: (0..count)
+                    .map(|i| Node {
+                        id: format!("packed-{i:03}"),
+                        ..Node::default()
+                    })
+                    .collect(),
+                edges: (0..count)
+                    .filter(|i| i % 12 != 11)
+                    .map(|i| Edge {
+                        from: format!("packed-{i:03}"),
+                        to: format!("packed-{:03}", i + 1),
+                        kind: "associative".into(),
+                        weight: 0.8,
+                    })
+                    .collect(),
+                // Not the first member or first district in canonical order.
+                focus: Some(format!("packed-{focus_index:03}")),
+                ..Graph::default()
+            };
+            let mut cache = LayoutCache::default();
+            let points = cache.world_positions(&graph);
+            let (width, height) = LayoutCache::world_size(graph.nodes.len());
+            let center = Point {
+                x: f64::from(width) * 0.5,
+                y: f64::from(height),
+            };
+            assert!((points[focus_index].x - center.x).abs() < 1e-9);
+            assert!((points[focus_index].y - center.y).abs() < 1e-9);
+            let clearance = if count > 128 {
+                WORLD_CLEARANCE
+            } else {
+                (spacing(width, height, count) * 0.48).min(WORLD_CLEARANCE)
+            };
+            let mut checked_groups = 0;
+            for group in cache.groups(&graph).groups {
+                // Small-field pairs retain their weight-responsive geometry;
+                // minimum packing clearance applies to the larger interiors.
+                if count <= 128 && group.members.len() <= 2 {
+                    continue;
+                }
+                checked_groups += 1;
+                let members: Vec<_> = group
+                    .members
+                    .iter()
+                    .map(|id| graph.nodes.iter().position(|node| &node.id == id).unwrap())
+                    .collect();
+                for (i, &a) in members.iter().enumerate() {
+                    for &b in &members[i + 1..] {
+                        assert!(
+                            (points[a].x - points[b].x).hypot(points[a].y - points[b].y)
+                                >= clearance - 1e-9
+                        );
+                    }
+                }
+            }
+            assert!(checked_groups > 0);
+            assert_eq!(points, cache.world_positions(&graph));
+        }
+    }
+
     fn pockets() -> Graph {
         Graph {
             nodes: ["a", "b", "c", "d", "e", "f"]
@@ -1456,5 +1767,185 @@ mod tests {
             assert!((center.x - f64::from(width) * 0.5).abs() < f64::from(width) * 0.10);
             assert!((center.y - f64::from(height)).abs() < 2.0 * f64::from(height) * 0.10);
         }
+    }
+
+    fn camera_fixture() -> (LayoutCache, Graph, Vec<Point>) {
+        let graph = pair(0.75);
+        let mut cache = LayoutCache::default();
+        let points = cache.world_positions(&graph);
+        cache.project(&graph, &points, None, 80, 24);
+        cache.set_map_area(Some(ratatui::layout::Rect::new(10, 5, 80, 24)));
+        (cache, graph, points)
+    }
+
+    #[test]
+    fn camera_zoom_anchors_exact_braille_cell_world_point() {
+        let (mut cache, graph, points) = camera_fixture();
+        for (column, row, factor) in [(10, 5, 2.0), (89, 28, 0.25), (47, 12, 1.5)] {
+            let screen = map_cell_center(column - 10, row - 5, 80, 24);
+            let center = cache.camera.center.unwrap();
+            let world = Point {
+                x: center.x + (screen.x - 40.0) / cache.zoom_factor(),
+                y: center.y + (screen.y - 24.0) / cache.zoom_factor(),
+            };
+            assert!(cache.zoom_at(factor, column, row));
+            let projected = cache.project(&graph, &[world], None, 80, 24)[0];
+            assert!((projected.x - screen.x).abs() < 1e-9);
+            assert!((projected.y - screen.y).abs() < 1e-9);
+        }
+        assert_eq!(cache.world_positions(&graph), points);
+        assert_eq!(cache.solves, 1);
+        let center = cache.camera.center;
+        assert!(!cache.zoom_at(2.0, 9, 12));
+        assert!(!cache.zoom_at(2.0, 90, 12));
+        assert!(!cache.zoom_at(2.0, 12, 29));
+        assert_eq!(cache.camera.center, center);
+    }
+
+    #[test]
+    fn zoomed_drag_pan_and_selection_reveal_use_screen_space_distances() {
+        let (mut cache, graph, points) = camera_fixture();
+        assert!(cache.zoom_by(2.0));
+        let origin = cache.camera.center.unwrap();
+        cache.start_drag(20, 15);
+        cache.drag_to(25, 18);
+        assert_eq!(
+            cache.camera.center,
+            Some(Point {
+                x: origin.x - 2.5,
+                y: origin.y + 3.0
+            })
+        );
+        cache.cancel_drag();
+        let before = cache.project(&graph, &points, None, 80, 24);
+        cache.pan(12.0, -8.0);
+        let after = cache.project(&graph, &points, None, 80, 24);
+        for (a, b) in before.iter().zip(after) {
+            assert!((a.x - b.x - 12.0).abs() < 1e-9);
+            assert!((b.y - a.y - 8.0).abs() < 1e-9);
+        }
+        cache.camera.center = Some(Point::default());
+        cache.zoom_by(0.25);
+        let selected = Point { x: 60.0, y: 0.0 };
+        cache.project(&graph, &[selected], Some(("far", selected)), 80, 24);
+        assert_eq!(cache.camera.center, Some(Point::default()));
+        cache.zoom_by(4.0);
+        let selected = Point { x: 60.0, y: 70.0 };
+        let projected = cache.project(&graph, &[selected], Some(("new", selected)), 80, 24)[0];
+        assert_eq!(projected, Point { x: 75.0, y: 43.0 });
+        assert_eq!(cache.world_positions(&graph), points);
+        assert_eq!(cache.solves, 1);
+    }
+
+    #[test]
+    fn fit_covers_all_loaded_points_with_screen_margin_without_zooming_in() {
+        let (mut cache, graph, world) = camera_fixture();
+        let points = [
+            Point {
+                x: -1.0e6,
+                y: -500_000.0,
+            },
+            Point {
+                x: 1.0e6,
+                y: 500_000.0,
+            },
+            Point { x: 0.0, y: 10.0 },
+        ];
+        assert!(cache.fit_points(&points));
+        assert!((MIN_ZOOM..=1.0).contains(&cache.zoom_factor()));
+        for point in cache.project(&graph, &points, None, 80, 24) {
+            assert!((5.0 - 1e-8..=75.0 + 1e-8).contains(&point.x));
+            assert!((5.0 - 1e-8..=43.0 + 1e-8).contains(&point.y));
+        }
+        assert_eq!(cache.world_positions(&graph), world);
+        assert_eq!(cache.solves, 1);
+        let singleton = Point {
+            x: 10_000.0,
+            y: -4000.0,
+        };
+        assert!(cache.fit_points(&[singleton]));
+        assert_eq!(cache.zoom_factor(), 1.0);
+        assert_eq!(cache.camera.center, Some(singleton));
+        assert_eq!(
+            cache.project(&graph, &[singleton], None, 80, 24),
+            [Point { x: 40.0, y: 24.0 }]
+        );
+        assert!(!cache.fit_points(&[singleton]));
+    }
+
+    #[test]
+    fn invalid_or_unready_camera_operations_are_whole_operation_noops() {
+        let mut empty = LayoutCache::default();
+        assert_eq!(empty.zoom_factor(), 1.0);
+        assert!(!empty.zoom_by(2.0));
+        assert!(!empty.zoom_at(2.0, 0, 0));
+        assert!(!empty.fit_points(&[Point::default()]));
+        let (mut cache, _, _) = camera_fixture();
+        let center = cache.camera.center;
+        for factor in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!cache.zoom_by(factor));
+            assert!(!cache.zoom_at(factor, 20, 10));
+        }
+        assert!(!cache.fit_points(&[]));
+        assert!(!cache.fit_points(&[
+            Point::default(),
+            Point {
+                x: f64::NAN,
+                y: 0.0
+            }
+        ]));
+        assert!(!cache.fit_points(&[
+            Point {
+                x: -f64::MAX,
+                y: 0.0
+            },
+            Point {
+                x: f64::MAX,
+                y: 0.0
+            }
+        ]));
+        assert_eq!(cache.camera.center, center);
+        assert_eq!(cache.zoom_factor(), 1.0);
+        assert!(cache.zoom_by(f64::MAX));
+        assert_eq!(cache.zoom_factor(), MAX_ZOOM);
+        assert!(!cache.zoom_by(2.0));
+        assert!(cache.zoom_by(f64::MIN_POSITIVE));
+        assert_eq!(cache.zoom_factor(), MIN_ZOOM);
+        assert!(!cache.zoom_by(0.5));
+    }
+
+    #[test]
+    fn zoom_changes_cancel_drag_invalidate_hits_and_clone_exactly_for_back() {
+        let (mut cache, graph, world) = camera_fixture();
+        let marker = ratatui::layout::Rect::new(20, 10, 1, 1);
+        cache.camera.hits.push((marker, "a".into()));
+        cache.camera.markers.push((marker, "a".into()));
+        cache.camera.index_ids.push("a".into());
+        cache.start_drag(20, 10);
+        assert!(cache.zoom_by(1.75));
+        assert!(cache.camera.drag.is_none());
+        assert!(
+            cache.camera.hits.is_empty()
+                && cache.camera.markers.is_empty()
+                && cache.camera.index_ids.is_empty()
+        );
+        cache.pan(8.0, -3.0);
+        let expected = cache.project(&graph, &world, None, 80, 24);
+        let saved = cache.clone();
+        let center = cache.camera.center;
+        assert!(cache.reset_zoom());
+        assert_eq!(cache.zoom_factor(), 1.0);
+        assert_eq!(cache.camera.center, center);
+        cache = saved;
+        assert_eq!(cache.zoom_factor(), 1.75);
+        assert_eq!(cache.project(&graph, &world, None, 80, 24), expected);
+        assert_eq!(cache.world_positions(&graph), world);
+        assert_eq!(cache.solves, 1);
+        cache.recompose();
+        assert_eq!(cache.zoom_factor(), 1.0);
+        assert_eq!(cache.camera.center, None);
+        cache.zoom_by(2.0);
+        cache.reset();
+        assert_eq!(cache.zoom_factor(), 1.0);
     }
 }

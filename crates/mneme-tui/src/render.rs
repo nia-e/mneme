@@ -448,9 +448,9 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ]
         } else {
             &[
-                "/ find  arrows choose  ,. all  h archived  ⇧arrows pan  ↵ follow  i memory  e edges  s scenes  t cabinet  tab source  ? keys  q leave",
-                "/ find  arrows choose  ,. all  h archived  ⇧arrows pan  ↵ follow  i memory  e edges  s scenes  ?  q",
-                "arrows choose  ,. all  ↵  i memory  e edges  s scenes  ?  q",
+                "/ find  arrows choose  ,. all  h archived  ⇧arrows pan  +/- zoom  f fit  ↵ follow  i memory  e edges  s scenes  t cabinet  tab source  ?  q",
+                "/ find  arrows choose  ,. all  ⇧arrows pan  +/- zoom  f fit  ↵ follow  i memory  e edges  s scenes  ?  q",
+                "arrows choose  +/- zoom  f fit  ↵ follow  i memory  e edges  ?  q",
                 "e edges  i memory  s scenes  ?  q",
                 "e edges  i memory  ?  q",
                 "s scenes  ?  q",
@@ -518,7 +518,7 @@ fn help(frame: &mut Frame<'_>, screen: Rect, app: &App) {
             Line::raw(" arrows / j k   map: spatial select; linked neighbors first"),
             Line::raw(" , / .          map: cycle selectable nodes, including islands"),
             Line::raw(" Click         select a marker, number or index row"),
-            Line::raw(" Drag / ⇧arrows pan the map (drag starts inside the field)"),
+            Line::raw(" Drag / ⇧arrows pan · Wheel / +/- (=) zoom in the field"),
             Line::raw(" enter          map: follow · scenes: read the exact edition"),
             Line::raw(" i              open / close memory or exact scene detail"),
             Line::raw(" e              map: isolate / restore edges in place"),
@@ -526,7 +526,7 @@ fn help(frame: &mut Frame<'_>, screen: Rect, app: &App) {
             Line::raw(" o              scenes: recorded / occurred chronology"),
             Line::raw(" esc / ⌫ / b    map: back · Esc closes panes / cancels search"),
             Line::raw(" tab / r        choose source / refresh current view"),
-            Line::raw(" R              map: recompose loaded links (no source read)"),
+            Line::raw(" f / 0 / R      map: fit loaded / 100% / recompose"),
             Line::raw(" ↑↓ / j k       opened detail: scroll; otherwise choose"),
             Line::raw(" Wheel / PgUp/Dn scroll text / page; Home/End jumps"),
             Line::raw(" ? / esc        close this guide"),

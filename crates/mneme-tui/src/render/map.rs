@@ -234,12 +234,11 @@ pub(super) fn marker_rect(star: Star, width: u16, height: u16) -> Rect {
 /// Draw links and halos around the center of the chosen glyph cell. Sharing
 /// this inverse also aligns neighbors introduced by a temporary edge lens.
 pub(super) fn cell_center(index: usize, marker: Rect, width: u16, height: u16) -> Star {
-    let w = f64::from(width.max(1));
-    let h = f64::from(height.max(1)) * 2.0;
+    let point = crate::layout::map_cell_center(marker.x, marker.y, width, height);
     Star {
         index,
-        x: (f64::from(marker.x) * 2.0 + 0.5) * w / (w * 2.0 - 1.0),
-        y: h - (f64::from(marker.y) * 4.0 + 1.5) * h / (h * 2.0 - 1.0),
+        x: point.x,
+        y: point.y,
     }
 }
 
@@ -664,7 +663,17 @@ fn constellation(frame: &mut Frame<'_>, area: Rect, app: &App) {
         (false, false) => "",
     };
     let warning = format!("{warning}{state}");
-    let note = format!("{warning}{node_count} · {links}");
+    let percent = app.layout.borrow().zoom_factor() * 100.0;
+    let zoom = if percent < 0.01 {
+        "<0.01%".to_owned()
+    } else if percent < 1.0 {
+        format!("{percent:.2}%")
+    } else if percent < 10.0 {
+        format!("{percent:.1}%")
+    } else {
+        format!("{percent:.0}%")
+    };
+    let note = format!("{warning}{zoom} · {node_count} · {links}");
     // Ordinary island labels are deliberately best-effort: one visible member,
     // a clipped pocket or crowded labels can suppress them. The selected named
     // group gets priority in this existing strip instead. Never cover a node or
@@ -674,7 +683,7 @@ fn constellation(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .filter(|group| group.label.is_some());
     let line = if let Some(group) = selected_group {
         let coverage = format!(
-            "{}/{} nodes · {drawn_edges}/{} links drawn · visible/loaded",
+            "{zoom} · {}/{} nodes · {drawn_edges}/{} links drawn · visible/loaded",
             visible.len(),
             count,
             app.scene_edges().len()

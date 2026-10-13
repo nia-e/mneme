@@ -1,15 +1,38 @@
 //! Map input uses the settled world, rendered hitboxes and small marker halos.
 use crate::{
+    layout::Point,
     model::{App, View},
     render::map::world_stars,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+const KEY_ZOOM_STEP: f64 = 1.2;
+const WHEEL_ZOOM_STEP: f64 = 1.1;
+
 pub(crate) fn map_key(app: &mut App, key: KeyEvent) -> bool {
-    if app.view != View::Map || app.editing || app.show_help {
+    if app.view != View::Map || app.editing || app.show_help || app.source_menu.is_some() {
         return false;
     }
+    if matches!(key.code, KeyCode::Char('+' | '=' | '-' | '0' | 'f')) && !map_viewport_ready(app) {
+        return true;
+    }
     let direction = match key.code {
+        KeyCode::Char('+' | '=') => {
+            app.layout.borrow_mut().zoom_by(KEY_ZOOM_STEP);
+            return true;
+        }
+        KeyCode::Char('-') => {
+            app.layout.borrow_mut().zoom_by(KEY_ZOOM_STEP.recip());
+            return true;
+        }
+        KeyCode::Char('0') => {
+            app.layout.borrow_mut().reset_zoom();
+            return true;
+        }
+        KeyCode::Char('f') => {
+            fit_loaded(app);
+            return true;
+        }
         KeyCode::Left => Some((-1.0, 0.0)),
         KeyCode::Right => Some((1.0, 0.0)),
         KeyCode::Up | KeyCode::Char('k') => Some((0.0, 1.0)),
@@ -48,6 +71,30 @@ pub(crate) fn map_key(app: &mut App, key: KeyEvent) -> bool {
         spatial(app, dx, dy);
     }
     true
+}
+
+/// Fit all shown loaded nodes, not merely this frame's clipped markers. Do not
+/// call world_stars before the map has settled: doing so would commit a partial
+/// nodes-before-links crawl as though the user had asked to recompose it.
+fn fit_loaded(app: &App) {
+    let nodes = app.scene_nodes();
+    let points: Vec<_> = world_stars(app)
+        .into_iter()
+        .filter(|star| app.node_visible_node(nodes[star.index]))
+        .map(|star| Point {
+            x: star.x,
+            y: star.y,
+        })
+        .collect();
+    app.layout.borrow_mut().fit_points(&points);
+}
+
+fn map_viewport_ready(app: &App) -> bool {
+    let layout = app.layout.borrow();
+    layout.has_world()
+        && layout.camera.map_area.is_some_and(|area| {
+            !area.is_empty() && (area.width, area.height) == layout.camera.viewport
+        })
 }
 
 fn spatial(app: &mut App, dx: f64, dy: f64) {
@@ -174,15 +221,36 @@ fn hit_node(camera: &crate::layout::Camera, column: u16, row: u16) -> Option<Str
         .map(|(_, id)| id.to_owned())
 }
 
+#[cfg(test)]
 pub(crate) fn mouse(app: &mut App, event: MouseEvent) {
-    if crate::detail_scroll::mouse(app, event, 1) {
+    mouse_with_wheel_reports(app, event, 1);
+}
+
+pub(crate) fn mouse_with_wheel_reports(app: &mut App, event: MouseEvent, reports: usize) {
+    if crate::detail_scroll::mouse(app, event, reports.max(1)) {
         return;
     }
-    if app.view != View::Map || app.editing || app.show_help {
+    if app.view != View::Map || app.editing || app.show_help || app.source_menu.is_some() {
         app.layout.borrow_mut().cancel_drag();
         return;
     }
     match event.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if event.modifiers.is_empty() => {
+            // Apply a coalesced burst once, without losing wheel distance. The
+            // bounded exponent reaches either camera limit without overflow.
+            let steps = reports.clamp(1, 256) as i32;
+            let exponent = if event.kind == MouseEventKind::ScrollUp {
+                steps
+            } else {
+                -steps
+            };
+            app.layout.borrow_mut().zoom_at(
+                WHEEL_ZOOM_STEP.powi(exponent),
+                event.column,
+                event.row,
+            );
+            return;
+        }
         MouseEventKind::Down(MouseButton::Left) => {
             app.layout.borrow_mut().start_drag(event.column, event.row);
         }
@@ -257,6 +325,355 @@ mod tests {
             .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
             .find(|&(x, y)| hit_node(&layout.camera, x, y).is_none())
             .unwrap()
+    }
+
+    #[test]
+    fn zoom_keys_change_only_the_camera_and_reset_to_one_hundred_percent() {
+        let mut app = app(80);
+        app.select_node(3);
+        draw(&app, 120, 36);
+        let world = world_stars(&app);
+        let graph = format!("{:?}", app.graph);
+        let center = app.layout.borrow().camera.center;
+        for (code, expected) in [('=', 1.2), ('+', 1.44), ('-', 1.2), ('0', 1.0)] {
+            assert!(map_key(
+                &mut app,
+                key(KeyCode::Char(code), KeyModifiers::NONE)
+            ));
+            assert!((app.layout.borrow().zoom_factor() - expected).abs() < 1e-10);
+            assert_eq!(app.layout.borrow().camera.center, center);
+            assert!(app.layout.borrow().camera.hits.is_empty());
+            draw(&app, 120, 36);
+        }
+        assert_eq!(format!("{:?}", app.graph), graph);
+        assert_eq!(app.selected, 3);
+        assert!(!app.busy);
+        assert!(app.pulses.is_empty());
+        assert!(app.activity.is_none());
+        assert!(
+            world
+                .iter()
+                .zip(world_stars(&app))
+                .all(|(a, b)| (a.index, a.x, a.y) == (b.index, b.x, b.y))
+        );
+    }
+
+    #[test]
+    fn zoom_controls_respect_editor_help_source_picker_and_other_views() {
+        for mode in 0..5 {
+            let mut app = app(8);
+            draw(&app, 120, 36);
+            let area = app.layout.borrow().camera.map_area.unwrap();
+            match mode {
+                0 => app.editing = true,
+                1 => app.show_help = true,
+                2 => app.source_menu = Some(0),
+                3 => app.view = View::Scenes,
+                _ => app.view = View::Touchstones,
+            }
+            let center = app.layout.borrow().camera.center;
+            for code in ['=', '+', '-', 'f', '0'] {
+                assert!(!map_key(
+                    &mut app,
+                    key(KeyCode::Char(code), KeyModifiers::NONE)
+                ));
+            }
+            pointer(&mut app, MouseEventKind::ScrollUp, area.x + 2, area.y + 2);
+            assert_eq!(app.layout.borrow().zoom_factor(), 1.0);
+            assert_eq!(app.layout.borrow().camera.center, center);
+        }
+    }
+
+    #[test]
+    fn zoom_and_fit_do_not_compose_before_the_initial_topology_or_without_a_map() {
+        for mode in 0..3 {
+            let mut app = app(80);
+            match mode {
+                0 => (), // No render has established a viewport yet.
+                1 => {
+                    app.graph.inventory = Some(crate::model::InventoryState {
+                        crawling: true,
+                        next: Some("more-topology".into()),
+                        ..Default::default()
+                    });
+                    draw(&app, 120, 36);
+                }
+                _ => draw(&app, 40, 24), // Compact index only.
+            }
+            assert!(!app.layout.borrow().has_world());
+            for code in ['=', '+', '-', 'f', '0'] {
+                assert!(map_key(
+                    &mut app,
+                    key(KeyCode::Char(code), KeyModifiers::NONE)
+                ));
+            }
+            pointer(&mut app, MouseEventKind::ScrollUp, 10, 10);
+            assert!(!app.layout.borrow().has_world());
+            assert_eq!(app.layout.borrow().zoom_factor(), 1.0);
+        }
+    }
+
+    #[test]
+    fn resized_compact_or_tiny_maps_do_not_change_the_cached_zoom_or_center() {
+        for (width, height) in [(40, 24), (20, 8)] {
+            let mut app = app(80);
+            draw(&app, 120, 36);
+            map_key(&mut app, key(KeyCode::Char('+'), KeyModifiers::NONE));
+            let center = app.layout.borrow().camera.center;
+            let zoom = app.layout.borrow().zoom_factor();
+            assert_ne!(zoom, 1.0);
+            draw(&app, width, height);
+            assert!(app.layout.borrow().has_world());
+            assert!(app.layout.borrow().camera.map_area.is_none());
+            for code in ['=', '+', '-', '0', 'f'] {
+                assert!(map_key(
+                    &mut app,
+                    key(KeyCode::Char(code), KeyModifiers::NONE)
+                ));
+                assert_eq!(app.layout.borrow().zoom_factor(), zoom);
+                assert_eq!(app.layout.borrow().camera.center, center);
+            }
+            pointer(&mut app, MouseEventKind::ScrollUp, 10, 5);
+            assert_eq!(app.layout.borrow().zoom_factor(), zoom);
+            assert_eq!(app.layout.borrow().camera.center, center);
+        }
+    }
+
+    #[test]
+    fn coalesced_wheel_zoom_keeps_distance_and_anchors_at_the_cursor() {
+        let mut app = app(80);
+        draw(&app, 120, 36);
+        let area = app.layout.borrow().camera.map_area.unwrap();
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: area.x + area.width / 3,
+            row: area.y + area.height / 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut expected = app.layout.borrow().clone();
+        assert!(expected.zoom_at(WHEEL_ZOOM_STEP.powi(7), event.column, event.row));
+        mouse_with_wheel_reports(&mut app, event, 7);
+        assert!((app.layout.borrow().zoom_factor() - WHEEL_ZOOM_STEP.powi(7)).abs() < 1e-10);
+        assert_eq!(app.layout.borrow().camera.center, expected.camera.center);
+        assert_eq!(app.selected, 0);
+        assert!(app.layout.borrow().camera.hits.is_empty());
+
+        mouse_with_wheel_reports(&mut app, event, usize::MAX);
+        let maximum = app.layout.borrow().zoom_factor();
+        assert!(maximum.is_finite());
+        mouse_with_wheel_reports(&mut app, event, usize::MAX);
+        assert_eq!(app.layout.borrow().zoom_factor(), maximum);
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            ..event
+        };
+        mouse_with_wheel_reports(&mut app, event, usize::MAX);
+        let minimum = app.layout.borrow().zoom_factor();
+        assert!(minimum.is_finite() && minimum > 0.0 && minimum < 1.0);
+        mouse_with_wheel_reports(&mut app, event, usize::MAX);
+        assert_eq!(app.layout.borrow().zoom_factor(), minimum);
+    }
+
+    #[test]
+    fn wheel_zoom_stays_inside_the_map_and_text_scrolling_gets_first_refusal() {
+        let mut app = app(80);
+        draw(&app, 120, 36);
+        let area = app.layout.borrow().camera.map_area.unwrap();
+        let original = app.layout.borrow().clone();
+        for (column, row) in [
+            (area.x - 1, area.y),
+            (area.right(), area.y),
+            (area.x, area.bottom()),
+        ] {
+            pointer(&mut app, MouseEventKind::ScrollUp, column, row);
+            assert_eq!(app.layout.borrow().zoom_factor(), 1.0);
+            assert_eq!(app.layout.borrow().camera.hits, original.camera.hits);
+        }
+        for modifiers in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+        ] {
+            mouse_with_wheel_reports(
+                &mut app,
+                MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: area.x + 2,
+                    row: area.y + 2,
+                    modifiers,
+                },
+                7,
+            );
+            assert_eq!(app.layout.borrow().zoom_factor(), 1.0);
+        }
+        // Deliberately overlap the text and sky viewports to test precedence,
+        // not just the ordinary disjoint layout.
+        app.show_details = true;
+        *app.detail_viewport.borrow_mut() = Some(crate::detail_scroll::Viewport {
+            area,
+            offset: 0,
+            max: 100,
+        });
+        mouse_with_wheel_reports(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: area.x + 2,
+                row: area.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            7,
+        );
+        assert_eq!(app.scroll, 21);
+        assert_eq!(app.layout.borrow().zoom_factor(), 1.0);
+        assert_eq!(app.layout.borrow().camera.hits, original.camera.hits);
+    }
+
+    #[test]
+    fn fit_includes_offscreen_loaded_nodes_without_changing_data_or_read_state() {
+        let mut app = app(240);
+        draw(&app, 120, 36);
+        app.graph.inventory = Some(crate::model::InventoryState {
+            crawling: true,
+            next: Some("not-requested-by-fit".into()),
+            ..Default::default()
+        });
+        app.busy = true;
+        app.scroll = 9;
+        let graph = format!("{:?}", app.graph);
+        let world = world_stars(&app);
+        assert!(app.layout.borrow().camera.markers.len() < world.len());
+        let points: Vec<_> = world
+            .iter()
+            .map(|star| Point {
+                x: star.x,
+                y: star.y,
+            })
+            .collect();
+        let mut expected = app.layout.borrow().clone();
+        assert!(expected.fit_points(&points));
+        assert!(map_key(
+            &mut app,
+            key(KeyCode::Char('f'), KeyModifiers::NONE)
+        ));
+        assert_eq!(app.layout.borrow().zoom_factor(), expected.zoom_factor());
+        assert_eq!(app.layout.borrow().camera.center, expected.camera.center);
+        draw(&app, 120, 36);
+        assert_eq!(app.layout.borrow().camera.center, expected.camera.center);
+        assert_eq!(format!("{:?}", app.graph), graph);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.scroll, 9);
+        assert!(app.busy);
+        assert!(app.pulses.is_empty());
+        assert!(app.activity.is_none());
+        assert!(app.history.is_empty());
+        assert!(
+            world
+                .iter()
+                .zip(world_stars(&app))
+                .all(|(a, b)| (a.index, a.x, a.y) == (b.index, b.x, b.y))
+        );
+    }
+
+    #[test]
+    fn fit_excludes_archived_and_lens_hidden_nodes_but_includes_shown_lens_additions() {
+        let mut app = app(80);
+        app.hide_archived = true;
+        app.graph.nodes[1].status = "archived".into();
+        app.open_edge_lens(
+            "node-000".into(),
+            Graph {
+                nodes: vec![
+                    app.graph.nodes[0].clone(),
+                    app.graph.nodes[1].clone(),
+                    Node {
+                        id: "extra-shown".into(),
+                        ..Default::default()
+                    },
+                    Node {
+                        id: "extra-hidden".into(),
+                        status: "archived".into(),
+                        ..Default::default()
+                    },
+                ],
+                edges: ["node-001", "extra-shown", "extra-hidden"]
+                    .into_iter()
+                    .map(|id| Edge {
+                        from: "node-000".into(),
+                        to: id.into(),
+                        kind: "supports".into(),
+                        weight: 0.5,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            LensState::Ready,
+        );
+        draw(&app, 120, 36);
+        let world = world_stars(&app);
+        let nodes = app.scene_nodes();
+        let points: Vec<_> = world
+            .iter()
+            .filter(|star| matches!(nodes[star.index].id.as_str(), "node-000" | "extra-shown"))
+            .map(|star| Point {
+                x: star.x,
+                y: star.y,
+            })
+            .collect();
+        assert_eq!(points.len(), 2);
+        let mut expected = app.layout.borrow().clone();
+        expected.fit_points(&points);
+        map_key(&mut app, key(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.layout.borrow().zoom_factor(), expected.zoom_factor());
+        assert_eq!(app.layout.borrow().camera.center, expected.camera.center);
+        assert_eq!(app.scene_nodes().len(), 82);
+        assert!(app.edge_lens.is_some());
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn zoom_redraw_targets_still_select_their_ids_and_drag_uses_scaled_world_distance() {
+        for factor in [0.5, 2.0] {
+            let mut app = app(80);
+            draw(&app, 120, 36);
+            app.layout.borrow_mut().zoom_by(factor);
+            assert!(app.layout.borrow().camera.hits.is_empty());
+            draw(&app, 120, 36);
+            let rendered = app.layout.borrow().clone();
+            assert!(!rendered.camera.markers.is_empty());
+            for (rect, id) in &rendered.camera.hits {
+                *app.layout.borrow_mut() = rendered.clone();
+                app.selected = 0;
+                pointer(
+                    &mut app,
+                    MouseEventKind::Down(MouseButton::Left),
+                    rect.right() - 1,
+                    rect.y,
+                );
+                assert_eq!(&app.selected_node().unwrap().id, id);
+            }
+            app.selected = 0;
+            *app.layout.borrow_mut() = rendered;
+            let start = empty_map_cell(&app);
+            let center = app.layout.borrow().camera.center.unwrap();
+            pointer(
+                &mut app,
+                MouseEventKind::Down(MouseButton::Left),
+                start.0,
+                start.1,
+            );
+            pointer(
+                &mut app,
+                MouseEventKind::Drag(MouseButton::Left),
+                start.0 + 4,
+                start.1 + 2,
+            );
+            let moved = app.layout.borrow().camera.center.unwrap();
+            assert!((moved.x - (center.x - 4.0 / factor)).abs() < 1e-10);
+            assert!((moved.y - (center.y + 4.0 / factor)).abs() < 1e-10);
+            draw(&app, 120, 36);
+            assert_eq!(app.layout.borrow().camera.center, Some(moved));
+        }
     }
 
     fn click_camera(markers: &[(u16, u16, &str)]) -> crate::layout::Camera {
@@ -1006,8 +1423,6 @@ mod tests {
             MouseEventKind::Drag(MouseButton::Left),
             MouseEventKind::Down(MouseButton::Right),
             MouseEventKind::Down(MouseButton::Middle),
-            MouseEventKind::ScrollUp,
-            MouseEventKind::ScrollDown,
             MouseEventKind::ScrollLeft,
             MouseEventKind::ScrollRight,
         ] {
