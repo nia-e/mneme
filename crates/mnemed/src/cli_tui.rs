@@ -32,9 +32,8 @@ pub(crate) struct TuiArgs {
     /// Synthetic constellation; never contacts a memory service.
     #[arg(long, conflicts_with_all = ["config", "remote", "user", "db"])]
     demo: bool,
-    /// Explicit library observatory; otherwise start on the selected project/user
-    /// owner and Tab to its configured counterpart. Invalid optional counterpart
-    /// config is shown as a warning; --remote selects a single source.
+    /// Explicit library observatory; otherwise start on the configured default
+    /// owner and Tab to another admitted, readable source. --remote selects one route.
     #[arg(long, conflicts_with_all = ["remote", "user", "db"])]
     config: Option<PathBuf>,
     /// Open a semantic search lens instead of the default graph inventory.
@@ -137,7 +136,9 @@ fn declarative_targets(
     let mut rows: Vec<_> = snapshot.stores.iter().collect();
     rows.sort_by_key(|row| row.name != primary);
     for row in rows {
-        if row.admitted && row.eligible.read && (row.active || row.name == primary) {
+        // Choosing a source is an explicit read, not automatic workspace
+        // activation. Keep inactive but admitted/readable stores selectable.
+        if row.admitted && row.eligible.read {
             let owner = &row.store.owner;
             sources.push(SourceChoice::routed(mneme_tui::Target {
                 name: row.name.clone(),
@@ -235,9 +236,8 @@ impl ResolvedTargets {
 mod tests {
     use super::*;
 
-    #[test]
-    fn declarative_picker_uses_the_cli_snapshot_and_does_not_activate_inventory() {
-        let config = mneme_config::Config::parse(
+    fn declarative_config(cwd: &std::path::Path) -> mneme_config::Config {
+        let mut config = mneme_config::Config::parse(
             r#"
 schema = "mneme.config.v1"
 read_default = "renamed-project"
@@ -253,14 +253,37 @@ active = { workspace = "project", roots = ["/not-this-workspace"] }
 id = "01CRZ3NDEKTSV4RRFFQ69G5FAV"
 owner = { url = "http://127.0.0.1:3", db = "blocked-alias" }
 active = { workspace = "any", profiles = ["isolated"] }
+[stores.unreadable]
+id = "01DRZ3NDEKTSV4RRFFQ69G5FAV"
+owner = { url = "http://127.0.0.1:4", db = "unreadable-alias" }
+active = { workspace = "any" }
+permissions = { read = false, write = true }
+[stores.disabled]
+id = "01ERZ3NDEKTSV4RRFFQ69G5FAV"
+owner = { url = "http://127.0.0.1:5", db = "disabled-alias" }
+active = { enabled = false, workspace = "any" }
+[stores.excluded]
+id = "01FRZ3NDEKTSV4RRFFQ69G5FAV"
+owner = { url = "http://127.0.0.1:6", db = "excluded-alias" }
+active = { workspace = "any" }
 "#,
         )
         .unwrap();
-        let snapshot = mneme_config::select(
-            &config,
-            &mneme_config::SelectionContext::new(std::env::temp_dir().canonicalize().unwrap()),
-        )
-        .unwrap();
+        config
+            .stores
+            .get_mut("excluded")
+            .unwrap()
+            .active
+            .excluded_roots = vec![cwd.to_owned()];
+        config
+    }
+
+    #[test]
+    fn declarative_picker_uses_the_cli_snapshot_and_does_not_activate_inventory() {
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let config = declarative_config(&cwd);
+        let snapshot =
+            mneme_config::select(&config, &mneme_config::SelectionContext::new(cwd)).unwrap();
         let digest = snapshot.digest.clone();
         let selected = declarative_targets(snapshot.clone(), None, false).unwrap();
         assert_eq!(selected.sources[0].name, "renamed-project");
@@ -283,22 +306,75 @@ active = { workspace = "any", profiles = ["isolated"] }
                 .find(|source| source.name == "other")
                 .unwrap()
                 .route()
-                .is_none()
+                .is_some()
         );
-        assert!(
-            selected
-                .sources
-                .iter()
-                .find(|source| source.name == "blocked")
-                .unwrap()
-                .route()
-                .is_none()
-        );
+        let inactive = snapshot
+            .stores
+            .iter()
+            .find(|row| row.name == "other")
+            .unwrap();
+        assert!(!inactive.active);
+        assert!(inactive.admitted && inactive.eligible.read);
+        assert!(!inactive.eligible.core && !inactive.eligible.context && !inactive.eligible.recall);
+        assert!(!snapshot.active.iter().any(|row| row.name == "other"));
+        for source in &selected.sources {
+            if let Some(route) = source.route() {
+                assert_eq!(*route.configured.as_ref().unwrap().selection, snapshot);
+            }
+        }
         let explicit = declarative_targets(snapshot.clone(), Some("other"), false).unwrap();
         assert_eq!(explicit.sources[0].name, "other");
         assert!(explicit.sources[0].route().is_some());
         assert!(declarative_targets(snapshot.clone(), Some("blocked"), false).is_err());
         assert!(declarative_targets(snapshot, None, true).is_err());
+    }
+
+    #[test]
+    fn declarative_picker_preserves_read_and_admission_denials() {
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let mut config = declarative_config(&cwd);
+        for profile in ["default", "private", "isolated"] {
+            let mut context = mneme_config::SelectionContext::new(cwd.clone());
+            context.profile = profile.into();
+            let snapshot = mneme_config::select(&config, &context).unwrap();
+            if profile == "isolated" {
+                // Naming a store cannot bypass isolation without an allowlist.
+                for row in &snapshot.stores {
+                    assert!(!row.admitted);
+                    assert!(declarative_targets(snapshot.clone(), Some(&row.name), false).is_err());
+                }
+                config.workspace.allow_stores =
+                    Some(vec!["renamed-project".into(), "other".into()]);
+            }
+            let snapshot = mneme_config::select(&config, &context).unwrap();
+            let selected =
+                declarative_targets(snapshot.clone(), Some("renamed-project"), false).unwrap();
+            for source in &selected.sources {
+                let expected = matches!(source.name.as_str(), "renamed-project" | "other");
+                assert_eq!(
+                    source.route().is_some(),
+                    expected,
+                    "{profile}: {}",
+                    source.name
+                );
+                let row = snapshot
+                    .stores
+                    .iter()
+                    .find(|row| row.name == source.name)
+                    .unwrap();
+                assert_eq!(
+                    source.expected_db_id.as_deref(),
+                    Some(row.store.id.as_str())
+                );
+                assert_eq!(
+                    declarative_targets(snapshot.clone(), Some(&source.name), false).is_ok(),
+                    expected
+                );
+                if let Some(route) = source.route() {
+                    assert_eq!(*route.configured.as_ref().unwrap().selection, snapshot);
+                }
+            }
+        }
     }
 
     #[test]

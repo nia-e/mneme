@@ -4,8 +4,9 @@ The Observatory is a read-only terminal browser for the memory graph, recorded
 scenes and touchstones. Start it on your configured owner or try synthetic data:
 
 ```sh
-mnemed tui                         # project owner, else permitted device misc
-mnemed --user tui                  # private user owner
+mnemed tui                         # configured read_default; legacy owner if unconfigured
+mnemed --store global tui          # deliberate named-store selection
+mnemed --store mneme tui           # project store, even from another workspace
 mnemed tui --view scenes
 mnemed tui --view touchstones
 mnemed tui --demo                  # no service needed
@@ -161,12 +162,19 @@ Esc/Tab/`q` cancels. Unrouted entries stay visible with a reason. Opening the pi
 does not probe servers; only the chosen route connects. Failed selection preserves
 the current view and never falls back to another source.
 
-Default selection follows [CLI owner selection](remote-cli.md#default-project-and-user-owners).
-Choosing a configured global or misc row is a deliberate read-only override,
-like `--user` or `--remote`; default private/isolated/excluded workspace rules
-still apply. `--config PATH` shows that library's descriptors, `--remote` one
-explicit route and `--demo` synthetic sources. There is no cross-source graph
-traversal or automatic snapshot fallback.
+With shared `memory.toml` configuration, the default follows `read_default`;
+`--memory-config PATH` selects another declarative configuration. Any admitted,
+readable store can be chosen in the picker or with `--store NAME`, even when it
+is inactive for the current workspace. This deliberate read does not activate
+background recall, recording or context delivery. Disabled stores, denied read
+permissions, profile restrictions and workspace exclusions still apply.
+
+Without declarative configuration, default selection follows
+[legacy CLI owner selection](remote-cli.md#default-project-and-user-owners),
+including `--user` for the private user owner. `tui --config PATH` instead shows
+that library's descriptors, `--remote` one explicit route and `--demo` synthetic
+sources; these explicit modes cannot be mixed with declarative selectors. There
+is no cross-source graph traversal or automatic snapshot fallback.
 
 `mnemed stores [--json]` lists the same metadata without opening the viewer.
 
