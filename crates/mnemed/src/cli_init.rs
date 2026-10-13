@@ -495,6 +495,8 @@ mod tests {
             "codex/project_setup.py".to_owned(),
             "codex/hook_trust.py".to_owned(),
             "library/library.py".to_owned(),
+            "library/publication_policy.py".to_owned(),
+            "library/host_process.py".to_owned(),
         ]);
         for name in programs
             .split(',')
@@ -523,6 +525,11 @@ mod tests {
         for (name, bytes) in BUNDLE {
             assert_eq!(std::fs::read(root.join(name)).unwrap(), *bytes);
         }
+        assert_eq!(
+            std::fs::read(root.join("library/host_process.py")).unwrap(),
+            std::fs::read(root.join("codex/host_process.py")).unwrap(),
+            "standalone library dependency must match its one maintained source"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -549,6 +556,50 @@ mod tests {
         assert_eq!(std::fs::read(root.join(BUNDLE[0].0)).unwrap(), BUNDLE[0].1);
         drop(bundle);
         assert!(!root.exists(), "temporary bundle cleanup");
+    }
+
+    #[tokio::test]
+    async fn extracted_library_publication_helper_imports_without_source_checkout() {
+        let Some(python) = discover_python(None).await else {
+            eprintln!("Python 3.11+ unavailable; library import smoke not exercised");
+            return;
+        };
+        let bundle = unicode_bundle();
+        let library = bundle.path.join("library");
+        let native = bundle.path.join("uncontacted-native-cli");
+        let config = bundle.path.join("unread-memory.toml");
+        let script = "import sys; sys.path.insert(0, sys.argv[1]); import publication_policy, host_process; publication_policy.NativePublicationPolicy(sys.argv[2], sys.argv[3]); print('library-publication-import-ok')";
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_python_command(
+                &python,
+                &[
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-c",
+                    script,
+                    library.to_str().unwrap(),
+                    native.to_str().unwrap(),
+                    config.to_str().unwrap(),
+                ],
+            ),
+        )
+        .await
+        .unwrap()
+        .expect("embedded standalone publication helper dependencies");
+        assert_eq!(
+            std::str::from_utf8(&result).unwrap().trim_end(),
+            "library-publication-import-ok"
+        );
+        assert!(
+            !native.exists(),
+            "metadata constructor must not contact/start its native CLI"
+        );
+        assert!(
+            !config.exists(),
+            "metadata constructor must not create its configuration"
+        );
     }
 
     #[test]

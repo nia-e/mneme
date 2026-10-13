@@ -106,6 +106,46 @@ A copied archive is not completed delivery. The receiver validates its file
 inventory, identity and hashes before acknowledging it; the sender validates that
 acknowledgment before recording a replica. Offline peers remain visibly pending.
 
+### Bind publication to native configuration
+
+For a device using native `memory.toml`, add this explicit pair to every publisher
+invocation (`enroll`, `publish`, `once`, and `sync`), including its timer:
+
+```sh
+python3 /absolute/publisher/lib/library.py \
+  --config /absolute/private/library.json \
+  --native-cli /absolute/native/bin/mnemed \
+  --memory-config /absolute/config/memory.toml once
+```
+
+The publisher bundle must include `publication_policy.py`, `host_process.py`, and
+`host_files.py` beside `library.py`. The selected native CLI must support
+`--json config select --config PATH --cwd PROJECT_ROOT`. These are metadata-only
+calls; they do not open stores or start owners. Each selection has a three-second,
+512-KiB output bound; a publisher invocation shares a 30-second native-work and
+4-MiB decoded-selection budget across projects and rechecks.
+
+This binding only narrows existing explicit publication enrollment. Publication
+requires a default-profile native selection, the same canonical catalog file in
+its admitted libraries, and an active/read-admitted store matching the enrolled
+canonical database ID and owner database alias. Library names may differ. Native
+read permission never enrolls a project or authorizes publication on its own.
+Private/isolated profiles remain non-publishing, even if they permit local reads.
+
+Checks cover fresh snapshots, supplied bundles, enrollment, and queued delivery.
+A definite policy denial withdraws a previously enrolled project before queued
+content can be sent. Missing/invalid configuration, a failed helper, or ambiguous
+queue identity stops publication without silently withdrawing or discarding
+pending evidence. Repair the explicit binding or inspect the queue and retry;
+there is no legacy fallback when the pair is present. Withdrawal remains sticky
+and requires deliberate `--reenroll` after policy allows publication again.
+
+The sidecar's `snapshot.mnemed` remains the snapshot executable. Adding the
+metadata-helper pair does not replace that binary, change owner endpoints, alter
+catalog/replica formats or cache paths, or modify services. Without the pair, the
+publisher retains its existing legacy `profile.json` behavior. Local-only
+registration, incoming archive validation, and replica serving are unchanged.
+
 ## Serve received replicas
 
 On the receiving device:

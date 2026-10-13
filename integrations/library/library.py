@@ -356,6 +356,57 @@ def _eligible(project_root):
     return data["mode"] == "default"
 
 
+def _publication_eligible(project_root, catalog_path, descriptor, policy):
+    if policy is None:
+        return _eligible(project_root)
+    try:
+        return policy.allows(project_root, catalog_path, descriptor["db_id"], descriptor["database"])
+    except (ValueError, OSError, TimeoutError, subprocess.SubprocessError) as error:
+        # Missing/invalid native evidence is not a policy denial. In particular,
+        # it must not turn a transient helper failure into durable withdrawal.
+        raise LibraryError("native publication policy unavailable; repair the explicit native-cli/memory-config binding and retry; no legacy fallback") from error
+
+
+def _publication_source(config, publisher, descriptor, policy):
+    source = publisher["sources"].get(descriptor["project_id"], {})
+    if policy is not None:
+        root = source.get("project_root")
+        if (not isinstance(root, str) or not root or not Path(root).is_absolute()
+                or source.get("database") != descriptor["database"]
+                or _project_id(config["device_id"], root) != descriptor["project_id"]):
+            raise LibraryError("native publication needs an exact enrolled project-root/database binding; inspect publisher sources")
+    return source
+
+
+def _native_publication_preflight(config, catalog_path, catalog, publisher, policy):
+    """Check all pending authority before any withdrawal, ack or queue mutation."""
+    candidates = {}
+    for entry in catalog["entries"]:
+        if (entry.get("owner_device_id") == config["device_id"]
+                and not entry.get("withdrawn")
+                and entry.get("project_id") in publisher["sources"]):
+            candidates[entry["project_id"]] = entry
+    # Enrollment writes outbox first. A crash may leave an announcement with no
+    # catalog row; preserve that ambiguous evidence rather than send it unchecked.
+    for item in publisher["outbox"] + publisher["awaiting_ack"]:
+        descriptor = item.get("descriptor", {})
+        if descriptor.get("withdrawn") is True:
+            if item.get("bundle") is not None:
+                raise LibraryError("pending withdrawal must not carry snapshot bytes; inspect/recover its queue")
+            continue
+        project = descriptor.get("project_id")
+        canonical = candidates.get(project)
+        if (canonical is None or any(descriptor.get(key) != canonical.get(key)
+                                     for key in ("owner_device_id", "db_id", "database"))):
+            raise LibraryError("pending publication has no matching enrolled catalog identity; inspect/recover its queue before retrying")
+    denied = []
+    for project, descriptor in candidates.items():
+        source = _publication_source(config, publisher, descriptor, policy)
+        if not _publication_eligible(source["project_root"], catalog_path, descriptor, policy):
+            denied.append(project)
+    return denied
+
+
 def _queue(publisher, descriptor, bundle=None):
     for peer in publisher["peers"]:
         peer_id = _nonempty(peer.get("device_id"), "peer device_id")
@@ -614,7 +665,7 @@ def register_local_project(config_path, project_root, db_id, *, database, owner_
 
 
 def enroll_project(config_path, project_root, db_id=None, *, display_name=None, database=None,
-                   owner_endpoint=None, allow_reenroll=False):
+                   owner_endpoint=None, allow_reenroll=False, policy=None):
     """Idempotent best-effort enrollment after an existing DB identity is known.
 
     Returns False for an unconfigured/private/isolated project. Never fabricates
@@ -622,7 +673,8 @@ def enroll_project(config_path, project_root, db_id=None, *, display_name=None, 
     """
     _require_relay_support()
     config_path = Path(config_path)
-    if not config_path.exists() or db_id is None or not _eligible(project_root):
+    if (not config_path.exists() or db_id is None
+            or policy is None and not _eligible(project_root)):
         return False
     if owner_endpoint is not None:
         owner_endpoint = _owner_endpoint(owner_endpoint)
@@ -636,6 +688,11 @@ def enroll_project(config_path, project_root, db_id=None, *, display_name=None, 
             raise LibraryError("project identity conflicts with catalog; withdraw/review explicitly")
         if old and old.get("withdrawn") and not allow_reenroll:
             # Automatic startup enrollment must not undo an explicit withdrawal.
+            return False
+        selected_database = _component(database or (old["database"] if old else "project"),
+                                       "owner database alias")
+        if policy is not None and not _publication_eligible(
+                project_root, catalog_path, {"db_id": db_id, "database": selected_database}, policy):
             return False
         if old and not old.get("withdrawn"):
             if database is not None and old["database"] != _component(database, "owner database alias"):
@@ -676,22 +733,27 @@ def enroll_project(config_path, project_root, db_id=None, *, display_name=None, 
 def withdraw(config_path, project_id):
     with _lock(config_path):
         cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
-        old = _entry(catalog, config["device_id"], project_id)
-        if old is None:
-            raise LibraryError("unknown owned project")
-        if old.get("withdrawn"):
-            return old
-        old["revision"] += 1
-        old["withdrawn"] = True
-        old["replicas"] = []
-        catalog["revision"] += 1
-        # A device-local descriptor has never been announced. Withdrawal is
-        # not permission to reveal it to configured peers for the first time.
-        if project_id in publisher["sources"]:
-            _queue(publisher, old)
-            _write_json(pp, publisher)
-        _write_json(catalog_path, catalog)
+        return _withdraw_loaded(config, catalog_path, catalog, pp, publisher, project_id)
+
+
+def _withdraw_loaded(config, catalog_path, catalog, pp, publisher, project_id):
+    """Apply existing withdrawal ordering while the caller holds the library lock."""
+    old = _entry(catalog, config["device_id"], project_id)
+    if old is None:
+        raise LibraryError("unknown owned project")
+    if old.get("withdrawn"):
         return old
+    old["revision"] += 1
+    old["withdrawn"] = True
+    old["replicas"] = []
+    catalog["revision"] += 1
+    # A device-local descriptor has never been announced. Withdrawal is
+    # not permission to reveal it to configured peers for the first time.
+    if project_id in publisher["sources"]:
+        _queue(publisher, old)
+        _write_json(pp, publisher)
+    _write_json(catalog_path, catalog)
+    return old
 
 
 def _safe_rel(value):
@@ -889,66 +951,76 @@ def _merge_ack(config, catalog, item, response):
     catalog["revision"] += 1
 
 
-def sync(config_path):
+def sync(config_path, *, policy=None):
     _require_relay_support()
     # A project may become private after enrollment but before an offline
     # announcement is delivered. Supersede it with a withdrawal first.
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
-    for entry in list(catalog["entries"]):
-        source = publisher["sources"].get(entry.get("project_id"), {})
-        if (entry.get("owner_device_id") == config["device_id"]
-                and not entry.get("withdrawn") and source.get("project_root")
-                and not _eligible(source["project_root"])):
-            withdraw(config_path, entry["project_id"])
+    if policy is None:
+        for entry in list(catalog["entries"]):
+            source = publisher["sources"].get(entry.get("project_id"), {})
+            if (entry.get("owner_device_id") == config["device_id"]
+                    and not entry.get("withdrawn") and source.get("project_root")
+                    and not _eligible(source["project_root"])):
+                withdraw(config_path, entry["project_id"])
     with _lock(config_path):
         cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
-        peers = {p.get("device_id"): p for p in publisher["peers"]}
-        for item in publisher["outbox"]:
-            item.setdefault("delivery_id", uuid.uuid4().hex)
-        _write_json(pp, publisher)
-        accepted_ack_files = []
-        still_awaiting = []
-        for item in publisher["awaiting_ack"]:
-            peer = peers.get(item.get("peer_device_id"))
-            if not peer or peer.get("transport") != "local_directory":
-                still_awaiting.append(item)
-                continue
-            ack_file = _path(peer.get("inbox"), "peer inbox") / (item["delivery_id"] + ".ack.json")
-            if not ack_file.is_file() or ack_file.is_symlink():
-                still_awaiting.append(item)
-                continue
-            try:
-                _merge_ack(config, catalog, item, _read_json(ack_file))
-                accepted_ack_files.append(ack_file)
-            except (LibraryError, OSError):
-                still_awaiting.append(item)
-        publisher["awaiting_ack"] = still_awaiting
-        pending = []
-        delivered = 0
-        for item in publisher["outbox"]:
-            try:
-                peer = peers[item["peer_device_id"]]
-                response = _peer_send(peer, _make_archive(item["descriptor"], item.get("bundle"),
-                                                         item["delivery_id"]), item["delivery_id"])
-                if peer.get("transport") == "local_directory":
-                    publisher["awaiting_ack"].append(item)
-                else:
-                    _merge_ack(config, catalog, item, response)
-                delivered += 1
-            except (OSError, LibraryError, subprocess.TimeoutExpired, KeyError):
-                pending.append(item)
-        publisher["outbox"] = pending
-        # Durable delivery acknowledgement must precede any source cleanup:
-        # on crash, an old outbox must never point at deleted bundle bytes.
-        _write_json(catalog_path, catalog)
-        _write_json(pp, publisher)
-        for ack_file in accepted_ack_files:
-            ack_file.unlink(missing_ok=True)
-        removed = _prune_native_bundles(publisher)
-        _write_json(pp, publisher)
-        return {"delivered": delivered,
-                "pending": len(pending) + len(publisher["awaiting_ack"]),
-                "source_bundles_pruned": removed}
+        if policy is not None:
+            denied = _native_publication_preflight(config, catalog_path, catalog, publisher, policy)
+            for project in denied:
+                _withdraw_loaded(config, catalog_path, catalog, pp, publisher, project)
+        return _deliver_loaded(config, catalog_path, catalog, pp, publisher)
+
+
+def _deliver_loaded(config, catalog_path, catalog, pp, publisher):
+    """Deliver an admitted queue under its existing library lock; no policy retries."""
+    peers = {p.get("device_id"): p for p in publisher["peers"]}
+    for item in publisher["outbox"]:
+        item.setdefault("delivery_id", uuid.uuid4().hex)
+    _write_json(pp, publisher)
+    accepted_ack_files = []
+    still_awaiting = []
+    for item in publisher["awaiting_ack"]:
+        peer = peers.get(item.get("peer_device_id"))
+        if not peer or peer.get("transport") != "local_directory":
+            still_awaiting.append(item)
+            continue
+        ack_file = _path(peer.get("inbox"), "peer inbox") / (item["delivery_id"] + ".ack.json")
+        if not ack_file.is_file() or ack_file.is_symlink():
+            still_awaiting.append(item)
+            continue
+        try:
+            _merge_ack(config, catalog, item, _read_json(ack_file))
+            accepted_ack_files.append(ack_file)
+        except (LibraryError, OSError):
+            still_awaiting.append(item)
+    publisher["awaiting_ack"] = still_awaiting
+    pending = []
+    delivered = 0
+    for item in publisher["outbox"]:
+        try:
+            peer = peers[item["peer_device_id"]]
+            response = _peer_send(peer, _make_archive(item["descriptor"], item.get("bundle"),
+                                                     item["delivery_id"]), item["delivery_id"])
+            if peer.get("transport") == "local_directory":
+                publisher["awaiting_ack"].append(item)
+            else:
+                _merge_ack(config, catalog, item, response)
+            delivered += 1
+        except (OSError, LibraryError, subprocess.TimeoutExpired, KeyError):
+            pending.append(item)
+    publisher["outbox"] = pending
+    # Durable delivery acknowledgement must precede any source cleanup:
+    # on crash, an old outbox must never point at deleted bundle bytes.
+    _write_json(catalog_path, catalog)
+    _write_json(pp, publisher)
+    for ack_file in accepted_ack_files:
+        ack_file.unlink(missing_ok=True)
+    removed = _prune_native_bundles(publisher)
+    _write_json(pp, publisher)
+    return {"delivered": delivered,
+            "pending": len(pending) + len(publisher["awaiting_ack"]),
+            "source_bundles_pruned": removed}
 
 
 def _extract(data, stage):
@@ -1146,30 +1218,42 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
             shutil.rmtree(stage, ignore_errors=True)
 
 
-def publish(config_path, project_id, bundle):
+def publish(config_path, project_id, bundle, *, policy=None):
     _require_relay_support()
     with _lock(config_path):
         cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
         descriptor = _entry(catalog, config["device_id"], project_id)
         if not descriptor or descriptor.get("withdrawn") or project_id not in publisher["sources"]:
             raise LibraryError("project not enrolled or withdrawn")
-        source = publisher["sources"].get(project_id, {})
-        if source.get("project_root") and not _eligible(source["project_root"]):
+        source = _publication_source(config, publisher, descriptor, policy)
+        if source.get("project_root") and not _publication_eligible(
+                source["project_root"], catalog_path, descriptor, policy):
             raise LibraryError("private or isolated project cannot publish")
         validate_bundle(bundle, descriptor["db_id"])
+        # Check every queued/source binding before replacing even this project's
+        # old queue entry. A helper failure must not supersede pending evidence.
+        denied = (_native_publication_preflight(config, catalog_path, catalog, publisher, policy)
+                  if policy is not None else [])
+        if project_id in denied:
+            raise LibraryError("native publication policy no longer permits this project; run sync to apply withdrawal")
+        for project in denied:
+            _withdraw_loaded(config, catalog_path, catalog, pp, publisher, project)
         _queue(publisher, descriptor, Path(bundle).resolve())
         _write_json(pp, publisher)
+        if policy is not None:
+            return _deliver_loaded(config, catalog_path, catalog, pp, publisher)
     return sync(config_path)
 
 
-def _snapshot(config_path, project_id):
+def _snapshot(config_path, project_id, *, policy=None):
     _require_relay_support()
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
     descriptor = _entry(catalog, config["device_id"], project_id)
     if not descriptor or descriptor.get("withdrawn") or project_id not in publisher["sources"]:
         raise LibraryError("project not enrolled or withdrawn")
-    source = publisher["sources"].get(project_id, {})
-    if source.get("project_root") and not _eligible(source["project_root"]):
+    source = _publication_source(config, publisher, descriptor, policy)
+    if source.get("project_root") and not _publication_eligible(
+            source["project_root"], catalog_path, descriptor, policy):
         raise LibraryError("private or isolated project cannot snapshot for library")
     settings = publisher.get("snapshot", {})
     if not isinstance(settings, dict):
@@ -1216,7 +1300,7 @@ def _snapshot(config_path, project_id):
     return bundle
 
 
-def once(config_path):
+def once(config_path, *, policy=None):
     _require_relay_support()
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
     now = int(time.time())
@@ -1230,15 +1314,15 @@ def once(config_path):
     results = {}
     for project in due:
         try:
-            bundle = _snapshot(config_path, project)
-            results[project] = publish(config_path, project, bundle)
+            bundle = _snapshot(config_path, project, policy=policy)
+            results[project] = publish(config_path, project, bundle, policy=policy)
             with _lock(config_path):
                 cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
                 publisher["sources"][project]["last_snapshot_at"] = int(time.time())
                 _write_json(pp, publisher)
         except (LibraryError, OSError) as error:
             results[project] = {"skipped": str(error)}
-    results["delivery"] = sync(config_path)
+    results["delivery"] = sync(config_path, policy=policy)
     results["receive"] = receive_inbox(config_path)
     return results
 
@@ -1295,6 +1379,10 @@ def status(config_path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--native-cli", type=Path,
+                        help="absolute native metadata helper; pair with --memory-config; does not replace snapshot.mnemed")
+    parser.add_argument("--memory-config", type=Path,
+                        help="absolute native memory.toml policy; pair with --native-cli; no legacy fallback")
     commands = parser.add_subparsers(dest="command", required=True)
     enroll = commands.add_parser("enroll")
     enroll.add_argument("--project-root", required=True, type=Path)
@@ -1320,31 +1408,45 @@ def main(argv=None):
     serving.add_argument("--http", required=True)
     serving.add_argument("--http-token-env")
     args = parser.parse_args(argv)
+    if (args.native_cli is None) != (args.memory_config is None):
+        parser.error("--native-cli and --memory-config must be supplied together")
+    policy = None
+    if args.native_cli is not None:
+        if not args.native_cli.is_absolute() or not args.memory_config.is_absolute():
+            parser.error("--native-cli and --memory-config require absolute paths")
+        # Legacy embedded helpers do not need this optional module. A publisher
+        # opting into native policy must ship it with the bounded process helper.
+        try:
+            from publication_policy import NativePublicationPolicy
+            policy = NativePublicationPolicy(args.native_cli, args.memory_config)
+        except (ImportError, ValueError) as error:
+            parser.error("native publication policy helper unavailable; install the complete reviewed publisher bundle")
     try:
         if args.command == "enroll":
             result = {"enrolled": enroll_project(args.config, args.project_root, args.db_id,
                                                   display_name=args.display_name,
                                                   database=args.database,
                                                   owner_endpoint=args.owner_endpoint,
-                                                  allow_reenroll=args.reenroll)}
+                                                  allow_reenroll=args.reenroll, policy=policy)}
         elif args.command == "withdraw":
             result = withdraw(args.config, args.project_id)
         elif args.command == "status":
             result = status(args.config)
         elif args.command == "publish":
             result = publish(args.config, args.project_id,
-                             args.bundle or _snapshot(args.config, args.project_id))
+                             args.bundle or _snapshot(args.config, args.project_id, policy=policy),
+                             policy=policy)
         elif args.command == "receive":
             data = args.input.read_bytes() if args.input else sys.stdin.buffer.read(MAX_BUNDLE + MAX_JSON + 1024 * 1024 + 1)
             result = receive(args.config, data, authenticated_peer=args.authenticated_peer,
                              include_ack=True)
         elif args.command == "once":
-            result = once(args.config)
+            result = once(args.config, policy=policy)
         elif args.command == "serve":
             serve(args.config, args.mcp, args.http, args.http_token_env)
             raise AssertionError("exec returned")
         else:
-            result = sync(args.config)
+            result = sync(args.config, policy=policy)
         print(json.dumps(result, sort_keys=True))
         return 0
     except (LibraryError, OSError, subprocess.TimeoutExpired) as error:

@@ -19,6 +19,8 @@ fn main() {
         "codex/project_setup.py".to_owned(),
         "codex/hook_trust.py".to_owned(),
         "library/library.py".to_owned(),
+        "library/publication_policy.py".to_owned(),
+        "library/host_process.py".to_owned(),
     ];
     let mut seen_programs = BTreeSet::new();
     for item in programs.split(',').filter(|item| !item.trim().is_empty()) {
@@ -45,7 +47,14 @@ fn main() {
     files.dedup();
     let mut generated = String::from("const BUNDLE: &[(&str, &[u8])] = &[\n");
     for name in files {
-        let path = root.join("integrations").join(&name);
+        // Library publication is also a standalone helper: ship its bounded
+        // process dependency beside it, from the one maintained codex source.
+        let source = if name == "library/host_process.py" {
+            "codex/host_process.py"
+        } else {
+            &name
+        };
+        let path = root.join("integrations").join(source);
         assert!(
             path.is_file(),
             "missing init bundle file: {}",
