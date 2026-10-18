@@ -74,6 +74,7 @@
           };
         in { inherit client; default = client; };
     in {
+      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
       packages = forAllSystems packagesFor;
       apps = forAllSystems (system:
         let package = self.packages.${system}.client;
