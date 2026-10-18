@@ -1143,13 +1143,11 @@ async fn ingest_prepares_all_domain_values_before_gate_or_adapter_side_effects()
     let baseline = observed_effects();
     assert_eq!(baseline, (1, 1, 1, 0));
 
-    let duplicate_tags = ["duplicate", "duplicate"];
     for req in [
         Ingest::new("   ", b"body", &[], prov()),
         Ingest::new("finite", b"body", &[], prov()).with_stability(f32::NAN),
         Ingest::new("range", b"body", &[], prov()).with_confidence(f32::INFINITY),
-        Ingest::new("tag", b"body", &[" bad"], prov()),
-        Ingest::new("duplicate tags", b"body", &duplicate_tags, prov()),
+        Ingest::new("tag", b"body", &["bad+tag"], prov()),
     ] {
         let error = tokio::time::timeout(std::time::Duration::from_millis(250), memory.ingest(req))
             .await
@@ -3577,13 +3575,13 @@ async fn malformed_tagged_scope_is_rejected_before_embedding_work() {
             5,
             mem.config().budget,
             StatusFilter::ACTIVE,
-            &["duplicate", "duplicate"],
+            &["bad+tag"],
         )
         .await
         .unwrap_err();
     assert!(matches!(
         error,
-        Error::InvalidInput(message) if message.contains("must be unique")
+        Error::InvalidInput(message) if message.contains("unsupported character")
     ));
     assert_eq!(embedder.calls.load(Ordering::SeqCst), 0);
 }

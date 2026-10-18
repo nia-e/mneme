@@ -3,8 +3,13 @@ use cozo::{DataValue, NamedRows, Num};
 
 /// Canonical metadata entry proving the v2 physical tag membership is live.
 pub(crate) const META_KEY: &str = "tag_projection_v2";
-/// Frozen marker published by deployed conventional-format writers.
-pub(crate) const META_VALUE: &str = "canonical_node_tag_membership_v2_f7";
+/// Frozen marker published by deployed conventional-format writers. Historical
+/// admission/replica evidence must keep this exact value.
+pub(crate) const LEGACY_META_VALUE: &str = "canonical_node_tag_membership_v2_f7";
+/// Same physical membership schema, with canonical ASCII tag materialization.
+/// Rotating an existing required value (not adding an ignorable row) makes prior
+/// writable runtimes refuse a migrated store before opening it.
+pub(crate) const META_VALUE: &str = "canonical_node_tag_membership_v2_ascii_slug_v1";
 
 /// Frozen crash-residue names from the shipped conventional publisher. Their
 /// historical bytes make interrupted pre-publication work recognizable and

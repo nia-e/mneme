@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 #[derive(Args)]
 pub(crate) struct RetagArgs {
     id: String,
-    /// Complete inspected tag set, comma-separated. Pass the flag alone for empty.
-    #[arg(long, required=true, num_args=0.., value_delimiter=',')]
+    /// Complete inspected tag set in one comma-separated argument. For empty, put ID first and pass the flag alone.
+    #[arg(long, required=true, num_args=0..=1, value_delimiter=',')]
     expected_tags: Vec<String>,
-    /// Complete replacement tag set, comma-separated. Pass the flag alone for empty.
-    #[arg(long, required=true, num_args=0.., value_delimiter=',')]
+    /// Complete replacement tag set in one comma-separated argument. For empty, put ID first and pass the flag alone.
+    #[arg(long, required=true, num_args=0..=1, value_delimiter=',')]
     tags: Vec<String>,
     /// Optional explicit intended owner identity; mismatch refuses without mutation.
     #[arg(long)]
@@ -109,6 +109,154 @@ mod tests {
         assert!(parse(&["mnemed", "retag", &id, "--tags"]).is_err());
         assert!(parse(&["mnemed", "retag", &id, "--expected-tags", "--tags", ""]).is_err());
         assert!(parse(&["mnemed", "retag", &id, "--expected-tags", "a,a", "--tags"]).is_err());
+    }
+
+    #[test]
+    fn comma_separated_values_allow_id_before_between_or_after_flags() {
+        let id = ulid::Ulid::from(1).to_string();
+        for expected in [
+            vec!["--expected-tags", "fact,possibility"],
+            vec!["--expected-tags=fact,possibility"],
+        ] {
+            for replacement in [vec!["--tags", "fact,closed"], vec!["--tags=fact,closed"]] {
+                for reversed in [false, true] {
+                    let (first, second) = if reversed {
+                        (&replacement, &expected)
+                    } else {
+                        (&expected, &replacement)
+                    };
+                    for id_position in [0, first.len(), first.len() + second.len()] {
+                        let mut flags = first.clone();
+                        flags.extend(second);
+                        flags.insert(id_position, &id);
+                        let mut args = vec!["mnemed", "retag"];
+                        args.extend(flags);
+                        let payload = parse(&args)
+                            .unwrap_or_else(|error| panic!("{args:?}: {error}"))
+                            .payload();
+                        assert_eq!(payload["id"], id, "{args:?}");
+                        assert_eq!(payload["expected_tags"], json!(["fact", "possibility"]));
+                        assert_eq!(payload["tags"], json!(["closed", "fact"]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bare_empty_flags_with_id_first_preserve_each_complete_set() {
+        let id = ulid::Ulid::from(1).to_string();
+        for expected_empty in [false, true] {
+            for replacement_empty in [false, true] {
+                for reversed in [false, true] {
+                    let mut expected = vec!["--expected-tags"];
+                    if !expected_empty {
+                        expected.push("fact,possibility");
+                    }
+                    let mut replacement = vec!["--tags"];
+                    if !replacement_empty {
+                        replacement.push("fact,closed");
+                    }
+                    let (first, second) = if reversed {
+                        (replacement, expected)
+                    } else {
+                        (expected, replacement)
+                    };
+                    let mut args = vec!["mnemed", "retag", &id];
+                    args.extend(first);
+                    args.extend(second);
+                    let payload = parse(&args).unwrap().payload();
+                    assert_eq!(
+                        payload["expected_tags"],
+                        if expected_empty {
+                            json!([])
+                        } else {
+                            json!(["fact", "possibility"])
+                        },
+                        "{args:?}"
+                    );
+                    assert_eq!(
+                        payload["tags"],
+                        if replacement_empty {
+                            json!([])
+                        } else {
+                            json!(["closed", "fact"])
+                        },
+                        "{args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tag_flags_remain_mandatory_and_do_not_accept_whitespace_lists() {
+        let id = ulid::Ulid::from(1).to_string();
+        for args in [
+            vec!["mnemed", "retag", &id],
+            vec!["mnemed", "retag", &id, "--tags"],
+            vec!["mnemed", "retag", &id, "--expected-tags"],
+            vec![
+                "mnemed",
+                "retag",
+                &id,
+                "--expected-tags",
+                "a",
+                "b",
+                "--tags",
+            ],
+            vec![
+                "mnemed",
+                "retag",
+                &id,
+                "--expected-tags",
+                "--tags",
+                "a",
+                "b",
+            ],
+        ] {
+            assert!(crate::Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+        // An optional value cannot distinguish a tag from a following ID. Do
+        // not special-case ULID-shaped tags: empty sets use ID-first instead.
+        assert!(
+            crate::Cli::try_parse_from(["mnemed", "retag", "--expected-tags", "--tags", &id,])
+                .is_err()
+        );
+        let p = parse(&["mnemed", "retag", &id, "--expected-tags", &id, "--tags"]).unwrap();
+        assert_eq!(p.payload()["expected_tags"], json!([id]));
+    }
+
+    #[test]
+    fn repeated_flags_still_append_values_for_shared_set_validation() {
+        let id = ulid::Ulid::from(1).to_string();
+        let args = [
+            "mnemed",
+            "retag",
+            &id,
+            "--expected-tags",
+            "fact",
+            "--expected-tags",
+            "possibility",
+            "--tags=closed",
+            "--tags=fact",
+        ];
+        let payload = parse(&args).unwrap().payload();
+        assert_eq!(payload["expected_tags"], json!(["fact", "possibility"]));
+        assert_eq!(payload["tags"], json!(["closed", "fact"]));
+        assert!(
+            parse(&[
+                "mnemed",
+                "retag",
+                &id,
+                "--expected-tags",
+                "fact",
+                "--expected-tags",
+                "fact",
+                "--tags",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

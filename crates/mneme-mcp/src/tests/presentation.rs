@@ -251,6 +251,27 @@ async fn get_returns_complete_native_summary_without_widening_core_query_or_list
         MAX_SUMMARY_BYTES
     );
     assert_eq!(hits[0]["summary_truncated"], true);
+    for bound in [1, 3, 320, 16384] {
+        let compact = call("query",json!({"db":"project","text":"é","tags":["core"],"k":1,"max_nodes":1,"depth":0,"min_relevance":0.0,"summary_max_bytes":bound})).await;
+        let hit = &compact["lanes"]["primary"]["hits"][0];
+        assert_eq!(hit["summary"].as_str().unwrap().len(), bound / 2 * 2);
+        assert_eq!(hit["summary_truncated"], bound < summary.len());
+        for field in ["id", "created", "lane_rank", "evidence", "status"] {
+            assert_eq!(hit[field], hits[0][field], "{field}");
+        }
+        assert!(serde_json::to_vec(&compact).unwrap().len() < response::MAX_TOOL_TEXT_BYTES);
+    }
+    assert_eq!(
+        call("get", json!({"db":"project","id":id.0.to_string()})).await["summary"],
+        summary
+    );
+    // A larger per-hit view never disables the shared MCP tool/frame budgets.
+    let oversized = json!({"lanes":{"primary":{"hits":vec![json!({"summary":summary,"summary_truncated":false});32]}}});
+    let tool = response::tool_success(&oversized);
+    assert_eq!(tool["isError"], true);
+    let bounded = response::BoundedResponse::new(json!({"jsonrpc":"2.0","id":1,"result":tool}));
+    assert!(bounded.bytes().len() + 1 <= response::MAX_JSONRPC_FRAME_BYTES);
+
     let list = call("list", json!({"db":"project","tag":"core"})).await;
     assert_eq!(
         list["items"][0]["summary"].as_str().unwrap().len(),
@@ -368,4 +389,28 @@ async fn binary_body_ranges_keep_exact_source_progress_and_core_allowance() {
     }
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_node_reads_add_whole_second_utc_without_changing_numeric_metadata() {
+    let mut raw = serde_json::to_value(node()).unwrap();
+    for created in [1_600_000_000_123_u64, u64::MAX] {
+        raw["created"] = json!(created);
+        let mut node: Node = serde_json::from_value(raw.clone()).unwrap();
+        node.record_exposure(1_600_000_062_345);
+        node.record_grounded_use(1_600_000_063_999);
+        let before = serde_json::to_value(&node).unwrap();
+        let shown = node_json(&node);
+        assert_eq!(shown["created"], created);
+        assert_eq!(
+            shown["created_utc"],
+            mneme_present::format_timestamp_millis(created.into())
+        );
+        assert_eq!(shown["last_exposed"], 1_600_000_062_345_u64);
+        assert_eq!(shown["last_exposed_utc"], "2020-09-13T12:27:42Z");
+        assert_eq!(shown["last_grounded_use"], 1_600_000_063_999_u64);
+        assert_eq!(shown["last_grounded_use_utc"], "2020-09-13T12:27:43Z");
+        assert_eq!(serde_json::to_value(&node).unwrap(), before);
+        assert!(before.get("created_utc").is_none());
+    }
 }

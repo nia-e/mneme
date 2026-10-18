@@ -63,7 +63,7 @@ fn nodes_typed_admission_and_forwarding_keep_defaults_and_reject_invalid_request
         json!({"limit":null}),
         json!({"tag":null}),
         json!({"tag":""}),
-        json!({"tag":" spaced "}),
+        json!({"tag":"bad+tag"}),
         json!({"tag":"x".repeat(257)}),
         json!({"after":null}),
         json!({"after":"bad"}),
@@ -184,15 +184,16 @@ async fn reference_inventory_is_paged_sparse_bounded_bound_to_identity_and_read_
 async fn inventory_byte_budget_truncates_utf8_summaries_without_skipping_nodes() {
     let store = Arc::new(MemStore::new(DEFAULT_DIM));
     let mem = memory(store.clone());
-    // Quotes force JSON escaping; preserve all 64 tags on each card.
+    // Maximum canonical tags stress the page budget; summaries retain UTF-8 and
+    // JSON-escaping pressure. Preserve all 64 tags on each card.
     let tags = (0..64)
-        .map(|index| format!("{index:02}{}", "\"".repeat(254)))
+        .map(|index| format!("{index:02}{}", "x".repeat(254)))
         .collect::<Vec<_>>();
     for index in 1..=12 {
         store
             .put_node(&node(
                 index,
-                &"é".repeat(1024),
+                &"\"é".repeat(682),
                 tags.clone(),
                 NodeStatus::Active,
             ))
@@ -303,7 +304,7 @@ async fn tag_vocabulary_pages_bind_owner_selection_and_report_semantic_only_boun
     for (index, tags, status) in [
         (
             1,
-            vec!["Rust".into(), "rust".into(), "rust async".into()],
+            vec!["language".into(), "rust".into(), "rust-async".into()],
             NodeStatus::Active,
         ),
         (
@@ -366,7 +367,7 @@ async fn tag_vocabulary_pages_bind_owner_selection_and_report_semantic_only_boun
             .iter()
             .map(|i| i["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["rust async", "rust-lang", "rustacean"]
+        ["rust-async", "rust-lang", "rustacean"]
     );
     assert!(second["next_cursor"].is_null());
     let active = page(

@@ -6,21 +6,75 @@ references, not a separate database or an importance score.
 
 Use one for deliberately authored significance that should remain discoverable
 outside the startup core set. Retrieval frequency does not create that meaning or
-make a note core. Background recording may rediscover a touchstone, but does not
-rewrite its meaning or infer someone else's feelings.
+make a note core.
+
+## Decide what matters
+
+At natural checkpoints, consider what matters to you as well as what would be
+useful later: a shared scene, an experiment, or a changed understanding can merit
+a touchstone without yielding a reusable lesson. The foreground agent decides
+and authors its own meaning in first person. Name that subject explicitly;
+claims about the user or other people still need their own evidence. Notify the
+user briefly when worthwhile, rather than asking them to approve your meaning.
+
+A read-only background worker can suggest a candidate and its source scene; the
+foreground agent accepts, revises or declines it. A nomination is neither an
+authored touchstone nor a prerequisite: the foreground can author directly under
+existing selected-owner write authority. Do not manufacture significance to fill
+an empty collection, or turn significance into automatic core membership.
+
+The Codex integration can retain a recorder's `touchstone_nomination` in a bounded,
+durable local pending handoff and offer it at a later prompt/tool boundary in the
+same session. Emitted means offered, not seen, approved or saved; the proposal is
+not a memory. Do not substitute `touchstone`-tagged writes for nominations.
+Background rediscovery of an existing touchstone does not authorize rewriting
+its meaning. Check installed handoff support rather than treating these source
+instructions as deployment; see the [Codex integration](../integrations/codex/README.md).
+
+## Other foreground memory judgments
+
+The same bounded local handoff also carries optional `review_nomination` data:
+core creation, promotion/demotion, changed core wording, supersession, forgetting,
+contradiction or merge adjudication, and episode corrections. A nomination names
+only offered same-owner targets or proposes new wording from cited source evidence.
+It is not a native request, approval token, automatic action or durable to-do list.
+Ordinary background recording and permitted meaning-preserving cleanup continue;
+[per-owner core cleanup](declarative-config.md#independent-controls) can be restricted
+to the foreground. A small text change is not proof of unchanged meaning.
+
+The foreground independently inspects the evidence, freshly GETs exact targets,
+and decides whether to author an ordinary operation under its existing authority.
+Use that operation's real guards: complete-tag/content checks for membership,
+summary/body guards for edits, and exact edition expectations for corrections.
+Touchstone immutability still applies. Older ID-only destructive/adjudication
+operations do not gain atomic stale-decision protection from the handoff; a fresh
+read followed by a write is not compare-and-swap. Ambiguous acknowledgements
+require inspection, not automatic retry. This workflow grants neither new user
+permission nor authority over services, leases, backups, migration, decay or prune.
+
+Like touchstone suggestions, review nominations are optional, same-session and
+at-most-once offers. Emission is not receipt, approval or execution. Earlier
+Codex/Claude touchstone nominations keep their original source-coverage claims;
+Claude snapshot nominations retain their observed horizon and unproven finality.
 
 ## Author one
 
-Read each target first. Copy its `db_id`, exact `id` and
+If a nomination cites only a source, inspect it first. If the scene or note is
+worth preserving, deliberately SAVE it in the same authorized owner, then GET its
+exact node or episode edition as below. A nomination does not trigger an automatic
+scene write; never manufacture a target merely to satisfy the reference contract.
+
+In the foreground, freshly GET each exact target, including targets suggested by
+a background worker. Copy its `db_id`, exact `id` and
 `summary_snapshot.expected_snapshot_sha256` from GET. Then use ordinary
 `save --input touchstone.json` or MCP `save`:
 
 ```json
 {
-  "summary": "The team values the design session for clarifying a boundary.",
+  "summary": "That design session helped me find a way of working I want to keep.",
   "tags": ["touchstone", "agent-continuity"],
   "touchstone": {
-    "subject": "project-team",
+    "subject": "<agent continuity identity>",
     "references": [
       {
         "db_id": "<logical database ID>",
@@ -47,7 +101,10 @@ identity and supersede the old one where appropriate.
 
 References retain summary-only snapshots: exact database/node identity, summary,
 provenance, creation time and memory-kind metadata. Episode references name the
-particular edition, not its current head.
+particular edition, not its current head. GET does not inject calendar strings
+into these immutable snapshots. Separate `touchstone_references_utc` rows, keyed
+by database and exact node/edition ID, render their dates in whole-second UTC;
+canonical numeric timestamps and snapshot hashes remain unchanged.
 
 - Archiving a target does not invalidate the reference.
 - Editing, merging or deleting it does not retarget the reference or erase the

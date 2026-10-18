@@ -159,9 +159,9 @@ def validate_delivery_concerns(concerns, displayed, *, rendered_text=None):
 def validate_displayed_view(value):
     """Exact final card, distinct from the immutable account fingerprint."""
     if __package__:
-        from .reader_contract import validate_episode_projection_fields
+        from .reader_contract import validate_episode_display_fields, validate_semantic_display_time_fields
     else:
-        from reader_contract import validate_episode_projection_fields
+        from reader_contract import validate_episode_display_fields, validate_semantic_display_time_fields
     required = {"id", "summary", "status", "source", "kind"}
     if (not isinstance(value, dict) or not required <= value.keys()
             or not isinstance(value["id"], str) or not ULID.fullmatch(value["id"])
@@ -171,7 +171,8 @@ def validate_displayed_view(value):
             or not isinstance(value["source"], str) or not value["source"]
             or len(value["source"].encode()) > 256):
         raise ValueError("invalid_delivery_view")
-    facets = validate_episode_projection_fields(value) if value["kind"] == "episode" else {}
+    facets = (validate_episode_display_fields(value) if value["kind"] == "episode"
+              else validate_semantic_display_time_fields(value))
     if "touchstone" in value:
         if value["kind"] != "semantic":
             raise ValueError("invalid_delivery_view")
@@ -492,9 +493,9 @@ class PublicEvidenceSelector:
             return None
         mandatory = [*self.users, *([self.last_final] if self.last_final is not None else [])]
         def merged(blocks):
-            by_ordinal = {item["ref"]["ordinal"]: item for item in mandatory}
+            by_ordinal = {item.get("evidence_index", item["ref"]["ordinal"]): item for item in mandatory}
             for block in blocks:
-                by_ordinal.update((item["ref"]["ordinal"], item) for item in block)
+                by_ordinal.update((item.get("evidence_index", item["ref"]["ordinal"]), item) for item in block)
             return [by_ordinal[key] for key in sorted(by_ordinal)
                     if by_ordinal[key]["kind"] not in omit_kinds]
         selected = merged(())
@@ -502,7 +503,7 @@ class PublicEvidenceSelector:
             return None
         if (self._delivery is not None and not self._delivery_ambiguous
                 and "memory_delivery" not in omit_kinds):
-            candidate = sorted([*selected, self._delivery], key=lambda item: item["ref"]["ordinal"])
+            candidate = sorted([*selected, self._delivery], key=lambda item: item.get("evidence_index", item["ref"]["ordinal"]))
             if fits(candidate):
                 mandatory.append(self._delivery)
                 selected = candidate

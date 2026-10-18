@@ -78,7 +78,7 @@ impl PreparedIngest {
         // Validate cheap scalar fields before file/stdin I/O as well as before
         // any persistent path, lease, backend or model can be admitted.
         let summary = NodeSummary::new(&args.summary).map_err(|error| error.to_string())?;
-        let tags = BoundedTagSet::try_from_iter(&args.tags).map_err(|error| error.to_string())?;
+        let tags = mneme_core::normalize_tags(&args.tags).map_err(|error| error.to_string())?;
         let stability = Stability::new(args.stability).map_err(|error| error.to_string())?;
         let confidence = Confidence::new(args.confidence).map_err(|error| error.to_string())?;
         let body = match (&args.body, &args.body_file, &args.body_ref) {
@@ -251,10 +251,29 @@ mod tests {
     }
 
     #[test]
+    fn fresh_ingest_normalizes_before_local_or_remote_admission() {
+        let raw = args(&["--tag", " Smoke / Fixture ", "--tag", "smoke-fixture"]);
+        assert_eq!(
+            PreparedIngest::read(&raw)
+                .unwrap()
+                .tags
+                .iter()
+                .collect::<Vec<_>>(),
+            ["smoke-fixture"]
+        );
+        assert_eq!(
+            prepare_remote(&raw).unwrap()["tags"],
+            json!(["smoke-fixture"])
+        );
+        let core = args(&["--tag", " Core "]);
+        assert!(PreparedIngest::read(&core).unwrap().tags.contains("core"));
+    }
+
+    #[test]
     fn canonical_fields_are_checked_before_body_io() {
         for extra in [
-            vec!["--tag", "duplicate", "--tag", "duplicate"],
-            vec!["--tag", " untrimmed"],
+            vec!["--tag", "C++"],
+            vec!["--tag", "/"],
             vec!["--stability", "NaN"],
             vec!["--confidence", "inf"],
         ] {

@@ -17,6 +17,7 @@ New to Mneme? Start with [installation and a first session](../README.md).
 | Guide | Use it to |
 | --- | --- |
 | [Codex integration](../integrations/codex/README.md) | Set up project recall and optional background recording |
+| [Claude Code capture](../integrations/claude/README.md) | Prepare and review optional capture-only hooks; retain external recall/core wiring |
 | [Nix client package](nix.md) | Build remote clients and use per-user Home Manager configuration |
 | [Declarative configuration](declarative-config.md) | Select existing owners and separate activation, grants and delivery while retaining background instructions |
 | [Remote CLI](remote-cli.md) | Connect to an existing memory server over HTTP or SSH |
@@ -24,6 +25,7 @@ New to Mneme? Start with [installation and a first session](../README.md).
 | [Store separation](store-separation.md) | Keep project, company and personal memory distinct while selecting shared reads |
 | [Workshop](../integrations/workshop/README.md) | Configure background work and its operator controls |
 | [Maintenance handoff](maintenance-handoff.md) | Release and resume a server's exclusive store lease |
+| [Canonical tag migration](tag-normalization.md) | Review and explicitly migrate legacy tag spellings while preserving source proofs |
 | [Mindcraft integration](../integrations/mindcraft/README.md) | Connect the optional game adapter |
 
 ## Development

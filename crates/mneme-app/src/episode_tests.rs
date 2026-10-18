@@ -296,12 +296,19 @@ fn text_limits_measure_utf8_bytes_without_banning_body_newlines() {
 
 #[test]
 fn tags_cannot_promote_an_episode_to_core() {
+    let mut protected = append();
+    protected["tags"] = json!([" Core "]);
+    assert!(
+        PreparedEpisode::parse(&protected)
+            .unwrap()
+            .requires_operator()
+    );
+
     let mut value = append();
     for tags in [
         json!(["core"]),
         json!(["ordinary", "core"]),
         json!([""]),
-        json!([" leading"]),
         json!(["line\nbreak"]),
         json!(["é".repeat(129)]),
         json!(vec!["tag"; 33]),
@@ -1371,4 +1378,52 @@ fn occurrence_contexts_reserve_real_aggregate_metadata_without_truncation() {
     let mut metadata = readback;
     metadata["body"] = json!("");
     assert!(serde_json::to_vec(&metadata).unwrap().len() <= MAX_EPISODE_METADATA_BYTES);
+}
+
+#[test]
+fn episode_headers_add_readable_utc_without_rewriting_occurrence_or_recording_time() {
+    let mut header = EpisodeHeader {
+        identity: EpisodeIdentity {
+            episode_id: serde_json::from_value(json!(ROOT)).unwrap(),
+            edition_id: serde_json::from_value(json!(EDITION)).unwrap(),
+            revision: EpisodeRevision::new(1),
+        },
+        summary: mneme_core::NodeSummary::new("exact old account").unwrap(),
+        occurred: OccurrenceSpan::Unknown,
+        recorded_at: EpisodeTime::new(61_234).unwrap(),
+        edition_recorded_at: EpisodeTime::new(59_999).unwrap(),
+        thread: None,
+        occurrence_contexts: None,
+        recording_session: None,
+        current_edition_id: serde_json::from_value(json!(ROOT)).unwrap(),
+    };
+    for span in [
+        OccurrenceSpan::Unknown,
+        OccurrenceSpan::Point {
+            at: EpisodeTime::new(1_234).unwrap(),
+        },
+        OccurrenceSpan::range(
+            EpisodeTime::new(1_001).unwrap(),
+            EpisodeTime::new(1_999).unwrap(),
+        )
+        .unwrap(),
+    ] {
+        header.occurred = span.clone();
+        let value = header_json(&header);
+        assert_eq!(value["occurred"], serde_json::to_value(&span).unwrap());
+        assert_eq!(
+            serde_json::from_value::<OccurrenceSpan>(value["occurred"].clone()).unwrap(),
+            span
+        );
+        assert_eq!(
+            value["occurred_utc"],
+            serde_json::to_value(mneme_present::OccurrenceUtc::from(&span)).unwrap()
+        );
+        assert_eq!(value["recorded_at"], 61_234);
+        assert_eq!(value["edition_recorded_at"], 59_999);
+        assert_eq!(value["recorded_at_utc"], "1970-01-01T00:01:01Z");
+        assert_eq!(value["edition_recorded_at_utc"], "1970-01-01T00:00:59Z");
+        assert_eq!(value["edition_id"], json!(EDITION));
+        assert_eq!(value["current_edition_id"], json!(ROOT));
+    }
 }

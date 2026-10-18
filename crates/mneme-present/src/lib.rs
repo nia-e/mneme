@@ -14,10 +14,16 @@ use mneme_core::episode::{
     MAX_OCCURRENCE_CONTEXTS_JSON_BYTES, OccurrenceContextRef, OccurrenceContexts, OccurrenceSpan,
 };
 use mneme_core::tagged::{TaggedAnnWork, TaggedSeedCoverage};
-use mneme_core::{BodySpan, Edge, EdgeKind, EmbeddingFingerprint, NodeId, NodeSummary};
+use mneme_core::{BodySpan, Edge, EdgeKind, EmbeddingFingerprint, NodeId, NodeSummary, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
+
+mod timestamp;
+pub use timestamp::{
+    EpisodeTimePresentation, NodeTimePresentation, OccurrenceUtc, SnapshotTimePresentation,
+    format_timestamp_millis,
+};
 
 mod touchstone;
 pub use touchstone::*;
@@ -163,6 +169,9 @@ impl QueryBody {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct QueryHit {
     id: NodeId,
+    /// Node creation in Unix epoch milliseconds, not last verification or update.
+    created: Timestamp,
+    created_utc: String,
     lane_rank: NonZeroU16,
     evidence: RankEvidence,
     status: QueryNodeStatus,
@@ -172,8 +181,10 @@ pub struct QueryHit {
 }
 
 impl QueryHit {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: NodeId,
+        created: Timestamp,
         lane_rank: NonZeroU16,
         evidence: RankEvidence,
         status: QueryNodeStatus,
@@ -183,6 +194,8 @@ impl QueryHit {
     ) -> Self {
         Self {
             id,
+            created,
+            created_utc: format_timestamp_millis(created),
             lane_rank,
             evidence,
             status,
@@ -857,6 +870,9 @@ impl PresentationBudget {
 
         let worst = WireCard {
             id: NodeId(ulid::Ulid::from(u128::MAX)),
+            created: Some(Timestamp::MAX),
+            created_utc: Some(format_timestamp_millis(Timestamp::MAX)),
+            episode_times_utc: None,
             rank: NonZeroU16::MAX,
             summary: SummaryText {
                 text: String::new(),
@@ -873,7 +889,11 @@ impl PresentationBudget {
             let count = u32::from(lanes.get(lane).hard_min_items);
             let mut lane_worst = worst.clone();
             if lane == Lane::Episodic {
-                lane_worst.episode = Some(worst_episode_metadata());
+                lane_worst.created = None;
+                lane_worst.created_utc = None;
+                let episode = worst_episode_metadata();
+                lane_worst.episode_times_utc = Some(episode.time_presentation());
+                lane_worst.episode = Some(episode);
             }
             let worst_len = compact_len(&lane_worst);
             let payload = repeated_payload_bytes(worst_len, count)
@@ -990,10 +1010,20 @@ macro_rules! input_card {
         impl $name {
             pub fn new(
                 id: NodeId,
+                created: Timestamp,
                 rank: NonZeroU16,
                 summary: impl Into<String>,
             ) -> Result<Self, InputError> {
-                Ok(Self(SourceCard::new(id, rank, summary.into())?))
+                let mut source = SourceCard::new(id, rank, summary.into())?;
+                source.created = Some(created);
+                Ok(Self(source))
+            }
+
+            /// When the semantic node was recorded; not its last verification.
+            pub fn created(&self) -> Timestamp {
+                self.0
+                    .created
+                    .expect("semantic input always has canonical creation time")
             }
 
             pub const fn id(&self) -> NodeId {
@@ -1499,6 +1529,10 @@ pub struct EpisodeCardMetadata {
 }
 
 impl EpisodeCardMetadata {
+    pub fn time_presentation(&self) -> EpisodeTimePresentation {
+        EpisodeTimePresentation::new(&self.occurred, self.recorded_at, self.edition_recorded_at)
+    }
+
     pub const fn identity(&self) -> EpisodeIdentity {
         self.identity
     }
@@ -1585,6 +1619,14 @@ pub fn validate_episode_card_metadata(
     for origin in &m.origins {
         validate_episode_origin(origin, m.identity.edition_id)?;
     }
+    let display = serde_json::to_value(m.time_presentation()).expect("typed dates serialize");
+    for key in ["occurred_utc", "recorded_at_utc", "edition_recorded_at_utc"] {
+        if card.get(key).is_some_and(|value| value != &display[key]) {
+            return Err(InputError::InvalidEpisode(
+                "calendar presentation disagrees with canonical time",
+            ));
+        }
+    }
     let canonical = serde_json::to_value(&m).expect("typed metadata serializes");
     for key in ["origins", "occurrence_contexts", "recording_session"] {
         if card.get(key) != canonical.get(key) {
@@ -1649,6 +1691,7 @@ fn maximum_occurrence_contexts() -> OccurrenceContexts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceCard {
     id: NodeId,
+    created: Option<Timestamp>,
     rank: NonZeroU16,
     summary: String,
     source_bytes: u32,
@@ -1661,6 +1704,7 @@ impl SourceCard {
         let source_bytes = u32::try_from(summary.len()).map_err(|_| InputError::SummaryTooLarge)?;
         Ok(Self {
             id,
+            created: None,
             rank,
             summary,
             source_bytes,
@@ -1672,6 +1716,12 @@ impl SourceCard {
     fn skeleton(&self) -> WireCard {
         WireCard {
             id: self.id,
+            created: self.created,
+            created_utc: self.created.map(format_timestamp_millis),
+            episode_times_utc: self
+                .episode
+                .as_ref()
+                .map(EpisodeCardMetadata::time_presentation),
             rank: self.rank,
             summary: SummaryText {
                 text: String::new(),
@@ -1921,6 +1971,14 @@ enum ContentTrust {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct WireCard {
     id: NodeId,
+    /// Semantic node creation, not a claim about present-day validity. Episodes
+    /// retain their separate occurrence and account/edition recording times.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<Timestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_utc: Option<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    episode_times_utc: Option<EpisodeTimePresentation>,
     rank: NonZeroU16,
     summary: SummaryText,
     content_trust: ContentTrust,
@@ -3486,7 +3544,7 @@ mod tests {
         let input = PackingInput::from_complete(
             retrieval,
             vec![],
-            vec![PrimaryInputCard::new(id(1), rank(1), "tagged lesson").unwrap()],
+            vec![PrimaryInputCard::new(id(1), 1234, rank(1), "tagged lesson").unwrap()],
             vec![],
         )
         .unwrap()
@@ -3526,6 +3584,9 @@ mod tests {
             (b",\"occurrence_contexts\":".len() + MAX_OCCURRENCE_CONTEXTS_JSON_BYTES) as u32,
         );
         let skeleton = WireCard {
+            created: None,
+            created_utc: None,
+            episode_times_utc: Some(with.time_presentation()),
             id: NodeId(ulid::Ulid::from(u128::MAX)),
             rank: NonZeroU16::MAX,
             summary: SummaryText {
@@ -3662,6 +3723,7 @@ mod tests {
     fn query_v3_has_one_lane_and_no_compatibility_fields() {
         let hit = QueryHit::new(
             id(1),
+            1234,
             rank(1),
             RankEvidence::default(),
             QueryNodeStatus::Active,
@@ -3672,12 +3734,96 @@ mod tests {
         let envelope = QueryEnvelope::new(minimum_retrieval_metadata(), vec![hit]).unwrap();
         let value = serde_json::to_value(envelope).unwrap();
         assert_eq!(value["schema"], "mneme.query.v3");
+        assert_eq!(value["lanes"]["primary"]["hits"][0]["created"], 1234);
+        assert_eq!(
+            value["lanes"]["primary"]["hits"][0]["created_utc"],
+            "1970-01-01T00:00:01Z"
+        );
         assert_eq!(value["lanes"].as_object().unwrap().len(), 1);
         assert_eq!(
             value["lanes"]["primary"]["hits"].as_array().unwrap().len(),
             1
         );
         assert!(value["lanes"].get("probationary").is_none());
+    }
+
+    #[test]
+    fn semantic_creation_is_mandatory_unchanged_and_charged_before_card_admission() {
+        let created = 1_600_000_000_123_u128;
+        let card = PrimaryInputCard::new(id(8), created, rank(3), "a lesson").unwrap();
+        let skeleton = card.0.skeleton();
+        let mut without_creation = serde_json::to_value(&skeleton).unwrap();
+        without_creation
+            .as_object_mut()
+            .unwrap()
+            .remove("created_utc");
+        let old_size = serde_json::to_vec(&without_creation).unwrap().len() as u32;
+        assert!(compact_len(&skeleton) > old_size);
+        let input =
+            PackingInput::from_complete(minimum_retrieval_metadata(), vec![], vec![card], vec![])
+                .unwrap();
+        let budget = |lane_bytes| {
+            let disabled = LaneLimit::new(0, 0, 0, 0).unwrap();
+            PresentationBudget::new(
+                NonZeroU32::new(8192).unwrap(),
+                NonZeroU32::new(PresentationBudget::minimum_control_reserve_bytes()).unwrap(),
+                NonZeroU16::new(1).unwrap(),
+                NonZeroU16::new(64).unwrap(),
+                BodyBudget::disabled(),
+                LaneBudgets::new(
+                    disabled,
+                    LaneLimit::new(0, 1, 1, lane_bytes).unwrap(),
+                    disabled,
+                ),
+            )
+            .unwrap()
+        };
+        let full = pack(&budget(4096), &input).unwrap();
+        let value: serde_json::Value = serde_json::from_str(full.rendered_content()).unwrap();
+        assert_eq!(value["primary"][0]["created"], created as u64);
+        assert_eq!(value["primary"][0]["created_utc"], "2020-09-13T12:26:40Z");
+        assert_eq!(value["primary"][0]["id"], serde_json::json!(id(8)));
+        assert_eq!(value["primary"][0]["rank"], 3);
+        assert_eq!(
+            value["usage"]["content_bytes"],
+            full.rendered_content().len()
+        );
+        assert!(value["primary"][0].get("updated").is_none());
+        assert!(value["primary"][0].get("verified_at").is_none());
+        let limited = pack(&budget(old_size), &input).unwrap();
+        let value: serde_json::Value = serde_json::from_str(limited.rendered_content()).unwrap();
+        assert_eq!(value["primary"], serde_json::json!([]));
+        assert_eq!(value["omitted"]["primary"]["bounded_window_budget"], 1);
+        assert_eq!(
+            value["usage"]["content_bytes"],
+            limited.rendered_content().len()
+        );
+    }
+
+    #[test]
+    fn episode_calendar_fields_keep_unknown_and_exact_raw_millis_and_refuse_disagreement() {
+        let header = episode_header(None);
+        let plan = pack(&episodic_budget(4096), &episode_input(header)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(plan.rendered_content()).unwrap();
+        let card = &value["episodes"][0];
+        assert_eq!(card["occurred"], serde_json::json!({"kind":"unknown"}));
+        assert_eq!(card["occurred_utc"], serde_json::json!({"kind":"unknown"}));
+        assert_eq!(card["recorded_at"], 42);
+        assert_eq!(card["edition_recorded_at"], 42);
+        assert_eq!(card["recorded_at_utc"], "1970-01-01T00:00:00Z");
+        assert_eq!(card["edition_recorded_at_utc"], "1970-01-01T00:00:00Z");
+        let mut invalid = card.clone();
+        invalid["recorded_at_utc"] = serde_json::json!("2099-01-01T00:00:00Z");
+        assert!(validate_episode_card_metadata(&invalid, true).is_err());
+        let mut legacy = card.clone();
+        for key in ["occurred_utc", "recorded_at_utc", "edition_recorded_at_utc"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        assert!(validate_episode_card_metadata(&legacy, true).is_ok());
+        assert_eq!(
+            value["usage"]["content_bytes"],
+            plan.rendered_content().len()
+        );
     }
 
     #[test]
@@ -3697,7 +3843,7 @@ mod tests {
             minimum_retrieval_metadata(),
             LaneWindow::complete(vec![]),
             LaneWindow::complete(vec![
-                PrimaryInputCard::new(id(2), rank(1), "ordinary").unwrap(),
+                PrimaryInputCard::new(id(2), 2345, rank(1), "ordinary").unwrap(),
             ]),
             LaneWindow::complete(vec![]),
         )

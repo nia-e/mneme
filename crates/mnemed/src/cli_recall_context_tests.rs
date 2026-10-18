@@ -189,6 +189,58 @@ async fn context_plan_composes_typed_retrieval_and_exact_packing_without_receipt
             .any(|card| card.node_id() == episode_id)
     );
 
+    let parsed = Cli::try_parse_from([
+        "mnemed",
+        "query",
+        "bounded recall",
+        "--k",
+        "2",
+        "--max-nodes",
+        "2",
+        "--depth",
+        "0",
+        "--min-relevance",
+        "0",
+    ])
+    .unwrap();
+    let Command::Query(query_args) = parsed.command else {
+        panic!("query");
+    };
+    let (batch, body_limit) = retrieve_cli_query(&mem, &query_args).await.unwrap();
+    let diagnostic = serde_json::to_value(
+        cli_query_envelope(&mem, batch, false, body_limit, SummaryMaxBytes::FULL)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    for card in value["primary"].as_array().unwrap() {
+        let stored_id: mneme_core::NodeId = serde_json::from_value(card["id"].clone()).unwrap();
+        let stored = mem.get_node(stored_id).await.unwrap().unwrap();
+        assert_eq!(card["created"], serde_json::json!(stored.created()));
+        let hit = diagnostic["lanes"]["primary"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["id"] == card["id"])
+            .unwrap();
+        assert_eq!(hit["created"], card["created"]);
+        assert_eq!(hit["created_utc"], card["created_utc"]);
+        assert_eq!(
+            card["created_utc"],
+            mneme_present::format_timestamp_millis(stored.created())
+        );
+    }
+    let stored_episode = mem.get_node(episode_id).await.unwrap().unwrap();
+    assert_eq!(
+        episode_card["recorded_at"],
+        serde_json::json!(stored_episode.episode().unwrap().recorded_at())
+    );
+    assert_eq!(
+        episode_card["edition_recorded_at"],
+        serde_json::json!(stored_episode.created())
+    );
+    assert!(episode_card.get("created").is_none());
+
     for id in [primary, probationary, episode_id] {
         let node = mem.get_node(id).await.unwrap().unwrap();
         assert_eq!(node.exposure_count(), 0);
@@ -211,7 +263,7 @@ async fn exact_tagged_query_and_context_share_one_primary_lane() {
         },
     )
     .with_body_store(Arc::new(InlineStore::new()));
-    let tag = "é".repeat(mneme_core::MAX_TAG_BYTES / "é".len());
+    let tag = "x".repeat(mneme_core::MAX_TAG_BYTES);
     assert_eq!(tag.len(), mneme_core::MAX_TAG_BYTES);
     mem.ingest(Ingest::new(
         "exact tagged active",
@@ -231,6 +283,7 @@ async fn exact_tagged_query_and_context_share_one_primary_lane() {
     .unwrap();
 
     let query_args = QueryArgs {
+        summary_max_bytes: None,
         text: "exact tagged".into(),
         k: Some(2),
         depth: Some(0),
@@ -242,7 +295,7 @@ async fn exact_tagged_query_and_context_share_one_primary_lane() {
         max_body_bytes: None,
     };
     let (batch, body_limit) = retrieve_cli_query(&mem, &query_args).await.unwrap();
-    let query = cli_query_envelope(&mem, batch, false, body_limit)
+    let query = cli_query_envelope(&mem, batch, false, body_limit, SummaryMaxBytes::FULL)
         .await
         .unwrap();
     let query = serde_json::to_value(query).unwrap();
@@ -347,6 +400,7 @@ async fn popular_tag_partial_coverage_is_reported_without_a_reserved_slot() {
         .unwrap();
 
     let query_args = QueryArgs {
+        summary_max_bytes: None,
         text: "public popular candidate".into(),
         k: Some(2),
         depth: Some(0),
@@ -358,7 +412,7 @@ async fn popular_tag_partial_coverage_is_reported_without_a_reserved_slot() {
         max_body_bytes: None,
     };
     let (batch, body_limit) = retrieve_cli_query(&mem, &query_args).await.unwrap();
-    let query = cli_query_envelope(&mem, batch, false, body_limit)
+    let query = cli_query_envelope(&mem, batch, false, body_limit, SummaryMaxBytes::FULL)
         .await
         .unwrap();
     let query = serde_json::to_value(query).unwrap();
@@ -454,6 +508,7 @@ async fn untagged_graph_expansion_survives_the_public_cli_query_path() {
         .unwrap();
 
     let args = QueryArgs {
+        summary_max_bytes: None,
         text: "unique public graph root".into(),
         k: Some(1),
         depth: Some(1),
@@ -465,7 +520,7 @@ async fn untagged_graph_expansion_survives_the_public_cli_query_path() {
         max_body_bytes: None,
     };
     let (batch, body_limit) = retrieve_cli_query(&mem, &args).await.unwrap();
-    let envelope = cli_query_envelope(&mem, batch, false, body_limit)
+    let envelope = cli_query_envelope(&mem, batch, false, body_limit, SummaryMaxBytes::FULL)
         .await
         .unwrap();
     let value = serde_json::to_value(envelope).unwrap();

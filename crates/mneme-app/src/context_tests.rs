@@ -210,6 +210,21 @@ async fn mixed_recall_is_typed_current_and_does_not_change_semantic_ranking() {
         .iter()
         .map(|card| card["id"].clone())
         .collect::<Vec<_>>();
+    for card in context["primary"].as_array().unwrap() {
+        let stored = snapshots
+            .iter()
+            .find(|node| node["id"] == card["id"])
+            .unwrap();
+        assert_eq!(card["created"], stored["created"]);
+        let created =
+            serde_json::from_value::<mneme_core::Timestamp>(stored["created"].clone()).unwrap();
+        assert_eq!(
+            card["created_utc"],
+            mneme_present::format_timestamp_millis(created)
+        );
+        assert!(card.get("updated").is_none());
+        assert!(card.get("verified_at").is_none());
+    }
     assert!(ids.contains(&json!(primary)));
     assert!(ids.contains(&json!(probationary)));
     assert!(context.get("probationary").is_none());
@@ -225,6 +240,24 @@ async fn mixed_recall_is_typed_current_and_does_not_change_semantic_ranking() {
     );
     assert_eq!(episode["revision"], 1);
     assert_eq!(episode["occurred"], json!({"kind":"point","at":1234}));
+    assert_eq!(
+        episode["occurred_utc"],
+        json!({"kind":"point","at_utc":"1970-01-01T00:00:01Z"})
+    );
+    let stored_edition = mem
+        .get_node(current.identity.edition_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        episode["recorded_at"],
+        json!(stored_edition.episode().unwrap().recorded_at())
+    );
+    assert_eq!(
+        episode["edition_recorded_at"],
+        json!(stored_edition.created())
+    );
+    assert!(episode.get("created").is_none());
     assert_eq!(episode["thread"], "violet-evening");
     assert_eq!(
         episode["summary"]["text"],

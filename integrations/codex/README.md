@@ -8,6 +8,10 @@ enables a background reader and selective recording of completed work.
 [Configure scope](#explicit-project-profile-and-library-selection) ·
 [Advanced setup](#advanced-installation) · [Disable](#persistent-off-switch)
 
+For the optional capture-only Claude Code adapter, see [Claude Code capture](../claude/README.md).
+Its helpers share this historical package directory, not Codex authentication or
+setup. Existing Codex configuration keeps its current behavior.
+
 ## Ordinary project setup
 
 You need Codex with lifecycle hooks and app-server support, Python **3.11+**,
@@ -442,8 +446,54 @@ Read-only mode can show caveats but does not register findings.
 ### Authored touchstones
 
 [Touchstones](../../docs/touchstones.md) preserve deliberately authored significance
-and historical references. The reader can surface their existing facets; recording
-cannot author touchstones or rewrite protected fields.
+and historical references. At a natural checkpoint, the foreground agent may notice
+something that matters beyond its usefulness and author a touchstone itself. It
+does not need a background nomination or human countersignature for its own meaning.
+
+For configured named stores (hook configuration v12/v13), the existing automatic
+recorder may instead propose a `touchstone_nomination`: a source-bound suggestion,
+not a memory write or an extra model call. Preference-only capture policies do not
+admit nominations. A bounded private handoff retains the nomination for a later
+prompt or tool boundary in the **same session**, subject to the current workspace,
+owner and recording/context policy. Recall delivery keeps its separate exact-text
+receipt; nominations do not become learning evidence.
+
+The foreground agent can accept, reword, defer or ignore the suggestion. To accept,
+inspect its evidence, GET the exact same-owner references afresh, then author an
+ordinary typed touchstone SAVE. If no related memory exists yet, inspect the cited
+source and deliberately preserve an appropriate scene/note in that owner if it
+merits saving; GET its exact node or episode edition before authoring the touchstone.
+Do not invent a reference or automatically save a scene just to provide a target.
+Emitted means offered, not seen, approved or saved;
+ignored nominations are not negative feedback. No quota, core promotion, automatic
+revision or inference of another person's feelings follows from this handoff.
+The reader can surface existing touchstone facets; it cannot author their meaning.
+
+The same recorder and local handoff can emit a `review_nomination` with a closed
+`effect` variant for core creation/membership/meaning changes, supersession,
+forgetting, contradiction or merge adjudication, or an episode correction. These
+are grounded suggestions, never queued native requests. Only offered same-owner
+references are admitted; historical episode references remain exact editions.
+The foreground freshly inspects evidence and targets, then independently authors
+an ordinary operation with its existing authority and actual native guards. No
+new human approval requirement or atomic stale-decision guarantee is implied.
+Missing an optional offer is not an unresolved durable task or negative feedback.
+Ordinary background recording, advisory findings and protected-tag-preserving
+upkeep remain separate; `background.core_cleanup = false` keeps existing core
+cleanup in the foreground without disabling non-core maintenance.
+
+The effect contract is shared by both capture frontends. Current source bundles
+include `review_contract.py`; installer revisions 32/33 distinguish this inventory
+from retained 30/31 bundles. Pending old touchstone envelopes remain readable
+without changing their original coverage or digests. A prior writer encountering
+a pending unknown review envelope refuses the outbox rather than discarding it;
+do not mix runtime versions or reset pending state to bypass that refusal.
+
+Install the matching helper bundle and start a fresh session. Older helpers neither
+produce nor deliver nominations; mixing helper versions or downgrading with pending
+recorder jobs does not preserve unoffered nominations. Retain state for recovery
+instead of resetting recording or paid-work ledgers. Existing memory records and
+typed touchstone SAVE are unchanged.
 
 ### Isolated shadow pilot (opt-in)
 

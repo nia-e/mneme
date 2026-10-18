@@ -129,12 +129,17 @@ def config_for_store(config, store):
     current = selection(config)
     if current.named(store.name) != store:
         raise ValueError("store does not match frozen selection")
-    return {**config, "memory_scope": "registry",
+    result = {**config, "memory_scope": "registry",
             "_registry_origin_scope": config.get("_registry_origin_scope", config.get("memory_scope")),
             "service_config": Path(store.service_config),
             "selected_store": store.name, "_store_purpose": store.purpose,
             "tag_stewardship": store.maintenance.enabled and (config.get("schema") == NATIVE_SCHEMA or config.get("recording_mode") == "automatic"),
             "tag_guide_id": store.maintenance.tag_guide_id}
+    # A prior owner's projected restriction must not leak into another owner.
+    result.pop("core_cleanup", None)
+    if not store.maintenance.core_cleanup:
+        result["core_cleanup"] = False
+    return result
 
 
 def admit_session(config, event):
@@ -216,8 +221,6 @@ def validate_native_static(value):
 
 
 def load_native(value, path, raw, *, cwd=None, workspace_binding=None):
-    from store_registry import native_select
-    from hooks import _bounded_json, MAX_CONFIG
     if workspace_binding is not None or cwd is None:
         raise ValueError("native hook selection requires event workspace, not legacy binding")
     config = validate_native_static(value)
@@ -228,22 +231,38 @@ def load_native(value, path, raw, *, cwd=None, workspace_binding=None):
     if matching:
         adapter = max(matching, key=lambda row: len(Path(row["root"]).parts))
         config.update({key: adapter[key] for key in ("state_dir", "reader_codex", "reader_codex_sha256")})
+    return native_capture_selection(config, path, raw, cwd=current)
+
+
+def native_capture_selection(config, path, raw, *, cwd, capture_only=False):
+    """Freeze native owner policy for a validated host recipe, without forging one.
+
+    Transport/model validation belongs to its host loader. Native policy, exact
+    source bytes and owner bindings remain authoritative for both frontends.
+    """
+    from store_registry import native_select
+    from rollout_primitives import read_regular
+    current = Path(cwd).absolute()
+    if not current.resolve(strict=True).is_dir():
+        raise ValueError("native hook workspace must be a directory")
     selected = native_select(config["memory_config"], config["native_cli"], current)
     background = selected.snapshot["config"]["background"]
-    # Model defaults are executable host recipe, not another policy parser.
-    config.update(reader_model=background.get("model") or "gpt-6.1-sol",
-                  librarian_effort=background.get("effort") or "medium",
-                  memory_scope="registry", memory_mode="async", project_root=current,
-                  selection_cwd=current, recall_mode="automatic" if selected.recallable else "off",
+    if not capture_only:
+        config.update(reader_model=background.get("model") or "gpt-6.1-sol",
+                      librarian_effort=background.get("effort") or "medium")
+    config.update(memory_scope="registry", memory_mode="async", project_root=current,
+                  selection_cwd=current,
+                  recall_mode="automatic" if selected.recallable and not capture_only else "off",
                   recording_mode="automatic" if selected.recordable else "off",
-                  _background_maintenance=bool(selected.maintainable),
+                  _background_maintenance=bool(selected.maintainable) and not capture_only,
                   frozen_selection=selected.to_dict(), _config_path=Path(path).resolve(),
                   _registry_config_sha256=hashlib.sha256(raw).hexdigest())
     resolve_budget(config)
     config["memory_config"] = native_memory_config_path(config["memory_config"])
-    for key in ("state_dir", "native_cli", "reader_codex", "reader_auth"):
+    for key in ("state_dir", "native_cli", "reader_codex", "reader_auth", "reader_claude", "transcripts_root"):
         if key in config: config[key] = Path(config[key]).resolve()
-    if _bounded_json(Path(path), MAX_CONFIG, with_raw=True)[1] != raw:
+    check = read_regular(Path(path), 8192)
+    if len(check) > 8192 or check != raw:
         raise ValueError("native hook adapter changed during selection")
     from recording_jobs import _config_digest
     config["_reader_config_pin"] = _config_digest(config)

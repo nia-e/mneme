@@ -72,14 +72,15 @@ struct LeasedDatabase {
 pub struct DatabaseCheckout(Arc<LeasedDatabase>);
 
 impl DatabaseCheckout {
-    /// Positive current-generation admission under the retained process lease,
-    /// before body publication or embedding on either write route.
+    /// Positive live current-generation verification under the retained process
+    /// lease, before body publication or embedding. Initial clean-source
+    /// admission happened when this owner was opened; its own WAL is legitimate.
     pub fn require_current_generation(&self) -> Result<(), AnyErr> {
         match &self.0.handle.saver {
             Saver::Snapshot(_) => Ok(()),
             #[cfg(feature = "cozo")]
-            Saver::Cozo(_) => {
-                CozoStore::require_existing_current(&self.0.handle.path, &self.0._lease)?;
+            Saver::Cozo(store) => {
+                store.require_admitted_current()?;
                 Ok(())
             }
         }
@@ -2157,6 +2158,74 @@ mod tests {
         drop(capture_slot);
         drop(normal_slot);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(all(feature = "cozo", not(feature = "fastembed")))]
+    #[tokio::test]
+    async fn live_cozo_ingest_then_retag_and_get_does_not_repeat_offline_admission() {
+        use serde_json::json;
+        for existing in [false, true] {
+            let root = std::env::temp_dir().join(format!("mneme-live-generation-{}", Ulid::new()));
+            std::fs::create_dir(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            let path = root.join("memory.db");
+            if existing {
+                CozoStore::materialize_fresh_current(
+                    &path,
+                    Ulid::new(),
+                    &MemStore::new(DEFAULT_DIM),
+                )
+                .await
+                .unwrap();
+            }
+            let slot = Arc::new(
+                DatabaseSlot::open(
+                    path.clone(),
+                    Arc::new(InferenceRuntime::new()),
+                    Ulid::new().to_string(),
+                )
+                .unwrap(),
+            );
+            let db_id = slot.status().unwrap().db_id;
+            let registry = crate::Registry {
+                activity: crate::activity::ActivityRing::default(),
+                dbs: std::collections::BTreeMap::from([("project".into(), slot.clone())]),
+            };
+            let sessions = Arc::new(tokio::sync::Mutex::new(crate::SessionState::default()));
+            let cold = crate::ColdWorkGate::default();
+            let policy = crate::CapabilityPolicy::new(crate::CapabilityProfile::Curator, false);
+            let ingested = crate::call_tool_authorized(&registry, &sessions, &cold, policy, "ingest", &json!({
+                "db":"project", "summary":"same-owner ingest then guarded edit", "tags":["MCP / stdio Intent","mcp_stdio_intent"]
+            })).await.unwrap();
+            let checkout = slot.checkout().unwrap();
+            checkout.require_current_generation().unwrap();
+            drop(checkout);
+            let changed = crate::call_tool_authorized(&registry, &sessions, &cold, policy, "retag", &json!({
+                "db":"project", "expected_db_id":db_id.to_string(), "id":ingested["id"],
+                "expected_tags":["mcp-stdio-intent"], "tags":["Retag / stdio Checked","retag_stdio_checked"]
+            })).await.unwrap();
+            assert_eq!(changed["changed"], true);
+            let fetched = crate::call_tool_authorized(
+                &registry,
+                &sessions,
+                &cold,
+                policy,
+                "get",
+                &json!({
+                    "db":"project", "id":ingested["id"]
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(fetched["tags"], json!(["retag-stdio-checked"]));
+            slot.checkout()
+                .unwrap()
+                .require_current_generation()
+                .unwrap();
+            drop(registry);
+            drop(slot);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[cfg(feature = "cozo")]

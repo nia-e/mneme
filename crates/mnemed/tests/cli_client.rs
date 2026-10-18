@@ -73,6 +73,15 @@ fn protocol_fixture_sessions(
 fn protocol_fixture_named_sessions(
     server_name: &'static str,
     catalogs: Vec<Value>,
+    call: impl FnMut(&Value, &Value) -> Option<Value> + Send + 'static,
+) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+    protocol_fixture_profile_sessions(server_name, None, catalogs, call)
+}
+
+fn protocol_fixture_profile_sessions(
+    server_name: &'static str,
+    profile: Option<&'static str>,
+    catalogs: Vec<Value>,
     mut call: impl FnMut(&Value, &Value) -> Option<Value> + Send + 'static,
 ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
     use std::{
@@ -137,11 +146,17 @@ fn protocol_fixture_named_sessions(
             };
             let method = request["method"].as_str().unwrap_or("close");
             let result = match method {
-                "initialize" => json!({
-                    "protocolVersion":"2025-11-25", "serverInfo":{"name":server_name},
-                    "_mneme_client":{"expected_db_id":999,"owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true}},
-                    "owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true},
-                }),
+                "initialize" => {
+                    let mut result = json!({
+                        "protocolVersion":"2025-11-25", "serverInfo":{"name":server_name},
+                        "_mneme_client":{"expected_db_id":999,"owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true}},
+                        "owner_capabilities":{"retag_content_guards":true,"tag_vocabulary":true},
+                    });
+                    if let Some(profile) = profile {
+                        result["capabilityProfile"] = json!(profile);
+                    }
+                    result
+                }
                 "tools/list" => catalogs[session].clone(),
                 "tools/call" => {
                     let arguments = &request["params"]["arguments"];
@@ -1911,4 +1926,171 @@ fn verified_touchstone_save_rejects_missing_typed_readback_despite_matching_sour
     );
     assert_eq!(responses[1]["error"]["accepted"]["id"], json!(id));
     assert_eq!(worker.join().unwrap().len(), 2);
+}
+
+#[test]
+fn query_summary_bound_survives_explicit_and_configured_remote_cli_or_refuses_old_owner() {
+    let db = "01M3CPEVDTM9PP4HJTMMBZ8HR9";
+    for configured in [false, true] {
+        for json_output in [false, true] {
+            for supported in [false, true] {
+                let mut query = json!({"name":"query","inputSchema":{"type":"object","properties":{
+                    "db":{"type":"string"},"expected_db_id":guard_schema(),"text":{"type":"string"}
+                }}});
+                if supported {
+                    query["inputSchema"]["properties"]["summary_max_bytes"] =
+                        mneme_app::query::SummaryMaxBytes::schema();
+                }
+                let catalog = json!({"tools":[query,{"name":"databases","inputSchema":{"type":"object","properties":{}}}]});
+                let (endpoint, worker) = protocol_fixture_profile_sessions(
+                    "mneme-mcp",
+                    Some("read-only"),
+                    vec![catalog],
+                    move |name, args| {
+                        let result = if name == "databases" {
+                            json!([{"db":"project","db_id":db,"state":"open","resolved_path":"/fixture/project.db"}])
+                        } else {
+                            assert_eq!(name, "query");
+                            assert!(supported, "unsupported owner must never receive QUERY");
+                            assert_eq!(args["summary_max_bytes"], 320);
+                            assert_eq!(args["db"], "project");
+                            json!({"schema":"mneme.query.v3","partial":true,"lanes":{"primary":{"hits":[{
+                                "id":"01M3CV5EZP4HWAK56YJCMZQG2Y","created":61234,"lane_rank":1,"status":"active","evidence":{},"summary":"compact fixture","summary_truncated":true
+                            }]}}})
+                        };
+                        Some(json!({"content":[{"type":"text","text":result.to_string()}]}))
+                    },
+                );
+                let scratch = std::env::temp_dir().join(format!("mneme-f5-{}", ulid::Ulid::new()));
+                std::fs::create_dir_all(&scratch).unwrap();
+                let config = scratch.join("memory.toml");
+                std::fs::write(
+                    &config,
+                    format!(
+                        r#"schema="mneme.config.v1"
+read_default="alpha"
+[stores.alpha]
+id="{db}"
+owner={{url="{endpoint}",db="project"}}
+active={{workspace="any"}}
+permissions={{read=true,write=false}}
+"#
+                    ),
+                )
+                .unwrap();
+                let mut command = Command::new(env!("CARGO_BIN_EXE_mnemed"));
+                command
+                    .current_dir(&scratch)
+                    .env_remove("MNEME_DB")
+                    .env_remove("MNEME_CONFIG");
+                if configured {
+                    command.arg("--memory-config").arg(&config);
+                } else {
+                    command.args(["--remote", &endpoint]);
+                }
+                if json_output {
+                    command.arg("--json");
+                }
+                let output = command
+                    .args(["query", "q", "--summary-max-bytes", "320"])
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                if supported {
+                    assert!(output.status.success(), "{stderr}");
+                    if json_output {
+                        let value: Value = serde_json::from_str(&stdout).unwrap();
+                        assert_eq!(value["lanes"]["primary"]["hits"][0]["created"], 61234);
+                    } else {
+                        assert!(stdout.contains("1970-01-01T00:01:01Z"), "{stdout}");
+                        assert!(stdout.contains("summary truncated"), "{stdout}");
+                    }
+                } else {
+                    assert!(!output.status.success());
+                    assert!(
+                        stderr.contains("summary_max_bytes") && stderr.contains("owner"),
+                        "{stderr}"
+                    );
+                }
+                let calls = worker.join().unwrap();
+                let queries = calls
+                    .iter()
+                    .filter(|args| args.get("text").is_some())
+                    .count();
+                assert_eq!(queries, usize::from(supported));
+                assert!(!scratch.join("memory.db").exists());
+                std::fs::remove_dir_all(scratch).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "fastembed"))]
+#[test]
+fn local_query_summary_bound_human_json_and_defaults_preserve_authored_content() {
+    let scratch = std::env::temp_dir().join(format!("mneme-f5-local-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let db = scratch.join("memory.db");
+    let execute = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_mnemed"))
+            .current_dir(&scratch)
+            .env_remove("MNEME_DB")
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let summary = format!("unicode query 🦋{}", "é".repeat(2000));
+    execute(&[
+        "--json",
+        "ingest",
+        "--summary",
+        &summary,
+        "--tag",
+        "prefix-fixture",
+    ]);
+    let query = [
+        "query",
+        "unicode query",
+        "--tag",
+        "prefix-fixture",
+        "--k",
+        "1",
+        "--max-nodes",
+        "1",
+        "--depth",
+        "0",
+        "--min-relevance",
+        "0",
+    ];
+    let default: Value =
+        serde_json::from_str(&execute(&[&["--json"][..], &query].concat())).unwrap();
+    let bound: Value = serde_json::from_str(&execute(
+        &[&["--json"][..], &query, &["--summary-max-bytes", "17"]].concat(),
+    ))
+    .unwrap();
+    let full = &default["lanes"]["primary"]["hits"][0];
+    let compact = &bound["lanes"]["primary"]["hits"][0];
+    assert_eq!(full["summary"], summary);
+    assert_eq!(full["summary_truncated"], false);
+    assert_eq!(compact["summary"], "unicode query ");
+    assert_eq!(compact["summary_truncated"], true);
+    assert_eq!(compact["created"], full["created"]);
+    let human = execute(&[&query[..], &["--summary-max-bytes", "17"]].concat());
+    assert!(human.contains("summary truncated"), "{human}");
+    assert!(!human.contains('🦋'), "{human}");
+    assert!(human.contains("Z (recorded, not verified)"), "{human}");
+    let get: Value =
+        serde_json::from_str(&execute(&["--json", "get", full["id"].as_str().unwrap()])).unwrap();
+    assert_eq!(get["summary"], summary);
+    assert_eq!(get["created"], full["created"]);
+    std::fs::remove_dir_all(scratch).unwrap();
 }

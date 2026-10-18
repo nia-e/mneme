@@ -103,6 +103,7 @@ use self::runtime::{
     LOCK_RETRY_WAIT_CEILING_MS, MAX_CONCURRENT_TAGGED_READS, TaggedReadTestHook,
     TaggedScanObservation, lock_retry_backoff_ceiling_ms,
 };
+pub use self::tag_format_migration::SqliteTagFormatMigration;
 
 const SPREAD_FANOUT: usize = 8;
 /// Bounded raw-edge shortlist re-ranked by query-conditioned edge score before
@@ -3884,6 +3885,17 @@ fn decode_canonical_node(id: NodeId, raw: &str, projected_status: &str) -> Resul
 /// it. The backend cap is deliberately checked on the exact encoded bytes that
 /// will be written, not an estimate of the in-memory representation.
 fn encode_canonical_node(node: &Node) -> Result<String> {
+    if node.tags().any(|tag| !mneme_core::is_normalized_tag(tag)) {
+        return Err(Error::InvalidInput(format!(
+            "canonical node {} has non-normalized materialized tags; normalize new input or use explicit tag-format migration for historical records",
+            node.id().0
+        )));
+    }
+    encode_historical_canonical_node(node)
+}
+
+/// Exact historical detached import only; never a normal current write path.
+fn encode_historical_canonical_node(node: &Node) -> Result<String> {
     node.validate().map_err(|error| {
         Error::InvalidInput(format!(
             "canonical node {} violates sealed Node contract: {error}",
@@ -3989,6 +4001,7 @@ mod opening;
 mod overlay;
 mod runtime;
 mod single_graph;
+mod tag_format_migration;
 mod tag_vocabulary;
 mod touchstones;
 mod traversal;

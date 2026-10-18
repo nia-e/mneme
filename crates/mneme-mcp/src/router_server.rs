@@ -386,6 +386,16 @@ impl Route {
                 "tag vocabulary is not advertised for this database; no operation was sent".into(),
             );
         }
+        // Tool-name presence is not feature support: older owners may accept
+        // unknown JSON fields while silently ignoring the requested prefix.
+        // Check this route's advertised contract before replica resolution,
+        // reconnect, identity re-verification, or any upstream operation.
+        if name == "query"
+            && args.get("summary_max_bytes").is_some()
+            && !mneme_app::query::SummaryMaxBytes::advertised(&self.tools)
+        {
+            return Err("query summary_max_bytes is not advertised for this database; update the owner build or omit the bound; no operation was sent".into());
+        }
         if !catalog::advertises_action(&self.tools, name, &args) {
             return Err(
                 "operation/action is not advertised for this database; no operation was sent"

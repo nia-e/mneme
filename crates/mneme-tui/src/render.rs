@@ -3,7 +3,6 @@
 //! Layout is deliberately deterministic. A redraw must not rearrange somebody's map.
 
 use crate::model::{App, View, clean};
-use chrono::{DateTime, Utc};
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -164,20 +163,7 @@ fn card_title<'a>(app: &App, node: &'a crate::model::Node) -> &'a str {
 }
 
 fn timestamp(ms: u64) -> String {
-    i64::try_from(ms)
-        .ok()
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map(|time| {
-            let format = if ms % 1_000 != 0 {
-                "%Y-%m-%d %H:%M:%S%.3f UTC"
-            } else if ms % 60_000 != 0 {
-                "%Y-%m-%d %H:%M:%S UTC"
-            } else {
-                "%Y-%m-%d %H:%M UTC"
-            };
-            time.format(format).to_string()
-        })
-        .unwrap_or_else(|| format!("unsupported time ({ms} ms)"))
+    mneme_present::format_timestamp_millis(u128::from(ms))
 }
 
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App) {

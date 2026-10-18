@@ -343,7 +343,7 @@ fn retag_advertised(tool: &Value) -> bool {
             let tags = &props[field];
             tags["type"] == "array"
                 && tags["maxItems"] == 64
-                && tags["uniqueItems"] == true
+                && (*field != "expected_tags" || tags["uniqueItems"] == true)
                 && tags.get("minItems").is_none_or(|value| value == 0)
                 && tags["items"]["type"] == "string"
                 && tags["items"]["minLength"] == 1
@@ -2247,7 +2247,7 @@ mod tests {
                 .retain(|value| value != field);
             cases.push((old, args.clone()));
         }
-        for field in ["expected_tags", "tags"] {
+        for field in ["expected_tags"] {
             let mut old = retag_catalog();
             old[0]["inputSchema"]["properties"][field]["uniqueItems"] = json!(false);
             cases.push((old, args.clone()));

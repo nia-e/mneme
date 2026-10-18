@@ -57,7 +57,14 @@ an ambiguous outcome. JSON-RPC IDs are not replay identities. See
 
 ### Time and grouping
 
-Optional `occurred` uses Unix epoch milliseconds, as a point or interval:
+Inputs and canonical `occurred` values use Unix epoch milliseconds, as a point
+or interval. Read responses add whole-second UTC calendar companions:
+`recorded_at_utc`, `edition_recorded_at_utc`, and a separate `occurred_utc` tagged
+union (`unknown`, `point` with `at_utc`, or `range` with `start_utc`/`end_utc`).
+For example, `2026-10-19T14:32:08Z` explicitly means UTC. Display never changes
+stored precision, authored occurrence values, edition identity or ordering.
+
+Examples of canonical occurrence input:
 
 ```json
 {"kind":"point","at":1790460000000}
@@ -223,9 +230,19 @@ is unsupported; ordinary library semantic search remains semantic.
 
 ## Existing persistent stores
 
-Current stores use **TouchstonesV1 / touchstones-v1, JSON v5**. Normal open never
-upgrades a predecessor. Older readers/writers must refuse unsupported generations
-rather than drop metadata.
+Current writable stores use **TouchstonesV1 / touchstones-v1 with the normalized
+tag-policy marker, JSON v6**. Legacy TouchstonesV1 / JSON v5 is a distinct exact
+predecessor for the [reviewed tag-format transition](tag-normalization.md), not
+an ordinary current open. Normal open never upgrades a predecessor. Older
+readers/writers must refuse unsupported formats rather than drop metadata.
+
+A refused open distinguishes failure to establish a clean SQLite source from
+failure to establish the exact expected generation. Neither diagnosis identifies
+a supported predecessor: an old, torn, or unknown store can fail the same exact
+admission check. Preserve the database/body pair and matching runtime, establish
+the source generation, then select only its documented transition below. Do not
+interpret a refusal as an instruction to run the latest target against arbitrary
+input. Admission performs no automatic repair or legacy fallback.
 
 `single-graph-upgrade` makes a detached successor in four named steps:
 
@@ -235,6 +252,13 @@ rather than drop metadata.
 | single-graph-v1 / JSON v2 | `concern-v1` | concern-v1 / JSON v3 |
 | concern-v1 / JSON v3 | `episode-context-v2` | episode-context-v2 / JSON v4 |
 | episode-context-v2 / JSON v4 | `touchstones-v1` | touchstones-v1 / JSON v5 |
+
+The final named target remains frozen: it preserves legacy tag spellings and the
+legacy tag-policy marker / JSON v5 envelope. Follow it with the separately reviewed
+tag-format plan/apply workflow before opening through the normalized writer.
+SQLite crosses its tag marker in one same-file transaction; JSON instead requires
+a distinct absent V6 successor. The tag-only transition preserves historical
+request proofs and diagnostic retries rather than replaying the historical ladder.
 
 These are exact predecessor transitions, not shortcuts from arbitrary or managed
 generations. Stop the owner and preserve paired database/body backups plus its

@@ -87,6 +87,17 @@ migration of an older installation.
 - `[workspace] profile = "isolated"` admits only explicitly allowlisted stores and
   libraries. Exclusions and disabled entries do not become fallback permission.
 
+Per-owner `background.core_cleanup = true` (the default) permits trusted,
+meaning-preserving cleanup on existing core notes within enabled maintenance.
+Today this is ordinary-topic tag upkeep that preserves all protected tags; it does
+not add a background body/summary editor. Set `core_cleanup = false` in the
+store's `background` table to keep core-target cleanup in the foreground while
+ordinary non-core maintenance continues. A small edit is not necessarily a
+meaning-preserving edit; this is trusted classification, not a semantic proof.
+Core creation, membership changes, meaning changes, destructive adjudication and
+episode corrections remain foreground decisions. The switch does not grant
+operator capability or change explicit foreground authority.
+
 For narrower uses of an otherwise active owner, operation applicability keeps one
 canonical identity rather than creating duplicate aliases. For example, to keep
 personal core available broadly but automatic personal recording project-only:
@@ -99,6 +110,69 @@ roots = ["/absolute/project"]
 The same scoped table exists for `core`, `context`, `recall` and `maintenance`, with
 `roots` and `excluded_roots`. A migration must preserve each existing operation's
 scope, not broaden global auto-write because the name sounds global.
+
+### Explicit project roots and shared parent scopes
+
+For a deliberately shared project across a directory of worktrees or repositories,
+replace its activation table with:
+
+```toml
+[stores.project.active]
+workspace = "project"
+subtree_roots = ["/worktrees/mneme"]
+excluded_roots = ["/worktrees/mneme/private"]
+```
+
+`subtree_roots` includes the parent and everything below it, including nested
+`.git` directories, Git worktree `.git` files, `.mneme` projects, and newly created
+unrelated repositories. This is an explicit shared scope, not Git-family detection
+or worktree auto-discovery. Selection checks the current workspace; it never walks
+the parent's children or freezes a discovered membership list. There is no glob
+expansion.
+
+Existing `roots` behavior is unchanged: for `workspace = "project"` activation and
+operation applicability, ordinary directories below a root are included but nested
+project boundaries stop inheritance unless the child is explicitly listed.
+`workspace = "any"` activation retains its existing broader root-prefix behavior;
+its operation applicability is still checked independently. Use `subtree_roots`
+when you mean to include nested projects, rather than changing workspace modes as
+a workaround. A scope can mix `roots` for individual projects and `subtree_roots`
+for broad parents; these are alternative positive grants, not intersecting filters.
+
+All five operation-applicability tables also accept `subtree_roots`. For example,
+keep broad personal reads while limiting automatic recording to the shared tree:
+
+```toml
+[stores.global.applicability.record]
+subtree_roots = ["/worktrees/mneme"]
+excluded_roots = ["/worktrees/mneme/private"]
+```
+
+Exclusions still win, including lexical and canonical aliases. Every workspace
+path witness must be covered by a positive grant; a symlink inside an allowed tree
+does not implicitly admit an outside target. A shared scope does not bypass
+permissions, disabled entries, profiles, isolated allowlists, or nested overlay and
+privacy metadata. A scope with neither positive list remains unrestricted by roots;
+a nonempty `subtree_roots` list restricts it even when `roots` is empty.
+
+Within each activation or operation scope, `roots` and `subtree_roots` share one
+budget: **256 paths and 16,384 total UTF-8 path bytes**, with no duplicates across
+the two lists. `excluded_roots` has a separate budget of the same size. Each path
+must be a normalized absolute path of at most 4,096 bytes. This preserves the
+path-data envelope while allowing up to four times the old 64-path candidate
+count. The 64-store, 64 KiB per-file, 256 KiB aggregate configuration-source and
+512 KiB selection-snapshot limits remain unchanged.
+
+Older native clients reject `subtree_roots` as an unknown field rather than
+silently ignoring its meaning; they also reject lists longer than 64 paths.
+Configurations without the new field and with at most 64 paths remain accepted.
+Update each configuration-reading native client before publishing this syntax,
+then restart configured processes/start fresh sessions. Scope changes invalidate
+frozen selections; new metadata on the current workspace's ancestry still requires
+reselection even when the shared scope admits the new project. Creating an
+unrelated sibling project does not invalidate another workspace's selection. This
+is a configuration-admission change, not a database migration; source tests alone
+do not update installed clients.
 
 ### What automatic recording is for
 

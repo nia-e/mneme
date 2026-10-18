@@ -11,6 +11,7 @@ pub mod episode;
 pub mod graph_view;
 pub mod list;
 pub mod neighbors;
+pub mod query;
 pub mod save;
 mod tag_vocabulary;
 pub mod touchstone;

@@ -499,11 +499,11 @@ mod tests {
 
     #[test]
     fn times_are_checked_utc_milliseconds_and_unknown_is_not_zero() {
-        assert_eq!(timestamp(0), "1970-01-01 00:00 UTC");
-        assert_eq!(timestamp(1_000), "1970-01-01 00:00:01 UTC");
-        assert_eq!(timestamp(1_001), "1970-01-01 00:00:01.001 UTC");
-        assert_eq!(timestamp(60_000), "1970-01-01 00:01 UTC");
-        assert!(timestamp(u64::MAX).starts_with("unsupported time"));
+        assert_eq!(timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(timestamp(1_000), "1970-01-01T00:00:01Z");
+        assert_eq!(timestamp(1_001), "1970-01-01T00:00:01Z");
+        assert_eq!(timestamp(60_000), "1970-01-01T00:01:00Z");
+        assert!(timestamp(u64::MAX).starts_with("out of calendar range"));
         assert_eq!(occurrence(&SceneOccurrence::Unknown), "time unknown");
         assert!(
             occurrence(&SceneOccurrence::Range {

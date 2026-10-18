@@ -49,7 +49,24 @@ fn advertised_catalog() -> Value {
         branch["properties"]["db"] = json!({"type":"string"});
         branch["properties"]["expected_db_id"] = guard.clone();
     }
-    json!([{"name":"databases","inputSchema":{"type":"object","properties":{}}},{"name":"get","inputSchema":{"type":"object","properties":{"db":{"type":"string"},"expected_db_id":guard,"id":{"type":"string"}}}},{"name":"forget","inputSchema":{"type":"object","properties":{"db":{"type":"string"},"expected_db_id":guard,"id":{"type":"string"}}}},{"name":"episode","inputSchema":episode}])
+    let mut tools = json!([{"name":"databases","inputSchema":{"type":"object","properties":{}}},{"name":"get","inputSchema":{"type":"object","properties":{"db":{"type":"string"},"expected_db_id":guard,"id":{"type":"string"}}}},{"name":"forget","inputSchema":{"type":"object","properties":{"db":{"type":"string"},"expected_db_id":guard,"id":{"type":"string"}}}},{"name":"episode","inputSchema":episode}]);
+    for (name, mut schema) in [
+        ("retag", mneme_app::retag::input_schema()),
+        ("edit_body", mneme_app::edit_body::input_schema()),
+        ("edit_summary", mneme_app::edit_summary::input_schema()),
+    ] {
+        schema["properties"]["db"] = json!({"type":"string"});
+        schema["properties"]["expected_db_id"] = guard.clone();
+        schema["required"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("db"), json!("expected_db_id")]);
+        tools
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":name,"inputSchema":schema}));
+    }
+    tools
 }
 fn fixture(profile: &'static str, wrong_identity: bool, http_denied: bool) -> Fixture {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -119,7 +136,21 @@ fn fixture(profile: &'static str, wrong_identity: bool, http_denied: bool) -> Fi
                         json!([{"db":"project","db_id":if wrong_identity{NODE}else{DB},"state":"open","resolved_path":"/fixture/project.db"}])
                     } else {
                         server_calls.fetch_add(1, Ordering::Relaxed);
-                        json!({"db":"project","db_id":DB,"id":NODE,"summary":"fixture","summary_truncated":false})
+                        let args = &msg["params"]["arguments"];
+                        match name {
+                            "retag" => {
+                                json!({"db":"project","db_id":DB,"id":args["id"],"tags":args["tags"],"changed":args["expected_tags"] != args["tags"]})
+                            }
+                            "edit_body" => {
+                                json!({"db":"project","db_id":DB,"id":args["id"],"body_revision":"b".repeat(64)})
+                            }
+                            "edit_summary" => {
+                                json!({"db":"project","db_id":DB,"id":args["id"],"summary_snapshot_sha256":"b".repeat(64)})
+                            }
+                            _ => {
+                                json!({"db":"project","db_id":DB,"id":NODE,"summary":"fixture","summary_truncated":false})
+                            }
+                        }
                     };
                     Some(
                         json!({"jsonrpc":"2.0","id":msg["id"],"result":{"content":[{"type":"text","text":serde_json::to_string(&value).unwrap()}]}}),
@@ -265,6 +296,11 @@ async fn complete_domain_admission_precedes_owner_contact() {
     for (tool, args) in [
         ("get", json!({"id":NODE,"body":"yes"})),
         ("query", json!({"text":"x","k":-1})),
+        ("query", json!({"text":"x","summary_max_bytes":0})),
+        ("query", json!({"text":"x","summary_max_bytes":16385})),
+        ("query", json!({"text":"x","summary_max_bytes":true})),
+        ("query", json!({"text":"x","summary_max_bytes":1.0})),
+        ("query", json!({"text":"x","summary_max_bytes":u64::MAX})),
         ("episode", json!({"action":"revise"})),
         ("save", json!({"summary":"x","source":{"namespace":"test"}})),
         (
@@ -522,8 +558,8 @@ fn every_native_operation_has_an_explicit_capability_matrix() {
         ("save", 2),
         ("capture", 2),
         ("retag", 2),
-        ("edit_body", 3),
-        ("edit_summary", 3),
+        ("edit_body", 2),
+        ("edit_summary", 2),
         ("episode", 0),
         ("link", 2),
         ("supersede", 3),
@@ -608,4 +644,133 @@ async fn separate_clients_share_small_read_budget_without_mutation_catalog() {
     );
     assert_eq!(server.calls.load(Ordering::Relaxed), before);
     client.close().await;
+}
+
+#[test]
+fn checked_content_authority_matches_core_membership_not_tag_presence() {
+    for (expected, replacement, minimum) in [
+        (json!([]), json!(["fact"]), 2),
+        (json!(["core"]), json!(["core", "fact"]), 2),
+        (json!(["core", "fact"]), json!(["core"]), 2),
+        (json!(["core"]), json!(["core"]), 2),
+        (json!([]), json!(["core"]), 3),
+        (json!([]), json!([" Core "]), 3),
+        (json!(["core"]), json!([]), 3),
+    ] {
+        let args = json!({"id":NODE,"expected_tags":expected,"tags":replacement});
+        let access = request_access("retag", &args).unwrap();
+        let checked = admission::prepare("retag", &args, access).unwrap();
+        assert_eq!(
+            required_profile("retag", &args, access).max(if checked.operator() { 3 } else { 0 }),
+            minimum
+        );
+    }
+    for (tool, args) in [
+        (
+            "edit_body",
+            json!({"id":NODE,"expected_body_revision":"a".repeat(64),"body":"replacement"}),
+        ),
+        (
+            "edit_summary",
+            json!({"id":NODE,"expected_snapshot_sha256":"a".repeat(64),"summary":"replacement"}),
+        ),
+    ] {
+        let access = request_access(tool, &args).unwrap();
+        let checked = admission::prepare(tool, &args, access).unwrap();
+        assert!(!checked.operator());
+        assert_eq!(required_profile(tool, &args, access), 2);
+    }
+    // ASCII casing and separator trimming cannot hide protected membership.
+    for tool in ["save", "capture", "ingest"] {
+        assert_eq!(
+            required_profile(tool, &json!({"tags":[" Core "]}), RequestAccess::Write),
+            3
+        );
+    }
+    // The generic core check is creation-only, not ambient write authority.
+    for tool in ["save", "capture", "ingest"] {
+        assert_eq!(
+            required_profile(tool, &json!({"tags":["core"]}), RequestAccess::Write),
+            3
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_content_edit_profile_parity_denies_before_operation_send() {
+    for (profile, rank) in [
+        ("read-only", 0),
+        ("receipt-grounded", 1),
+        ("curator", 2),
+        ("operator", 3),
+    ] {
+        let server = fixture(profile, false, false);
+        let client = ConfiguredClient::new(selection(&server.url, true, true)).unwrap();
+        let catalog = client.catalog("alpha").await.unwrap();
+        for tool in ["retag", "edit_body", "edit_summary"] {
+            assert_eq!(
+                catalog.iter().any(|schema| schema["name"] == tool),
+                rank >= 2
+            );
+        }
+        for (tool, args, minimum) in [
+            (
+                "retag",
+                json!({"id":NODE,"expected_tags":[],"tags":["fact"]}),
+                2,
+            ),
+            (
+                "retag",
+                json!({"id":NODE,"expected_tags":["core"],"tags":["core","fact"]}),
+                2,
+            ),
+            (
+                "retag",
+                json!({"id":NODE,"expected_tags":[],"tags":["core"]}),
+                3,
+            ),
+            (
+                "retag",
+                json!({"id":NODE,"expected_tags":["core"],"tags":[]}),
+                3,
+            ),
+            (
+                "edit_body",
+                json!({"id":NODE,"expected_body_revision":"a".repeat(64),"body":"replacement"}),
+                2,
+            ),
+            (
+                "edit_summary",
+                json!({"id":NODE,"expected_snapshot_sha256":"a".repeat(64),"summary":"replacement"}),
+                2,
+            ),
+            ("forget", json!({"id":NODE}), 3),
+        ] {
+            let before = server.calls.load(Ordering::Relaxed);
+            let result = client.call("alpha", tool, args).await;
+            assert_eq!(
+                result.is_ok(),
+                rank >= minimum,
+                "{profile} {tool}: {result:?}"
+            );
+            assert_eq!(
+                server.calls.load(Ordering::Relaxed) - before,
+                usize::from(rank >= minimum),
+                "denied edit reached owner"
+            );
+        }
+        let before = server.calls.load(Ordering::Relaxed);
+        assert!(
+            client
+                .call(
+                    "alpha",
+                    "retag",
+                    json!({"id":NODE,"expected_tags":["core","core"],"tags":[]})
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(server.calls.load(Ordering::Relaxed), before);
+        client.close().await;
+    }
 }

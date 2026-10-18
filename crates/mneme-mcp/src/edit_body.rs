@@ -43,7 +43,7 @@ pub(crate) fn tool_schema() -> Value {
         "expected_body_revision",
         "body"
     ]);
-    json!({"name":"edit_body","description":"Replace only a semantic node's body using its opaque body_revision guard. Operator only; explicit db and expected_db_id required. UTF-8 body up to 256 KiB; empty allowed. Episode, touchstone and anchored source bodies refuse. Stale guard refuses: inspect before forming new intent. Original provenance describes original submission, not replacement content. Previous blobs are retained; this is not erasure or revision history. No automatic replay or embedding update.","inputSchema":schema})
+    json!({"name":"edit_body","description":"Replace only a semantic node's body using its opaque body_revision guard. Requires curator; trusted store-wide editing includes existing core notes. Explicit db and expected_db_id required. UTF-8 body up to 256 KiB; empty allowed. Episode, touchstone and anchored source bodies refuse. Stale guard refuses: inspect before forming new intent. Original provenance describes original submission, not replacement content. Previous blobs are retained; this is not erasure or revision history. No automatic replay or embedding update.","inputSchema":schema})
 }
 
 #[cfg(test)]
@@ -53,67 +53,83 @@ mod tests {
     #[cfg(not(feature = "fastembed"))]
     #[tokio::test]
     async fn body_edit_native_cas_and_admission() {
-        let (root, mut server, nodes) = crate::concern::tests::fixture().await;
-        server.capability = CapabilityPolicy::new(CapabilityProfile::Operator, false);
-        let db_id = server.registry.checkout("project").unwrap().db_id;
-        let original = nodes[0].clone();
-        let raw = json!({"db":"project","expected_db_id":db_id.to_string(),"id":original.id().0.to_string(),"expected_body_revision":original.body_revision().to_string(),"body":"new body"});
-        let call = |args: Value| {
-            let server = &server;
-            async move {
-                call_tool_authorized(
-                    &server.registry,
-                    &server.sessions,
-                    &server.cold_work,
-                    server.capability,
-                    "edit_body",
-                    &args,
-                )
+        for core in [false, true] {
+            let (root, server, nodes) = crate::concern::tests::fixture().await;
+            let db_id = server.registry.checkout("project").unwrap().db_id;
+            let original = if core {
+                call_tool_authorized(&server.registry, &server.sessions, &server.cold_work,
+                CapabilityPolicy::operator(), "retag",
+                &json!({"db":"project","expected_db_id":db_id.to_string(),"id":nodes[0].id().0.to_string(),"expected_tags":["fact"],"tags":["core","fact"]})).await.unwrap();
+                server
+                    .registry
+                    .checkout("project")
+                    .unwrap()
+                    .mem
+                    .get_node(nodes[0].id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            } else {
+                nodes[0].clone()
+            };
+            let raw = json!({"db":"project","expected_db_id":db_id.to_string(),"id":original.id().0.to_string(),"expected_body_revision":original.body_revision().to_string(),"body":"new body"});
+            let call = |args: Value| {
+                let server = &server;
+                async move {
+                    call_tool_authorized(
+                        &server.registry,
+                        &server.sessions,
+                        &server.cold_work,
+                        server.capability,
+                        "edit_body",
+                        &args,
+                    )
+                    .await
+                }
+            };
+            let reply = call(raw.clone()).await.unwrap();
+            assert_eq!(reply["id"], raw["id"]);
+            assert_ne!(reply["body_revision"], raw["expected_body_revision"]);
+            assert!(reply.get("body").is_none());
+            assert!(call(raw.clone()).await.is_err());
+            let read = server
+                .registry
+                .checkout("project")
+                .unwrap()
+                .mem
+                .get_node(original.id())
                 .await
-            }
-        };
-        let reply = call(raw.clone()).await.unwrap();
-        assert_eq!(reply["id"], raw["id"]);
-        assert_ne!(reply["body_revision"], raw["expected_body_revision"]);
-        assert!(reply.get("body").is_none());
-        assert!(call(raw.clone()).await.is_err());
-        let read = server
-            .registry
-            .checkout("project")
-            .unwrap()
-            .mem
-            .get_node(original.id())
+                .unwrap()
+                .unwrap();
+            assert_eq!(read.summary(), original.summary());
+            assert_eq!(read.provenance(), original.provenance());
+            assert_eq!(read.tag_set(), original.tag_set());
+            let mut malformed = raw;
+            malformed["expected_body_revision"] = json!("A".repeat(64));
+            assert!(PreparedBodyEdit::parse(&malformed).is_err());
+            let guarded = json!({"db":"project","expected_db_id":db_id.to_string(),"id":original.id().0.to_string(),"expected_body_revision":read.body_revision().to_string(),"body":""});
+            call_tool_authorized(
+                &server.registry,
+                &server.sessions,
+                &server.cold_work,
+                CapabilityPolicy::operator(),
+                "database_control",
+                &json!({"db":"project","action":"release"}),
+            )
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(read.summary(), original.summary());
-        assert_eq!(read.provenance(), original.provenance());
-        assert_eq!(read.tag_set(), original.tag_set());
-        let mut malformed = raw;
-        malformed["expected_body_revision"] = json!("A".repeat(64));
-        assert!(PreparedBodyEdit::parse(&malformed).is_err());
-        let guarded = json!({"db":"project","expected_db_id":db_id.to_string(),"id":original.id().0.to_string(),"expected_body_revision":read.body_revision().to_string(),"body":""});
-        call_tool_authorized(
-            &server.registry,
-            &server.sessions,
-            &server.cold_work,
-            server.capability,
-            "database_control",
-            &json!({"db":"project","action":"release"}),
-        )
-        .await
-        .unwrap();
-        assert!(
-            call(guarded.clone())
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("maintenance")
-        );
-        let mut missing = guarded;
-        missing["db"] = json!("unavailable");
-        assert!(call(missing).await.is_err());
-        drop(server);
-        std::fs::remove_dir_all(root).unwrap();
+            assert!(
+                call(guarded.clone())
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("maintenance")
+            );
+            let mut missing = guarded;
+            missing["db"] = json!("unavailable");
+            assert!(call(missing).await.is_err());
+            drop(server);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

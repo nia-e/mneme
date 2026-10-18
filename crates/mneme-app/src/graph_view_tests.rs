@@ -193,12 +193,27 @@ async fn highwaters_are_not_snapshots_and_cursors_bind_database() {
     assert_eq!(fresh["coverage"]["edges_seen"], 2);
 }
 #[tokio::test]
-async fn summaries_keep_exact_slots_and_bound_escaped_json_tags_and_utf8() {
+async fn summaries_keep_exact_slots_and_bound_maximum_canonical_tags_and_escaped_utf8() {
     let store = Arc::new(MemStore::new(DEFAULT_DIM));
     let mem = memory(store.clone());
     let tags = (0..64)
+        .map(|index| format!("{index:02}{}", "x".repeat(254)))
+        .collect::<Vec<_>>();
+    // Historical read projections must still account for JSON escaping even
+    // though new store writes admit only canonical tags. No writer bypass.
+    let historical_tags = (0..64)
         .map(|index| format!("{index:02}{}", "\"".repeat(254)))
         .collect::<Vec<_>>();
+    let historical = node(999, &"\"é".repeat(1000), historical_tags);
+    let historical_card = summary_card(&historical);
+    assert_eq!(historical_card["tags_truncated"], true);
+    assert!(serde_json::to_vec(&historical_card["tags"]).unwrap().len() <= MAX_TAGS_JSON_BYTES);
+    assert!(
+        serde_json::to_vec(&topology_card(&historical)["tags"])
+            .unwrap()
+            .len()
+            <= MAX_TOPOLOGY_TAGS_JSON_BYTES
+    );
     for index in 1..=64 {
         store
             .put_node(&node(index, &"\"é".repeat(1000), tags.clone()))
@@ -328,11 +343,11 @@ fn topology_tags_are_exact_raw_prefixes_with_count_and_json_byte_truncation() {
 }
 
 #[tokio::test]
-async fn maximally_escaped_topology_pages_keep_all_nodes_and_bounded_continuations() {
+async fn maximum_canonical_tag_topology_pages_keep_all_nodes_and_bounded_continuations() {
     let store = Arc::new(MemStore::new(DEFAULT_DIM));
     let mem = memory(store.clone());
     let tags = (0..64)
-        .map(|index| format!("{index:02}{}", "\"".repeat(124)))
+        .map(|index| format!("{index:02}{}", "x".repeat(254)))
         .collect::<Vec<_>>();
     for index in 1..=513 {
         store
@@ -357,7 +372,9 @@ async fn maximally_escaped_topology_pages_keep_all_nodes_and_bounded_continuatio
         );
         for card in response["nodes"].as_array().unwrap() {
             assert!(card.get("summary").is_none() && card.get("body").is_none());
-            assert_eq!(card["tags"], json!([tags[0]]));
+            // A maximum-length tag plus JSON framing exceeds this deliberately
+            // narrow eager prefix allowance; no tag may leak past the bound.
+            assert_eq!(card["tags"], json!([]));
             assert_eq!(card["tags_truncated"], true);
             ids.push(card["id"].clone());
         }
@@ -403,7 +420,7 @@ async fn eager_topology_tags_do_not_invoke_inference_or_learning() {
     }
     let store = Arc::new(MemStore::new(DEFAULT_DIM));
     store
-        .put_node(&node(1, "Never exported", vec!["directory:src".into()]))
+        .put_node(&node(1, "Never exported", vec!["directory-src".into()]))
         .await
         .unwrap();
     let before = store.export().canonical_value().unwrap();
@@ -417,7 +434,7 @@ async fn eager_topology_tags_do_not_invoke_inference_or_learning() {
     )
     .with_body_store(Arc::new(mneme_body::InlineStore::new()));
     let page = run(&mem, json!({"action":"topology"})).await;
-    assert_eq!(page["nodes"][0]["tags"], json!(["directory:src"]));
+    assert_eq!(page["nodes"][0]["tags"], json!(["directory-src"]));
     assert_eq!(page["coverage"]["body_reads"], 0);
     assert_eq!(before, store.export().canonical_value().unwrap());
 }

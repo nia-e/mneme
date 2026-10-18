@@ -18,7 +18,7 @@ pub(crate) async fn contract(store: &dyn GraphStore) {
     );
     store.put_edge(&edge).await.unwrap();
     let old = node.tag_set().clone();
-    let new = BoundedTagSet::try_from_iter(["possibility", "possibility/parked"]).unwrap();
+    let new = BoundedTagSet::try_from_iter(["possibility", "possibility-parked"]).unwrap();
     let replaced = store
         .compare_replace_node_tags(node.id(), &old, &new)
         .await

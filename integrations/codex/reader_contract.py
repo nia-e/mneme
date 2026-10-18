@@ -6,6 +6,7 @@ selection is not a model-quality comparison or a claim of installed deployment.
 
 import json
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Literal, NotRequired, TypedDict, cast
 
 MAX_SUMMARY_BYTES = 700
@@ -32,6 +33,9 @@ kind=episode is a historical account, not present advice; kind=semantic is a
 ordinary note, which may be a reusable lesson or a prospective idea/open question.
 Use explicit wording to distinguish a proposal from an established result;
 applicability still needs checking.
+Optional semantic created_utc is the note's creation time, not a freshness,
+verification or last-updated claim. Missing means unknown. Model dates use UTC
+whole seconds; exact millisecond timestamps remain in the underlying records.
 An unresolved possibility may be useful without being an actionable task; it does
 not imply chosen intent or permission to pursue, close or retag it. Episode current_edition_id
 is the recall-time observed editorial head, not a fresh head read or current
@@ -62,8 +66,9 @@ edits; changed_snapshot, missing and unavailable are narrow current-read caveats
 not conflicts or instructions to repair the author. references_omitted and
 incomplete summaries are explicit gaps. Referrer origins are bounded one-hop
 rediscovery, not endorsement or semantic learning routes. Preserve dormant
-significance without inventing feelings. You may surface a candidate for the
-working author's deliberate judgment, never author/rewrite personal meaning.
+significance without inventing feelings. You may select an existing touchstone
+card for the foreground author's judgment; never author/rewrite personal meaning.
+New touchstone nominations belong to the separate recorder, not this selector.
 """
 PROMPT_PREFIX = "Select memory IDs for this current context. Return only schema JSON.\nPAYLOAD:\n"
 OUTPUT_SCHEMA = {"type": "object", "additionalProperties": False,
@@ -98,6 +103,7 @@ class _CommonProjection(TypedDict):
 
 class SemanticProjection(_CommonProjection):
     kind: Literal["semantic"]
+    created_utc: NotRequired[str]
     touchstone: NotRequired[dict]
 
 
@@ -222,22 +228,28 @@ def validate_episode_origins(value, edition_id: str) -> list[EpisodeOriginProjec
     return cast(list[EpisodeOriginProjection], json.loads(_encode(value)))
 
 
-class EpisodeCoordinates(TypedDict):
+class _EpisodeIdentityCoordinates(TypedDict):
     episode_id: str
     edition_id: str
     revision: int
     current_edition_id: str
-    occurred: OccurrenceProjection
-    recorded_at: int
-    edition_recorded_at: int
     thread: str | None
     recording_session: str | None
     origins: list[EpisodeOriginProjection]
     occurrence_contexts: NotRequired[list[OccurrenceContextProjection]]
 
 
-class EpisodeProjection(_CommonProjection, EpisodeCoordinates):
+class EpisodeCoordinates(_EpisodeIdentityCoordinates):
+    occurred: OccurrenceProjection
+    recorded_at: int
+    edition_recorded_at: int
+
+
+class EpisodeProjection(_CommonProjection, _EpisodeIdentityCoordinates):
     kind: Literal["episode"]
+    occurred_utc: dict
+    recorded_at_utc: str
+    edition_recorded_at_utc: str
 
 
 CardProjection = SemanticProjection | EpisodeProjection
@@ -245,6 +257,93 @@ EPISODE_FIELDS = ("episode_id", "edition_id", "revision", "current_edition_id",
                   "occurred", "recorded_at", "edition_recorded_at", "thread",
                   "recording_session", "origins")
 EPISODE_OPTIONAL_FIELDS = ("occurrence_contexts",)
+EPISODE_TIME_FIELDS = ("occurred", "recorded_at", "edition_recorded_at")
+EPISODE_DISPLAY_TIME_FIELDS = tuple(field + "_utc" for field in EPISODE_TIME_FIELDS)
+MAX_CALENDAR_MILLIS = 253402300799999  # 9999-12-31T23:59:59.999Z; shared with native.
+
+
+def format_timestamp_millis(value: int) -> str:
+    """A display only: floor milliseconds to whole UTC seconds, never local time."""
+    if type(value) is not int or not 0 <= value < (1 << 128):
+        raise ValueError("invalid_input")
+    if value > MAX_CALENDAR_MILLIS:
+        return f"out of calendar range ({value} Unix epoch ms)"
+    time = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=value // 1000)
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _display_timestamp_millis(value) -> int:
+    """Validate a retained display without normalizing its exact visible bytes."""
+    if not isinstance(value, str):
+        raise ValueError("invalid_input")
+    fallback = re.fullmatch(r"out of calendar range \(([0-9]{1,39}) Unix epoch ms\)", value)
+    try:
+        if fallback:
+            millis = int(fallback[1])
+        else:
+            time = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+            delta = time - datetime(1970, 1, 1, tzinfo=UTC)
+            millis = (delta.days * 86400 + delta.seconds) * 1000
+        if format_timestamp_millis(millis) == value:
+            return millis
+    except (ValueError, OverflowError):
+        pass
+    raise ValueError("invalid_input")
+
+
+def validate_semantic_created_fields(card: dict) -> dict:
+    """Preserve an optional core Timestamp (u128 Unix epoch milliseconds)."""
+    if "created" not in card:
+        return {}
+    value = card["created"]
+    if type(value) is not int or not 0 <= value < (1 << 128):
+        raise ValueError("invalid_input")
+    return {"created": value}
+
+
+def semantic_model_time_fields(card: dict) -> dict:
+    return {"created_utc": format_timestamp_millis(value)
+            for value in validate_semantic_created_fields(card).values()}
+
+
+def validate_semantic_display_time_fields(card: dict) -> dict:
+    if "created_utc" not in card:
+        return validate_semantic_created_fields(card)  # Retained pre-readable delivery.
+    if "created" in card:
+        raise ValueError("invalid_input")
+    _display_timestamp_millis(card["created_utc"])
+    return {"created_utc": card["created_utc"]}
+
+
+def episode_model_time_fields(card: dict) -> dict:
+    """Project an account without changing its canonical historical coordinates."""
+    fields = dict(validate_episode_projection_fields(card))
+    occurred = fields.pop("occurred")
+    fields["occurred_utc"] = {"kind": occurred["kind"], **{
+        key + "_utc": format_timestamp_millis(value)
+        for key, value in occurred.items() if key != "kind"}}
+    for key in ("recorded_at", "edition_recorded_at"):
+        fields[key + "_utc"] = format_timestamp_millis(fields.pop(key))
+    return fields
+
+
+def validate_episode_display_fields(card: dict) -> dict:
+    if not any(key in card for key in EPISODE_DISPLAY_TIME_FIELDS):
+        return validate_episode_projection_fields(card)  # Exact retained old view.
+    if (any(key in card for key in EPISODE_TIME_FIELDS)
+            or any(key not in card for key in EPISODE_DISPLAY_TIME_FIELDS)):
+        raise ValueError("invalid_input")
+    occurred = card["occurred_utc"]
+    if not isinstance(occurred, dict) or not isinstance(occurred.get("kind"), str):
+        raise ValueError("invalid_input")
+    keys = {"unknown": (), "point": ("at",), "range": ("start", "end")}.get(occurred["kind"])
+    if keys is None or set(occurred) != {"kind", *(key + "_utc" for key in keys)}:
+        raise ValueError("invalid_input")
+    raw = {**card, "occurred": {"kind": occurred["kind"], **{
+        key: _display_timestamp_millis(occurred[key + "_utc"]) for key in keys}},
+        **{key: _display_timestamp_millis(card[key + "_utc"])
+           for key in ("recorded_at", "edition_recorded_at")}}
+    return episode_model_time_fields(raw)
 
 
 def validate_episode_projection_fields(card: dict) -> EpisodeCoordinates:
@@ -323,14 +422,15 @@ def _project_card(card: dict) -> CardProjection:
         if any(field in card for field in (*EPISODE_FIELDS, *EPISODE_OPTIONAL_FIELDS)):
             raise ValueError("invalid_input")
         item = SemanticProjection(id=card["id"], summary=summary, kind="semantic")
+        item.update(semantic_model_time_fields(card))
         if "touchstone" in card:
             from touchstone_contract import validate_touchstone_view
             item["touchstone"] = validate_touchstone_view(card["touchstone"])
     elif kind == "episode":
-        if "touchstone" in card:
+        if "touchstone" in card or "created" in card:
             raise ValueError("invalid_input")
         item = EpisodeProjection(id=card["id"], summary=summary, kind="episode",
-                                 **validate_episode_projection_fields(native_card))
+                                 **episode_model_time_fields(native_card))
     else:
         raise ValueError("invalid_input")
     for field, limit in (("source", 256), ("fingerprint", 128)):

@@ -13,8 +13,7 @@ pub(crate) enum Checked {
 }
 impl Checked {
     pub fn operator(&self) -> bool {
-        matches!(self, Self::Body(_) | Self::Summary(_))
-            || matches!(self,Self::Retag(request) if request.requires_operator())
+        matches!(self,Self::Retag(request) if request.requires_operator())
     }
     pub fn verify(&self, result: &Value, db: &str, id: &str) -> Result<(), AnyErr> {
         match self {
@@ -99,6 +98,7 @@ pub(crate) fn prepare(tool: &str, args: &Value, _access: RequestAccess) -> Resul
                     "max_nodes",
                     "min_relevance",
                     "archived",
+                    "summary_max_bytes",
                     "tags",
                 ][..]
             } else {
@@ -119,6 +119,9 @@ pub(crate) fn prepare(tool: &str, args: &Value, _access: RequestAccess) -> Resul
             integer(&raw, "depth", 0, 12)?;
             integer(&raw, "max_nodes", 1, 256)?;
             number(&raw, "min_relevance")?;
+            if let Some(value) = raw.get("summary_max_bytes") {
+                serde_json::from_value::<mneme_app::query::SummaryMaxBytes>(value.clone())?;
+            }
             boolean(&raw, "archived")?;
             boolean(&raw, "observe")?;
             if let Some(tags) = raw.get("tags") {
@@ -127,7 +130,7 @@ pub(crate) fn prepare(tool: &str, args: &Value, _access: RequestAccess) -> Resul
                     return Err("too many tags".into());
                 }
                 for tag in tags {
-                    mneme_core::validate_tag(tag.as_str().ok_or("tags must be strings")?)?;
+                    mneme_core::normalize_tag(tag.as_str().ok_or("tags must be strings")?)?;
                 }
             }
         }
@@ -239,7 +242,7 @@ pub(crate) fn prepare(tool: &str, args: &Value, _access: RequestAccess) -> Resul
                     return Err("too many tags".into());
                 }
                 for tag in tags {
-                    mneme_core::validate_tag(tag.as_str().ok_or("tags must be strings")?)?;
+                    mneme_core::normalize_tag(tag.as_str().ok_or("tags must be strings")?)?;
                 }
             }
         }

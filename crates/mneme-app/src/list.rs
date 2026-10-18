@@ -108,15 +108,15 @@ impl PreparedList {
                 return Err(format!("list {name} must not be null").into());
             }
         }
-        let input: PreparedNodeList = serde_json::from_value(raw.clone())?;
+        let mut input: PreparedNodeList = serde_json::from_value(raw.clone())?;
         if input.kind != "nodes" {
             return Err("list kind must be nodes, touchstones or tags".into());
         }
         if !(1..=MAX_LIST_LIMIT).contains(&input.limit) {
             return Err(format!("nodes list limit must be 1..={MAX_LIST_LIMIT}").into());
         }
-        if let Some(tag) = &input.tag {
-            mneme_core::validate_tag(tag)?;
+        if let Some(tag) = &mut input.tag {
+            *tag = mneme_core::normalize_tag(tag)?;
         }
         if let Some(after) = &input.after {
             if after.is_empty()
@@ -170,7 +170,7 @@ fn node_card(node: &Node) -> Value {
         "summary":&summary[..end], "summary_truncated":end < summary.len(),
         "tags":node.tags().collect::<Vec<_>>(),
         "kind":if node.is_semantic() { "note" } else { "episode" },
-        "created":node.created(),"stability":node.stability(),"confidence":node.confidence()
+        "created":node.created(),"created_utc":mneme_present::format_timestamp_millis(node.created()),"stability":node.stability(),"confidence":node.confidence()
     })
 }
 

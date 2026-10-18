@@ -394,6 +394,7 @@ impl mneme_core::ports::EpisodeStore for MemStore {
             }
             inner.validate_edge_upsert_capacity((edge.from, edge.to))?;
         }
+        super::validate_current_node_tags(node)?;
         let next_epoch = inner.preflight_epoch_advance(true)?;
         inner.episode_projection.publish(node, previous.as_ref());
         inner.replace_node(node.clone());

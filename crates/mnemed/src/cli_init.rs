@@ -516,6 +516,12 @@ mod tests {
             "registry_reader.py",
             "registry_recording.py",
             "core_hook.py",
+            "assessment.py",
+            "capture_source.py",
+            "claude_observer.py",
+            "claude_runtime.py",
+            "claude_config.py",
+            "claude_hooks.py",
         ] {
             assert!(
                 inventory.contains(&format!("codex/{helper}")),

@@ -265,6 +265,61 @@ class StepTests(unittest.TestCase):
         self.assertTrue(self.step())
         self.assertEqual(subject.inspect(DB)["actions"][0]["status"],"applied")
 
+    def core_target(self, owner, identifier):
+        node = target(identifier)
+        if identifier == A:
+            node["tags"].append("core")
+        return node, FP
+
+    def core_decisions(self, targets, _context):
+        self.runtime.calls += 1
+        self.runtime.batches.append([node["id"] for node in targets])
+        return {"provider_attempt":True,"usage":{"input_tokens":100,"output_tokens":10},
+                "decisions":[{"id":node["id"],"disposition":"retag","tags":[*node["tags"],"people"]} for node in targets]}
+
+    def test_core_cleanup_default_allows_protected_preserving_tags_but_false_filters(self):
+        with patch.object(FakeOwner, "target", lambda owner, identifier: self.core_target(owner, identifier)), patch.object(self.runtime, "steward", self.core_decisions):
+            self.assertTrue(self.step())
+            self.assertEqual(len(FakeOwner.writes), 1)
+            self.assertIn("core", FakeOwner.writes[0][1])
+        # Fresh independent journal exercises strict filtering without changing
+        # existing historical receipts or model accounting.
+        self.now += 86400
+        self.config["core_cleanup"] = False
+        FakeOwner.ids = [A, B]
+        self.resume(A)
+        self.resume(B)
+        before = len(FakeOwner.writes)
+        with patch.object(FakeOwner, "target", lambda owner, identifier: self.core_target(owner, identifier)), patch.object(self.runtime, "steward", self.core_decisions):
+            self.assertTrue(self.step())
+        self.assertEqual(self.runtime.batches[-1], [B])
+        self.assertEqual([row[0]["id"] for row in FakeOwner.writes[before:]], [B])
+
+    def test_core_cleanup_policy_changed_during_assessment_never_dispatches(self):
+        def narrow(targets, ctx):
+            result = self.core_decisions(targets, ctx)
+            self.config["core_cleanup"] = False
+            return result
+        with patch.object(FakeOwner, "target", lambda owner, identifier: self.core_target(owner, identifier)), patch.object(self.runtime, "steward", narrow):
+            self.assertTrue(self.step())
+        self.assertEqual(FakeOwner.writes, [])
+        self.assertEqual(len(self.accounts), 1)
+        self.assertEqual(subject.inspect(DB)["actions"], [])
+
+    def test_dispatch_cannot_bypass_core_cleanup_or_membership_locus(self):
+        core = target()
+        core["tags"].append("core")
+        with self.assertRaises(ValueError):
+            subject._require_background_retag({"core_cleanup":False}, core, ["core","people"])
+        for node, tags in ((core,["people"]),(target(),["core","people"])):
+            with self.assertRaises(ValueError):
+                subject._require_background_retag({}, node, tags)
+        for alias in ("Core", "core_", "core:", "ordinary/tag"):
+            with self.assertRaises(ValueError):
+                subject._require_background_retag({}, target(), [alias])
+        subject._require_background_retag({}, core, ["core","people"])
+        subject._require_background_retag({"core_cleanup":False}, target(), ["people"])
+
     def test_provider_unknown_is_charged_and_not_repeated(self):
         self.runtime.mode="crash"
         self.assertTrue(self.step())

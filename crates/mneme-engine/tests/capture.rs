@@ -72,6 +72,90 @@ fn other_request<'a>(key: &'a str) -> Capture<'a> {
 }
 
 #[tokio::test]
+async fn new_capture_normalizes_tags_but_replay_proof_binds_raw_spelling() {
+    let store = Arc::new(MemStore::new(DEFAULT_DIM));
+    let mem = memory(store.clone(), Arc::new(InlineStore::new()));
+    let raw = || {
+        let mut raw = request(b"evidence");
+        raw.tags = &[" Foo_Bar ", "foo-bar", "RUST:LIBS"];
+        raw
+    };
+    let proof = raw().validated_replay_proof().unwrap();
+    let result = mem.capture(raw()).await.unwrap();
+    let node = store.get_node(result.id).await.unwrap().unwrap();
+    assert_eq!(node.tags().collect::<Vec<_>>(), ["foo-bar", "rust-libs"]);
+    let Provenance::External { source } = node.provenance() else {
+        panic!("source")
+    };
+    assert!(proof.matches_source(source));
+    assert!(mem.capture(raw()).await.unwrap().replayed);
+    let mut changed = raw();
+    changed.tags = &["foo-bar", "rust-libs"];
+    assert!(matches!(
+        mem.capture(changed).await,
+        Err(Error::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn unsupported_new_capture_tag_rejects_without_materializing() {
+    let store = Arc::new(MemStore::new(DEFAULT_DIM));
+    let mem = memory(store.clone(), Arc::new(InlineStore::new()));
+    let raw = || {
+        let mut raw = request(b"evidence");
+        raw.tags = &["C++"];
+        raw
+    };
+    assert!(raw().validated_replay_proof().is_ok());
+    let id = raw().validated_source().unwrap().node_id();
+    assert!(matches!(
+        mem.capture(raw()).await,
+        Err(Error::InvalidInput(_))
+    ));
+    assert!(store.get_node(id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn exact_legacy_unsupported_tag_replay_precedes_new_materialization_policy() {
+    let store = Arc::new(MemStore::new(DEFAULT_DIM));
+    let bodies = Arc::new(InlineStore::new());
+    let body = bodies.put(b"evidence").await.unwrap();
+    let mem = memory(store.clone(), bodies);
+    let raw = || {
+        let mut raw = request(b"evidence");
+        raw.tags = &["C++"];
+        raw
+    };
+    let proof = raw().validated_replay_proof().unwrap();
+    let node = Node::try_new(
+        proof.source().node_id(),
+        "A durable fact about the project",
+        body,
+        ["cpp"],
+        Provenance::External {
+            source: proof.source().clone(),
+        },
+        0.5,
+        0.5,
+        NodeStatus::Active,
+        0,
+    )
+    .unwrap();
+    // Simulate an already-migrated canonical tag with its original exact receipt.
+    store
+        .commit_capture(&node, &vec![1.0; DEFAULT_DIM], &proof)
+        .await
+        .unwrap();
+    assert!(mem.capture(raw()).await.unwrap().replayed);
+    let mut changed = raw();
+    changed.key = "new-source";
+    assert!(matches!(
+        mem.capture(changed).await,
+        Err(Error::InvalidInput(_))
+    ));
+}
+
+#[tokio::test]
 async fn fresh_capture_uses_v2_and_incoming_proof_accepts_only_both_named_v1_digests() {
     let store = Arc::new(MemStore::new(DEFAULT_DIM));
     let mem = memory(store.clone(), Arc::new(InlineStore::new()));

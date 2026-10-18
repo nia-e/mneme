@@ -19,7 +19,8 @@ _DEFAULT_CLIENT = McpClient
 from recording_contract import AssociationTarget
 from reader_contract import plan as reader_plan
 from reader_contract import (EPISODE_FIELDS, EPISODE_OPTIONAL_FIELDS,
-                             validate_episode_projection_fields, validate_recording_session)
+                             validate_episode_projection_fields, validate_recording_session,
+                             validate_semantic_created_fields)
 from librarian_policy import LibrarianBudget
 from touchstone_contract import validate_touchstone_view, validate_touchstone_retrieval
 from service import ConnectConfig, MAX_CONFIG_BYTES, load_config, client_for_service
@@ -145,6 +146,8 @@ def _candidate(entry, lane):
     if len(identifier) != NODE_ID_LEN:
         return None
     candidate = {"id": identifier, "kind": "episode" if lane == "episodes" else "semantic"}
+    if lane != "episodes":
+        candidate.update(validate_semantic_created_fields(entry))
     if "touchstone" in entry:
         if lane == "episodes":
             raise ValueError("episode cannot own touchstone")
@@ -264,6 +267,11 @@ def _card(node, identifier, candidate=None):
     if candidate is not None and kind != candidate["kind"]:
         raise ValueError("recall/get memory kind mismatch")
     facets = {"kind": kind}
+    created = validate_semantic_created_fields(node) if kind == "semantic" else {}
+    if (candidate is not None and kind == "semantic"
+            and validate_semantic_created_fields(candidate)
+            and candidate["created"] != created.get("created")):
+        raise ValueError("semantic creation timestamp mismatch")
     if candidate is not None and "touchstone" in candidate:
         if kind != "semantic" or not isinstance(node.get("touchstone"), dict):
             raise ValueError("touchstone readback mismatch")
@@ -330,7 +338,7 @@ def _card(node, identifier, candidate=None):
                                               separators=(",", ":"), ensure_ascii=False)
                                  .encode("utf-8")).hexdigest()
     return {"id": identifier, "summary": _short(summary, MAX_SUMMARY_BYTES),
-            "status": status, "source": source, "fingerprint": fingerprint, **facets}
+            "status": status, "source": source, "fingerprint": fingerprint, **facets, **created}
 
 
 def _preference_node(node):

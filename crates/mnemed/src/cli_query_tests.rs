@@ -58,13 +58,13 @@ fn query_text_and_tags_are_bounded_and_canonical() {
     exact.tags = vec!["x".repeat(256)];
     assert!(validate_cli_query(&exact, base, 5).is_ok());
     exact.tags = vec!["é".repeat(128)];
-    assert!(validate_cli_query(&exact, base, 5).is_ok());
+    assert!(validate_cli_query(&exact, base, 5).is_err());
     exact.tags = vec!["é".repeat(129)];
     assert!(validate_cli_query(&exact, base, 5).is_err());
     let mut args = query_args(&["--tag", "same", "--tag", "same"]);
-    assert!(validate_cli_query(&args, base, 5).is_err());
-    args.tags = vec![" untrimmed".into()];
-    assert!(validate_cli_query(&args, base, 5).is_err());
+    assert!(validate_cli_query(&args, base, 5).is_ok());
+    args.tags = vec![" Smoke / Fixture ".into()];
+    assert!(validate_cli_query(&args, base, 5).is_ok());
     args.tags = vec!["x".repeat(MAX_CLI_QUERY_TAG_BYTES + 1)];
     assert!(validate_cli_query(&args, base, 5).is_err());
     args.tags.clear();
@@ -96,4 +96,106 @@ fn human_warning_names_partial_seed_coverage_without_claiming_final_coverage() {
     assert!(warning.contains("primary seed_coverage is partial"));
     assert!(warning.contains("not final graph-hit coverage"));
     assert_eq!(warning.matches("seed_coverage").count(), 1);
+}
+
+#[test]
+fn query_summary_bound_is_typed_before_local_or_remote_admission() {
+    assert_eq!(query_args(&[]).summary_max_bytes, None);
+    for accepted in ["1", "320", "16384"] {
+        let args = query_args(&["--summary-max-bytes", accepted]);
+        assert_eq!(
+            args.summary_max_bytes.unwrap().get(),
+            accepted.parse::<usize>().unwrap()
+        );
+    }
+    for rejected in [
+        "0",
+        "16385",
+        "18446744073709551615",
+        "18446744073709551616",
+        "true",
+        "1.0",
+        "-1",
+    ] {
+        for route in [vec![], vec!["--remote", "http://127.0.0.1:1"]] {
+            let mut argv = vec!["mnemed"];
+            argv.extend(route);
+            argv.extend(["query", "q", "--summary-max-bytes", rejected]);
+            assert!(Cli::try_parse_from(argv).is_err(), "{rejected}");
+        }
+    }
+    assert!(
+        Cli::try_parse_from([
+            "mnemed",
+            "recall-context",
+            "q",
+            "--summary-max-bytes",
+            "320"
+        ])
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn query_summary_prefix_preserves_order_created_and_authored_content() {
+    let store = Arc::new(MemStore::new(DEFAULT_DIM));
+    let mem = Memory::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        Arc::new(HashingEmbedder::new(DEFAULT_DIM)),
+        Arc::new(SystemClock),
+        Config {
+            graph_seed_cap: 0,
+            ..Config::default()
+        },
+    )
+    .with_body_store(Arc::new(InlineStore::new()));
+    let original = format!("unicode query 🦋{}", "é".repeat(2000));
+    let id = mem
+        .ingest(Ingest::new(
+            &original,
+            b"authored body",
+            &["prefix-fixture"],
+            Provenance::derived_empty(),
+        ))
+        .await
+        .unwrap();
+    let args = query_args(&[
+        "--tag",
+        "prefix-fixture",
+        "--k",
+        "1",
+        "--max-nodes",
+        "1",
+        "--depth",
+        "0",
+        "--min-relevance",
+        "0",
+    ]);
+    let (batch, body_limit) = retrieve_cli_query(&mem, &args).await.unwrap();
+    let full = serde_json::to_value(
+        cli_query_envelope(&mem, batch, false, body_limit, SummaryMaxBytes::FULL)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let (batch, body_limit) = retrieve_cli_query(&mem, &args).await.unwrap();
+    let clipped = serde_json::to_value(
+        cli_query_envelope(&mem, batch, false, body_limit, "17".parse().unwrap())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let full_hit = &full["lanes"]["primary"]["hits"][0];
+    let clip_hit = &clipped["lanes"]["primary"]["hits"][0];
+    assert_eq!(full_hit["summary"], original);
+    assert_eq!(full_hit["summary_truncated"], false);
+    assert_eq!(clip_hit["summary"], "unicode query ");
+    assert_eq!(clip_hit["summary_truncated"], true);
+    for field in ["id", "created", "lane_rank", "evidence", "status"] {
+        assert_eq!(clip_hit[field], full_hit[field], "{field}");
+    }
+    assert_eq!(clipped["partial"], true);
+    assert_eq!(mem.get_node(id).await.unwrap().unwrap().summary(), original);
 }

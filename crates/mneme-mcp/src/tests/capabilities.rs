@@ -226,6 +226,95 @@ fn capability_classification_is_closed_over_every_public_tool_and_action() {
     assert!(catalog_minimum_capability("future_tool").is_none());
 }
 
+#[tokio::test]
+async fn normalized_core_input_is_operator_gated_before_owner_checkout() {
+    let source = json!({"namespace":"test","key":"core-alias","reference":"test://core-alias"});
+    let curator_catalog = tool_schemas(CapabilityPolicy::new(CapabilityProfile::Curator, false));
+    let operator_catalog = tool_schemas(CapabilityPolicy::operator());
+    for tag in ["Core", " CORE ", "/core._"] {
+        for (name, mut arguments) in [
+            ("ingest", json!({"db":"missing","summary":"candidate"})),
+            (
+                "capture",
+                json!({"db":"missing","summary":"candidate","source":source}),
+            ),
+            (
+                "save",
+                json!({"db":"missing","summary":"candidate","source":source}),
+            ),
+            (
+                "save",
+                json!({"db":"missing","kind":"episode","summary":"candidate","source":source}),
+            ),
+            (
+                "episode",
+                json!({"db":"missing","action":"append","summary":"candidate","source":source}),
+            ),
+        ] {
+            arguments["tags"] = json!([tag]);
+            let parsed = ValidatedToolArguments::parse(name, &arguments).unwrap();
+            assert_eq!(
+                parsed.kind().capability_class(),
+                CapabilityClass::Operator,
+                "{name}: {arguments}"
+            );
+            assert!(
+                !schema_accepts(tool_input_schema(&curator_catalog, name), &arguments),
+                "curator {name}: {arguments}"
+            );
+            assert!(
+                schema_accepts(tool_input_schema(&operator_catalog, name), &arguments),
+                "operator {name}: {arguments}"
+            );
+            let denied = empty_profile_server(CapabilityProfile::Curator)
+                .dispatch("tools/call", json!({"name":name,"arguments":arguments}))
+                .await
+                .unwrap();
+            let error = denied["content"][0]["text"].as_str().unwrap();
+            assert!(error.contains("capability profile"), "{error}");
+            assert!(
+                !error.contains("unknown database"),
+                "owner was consulted: {error}"
+            );
+        }
+    }
+    let ordinary = json!({"db":"missing","summary":"candidate","tags":["c_o_r_e"]});
+    assert_eq!(
+        ValidatedToolArguments::parse("ingest", &ordinary)
+            .unwrap()
+            .kind()
+            .capability_class(),
+        CapabilityClass::Curator
+    );
+    assert!(schema_accepts(
+        tool_input_schema(&curator_catalog, "ingest"),
+        &ordinary
+    ));
+}
+
+#[test]
+fn retag_schema_preserves_literal_prior_membership_and_normalizes_new_intent() {
+    let catalog = tool_schemas(CapabilityPolicy::new(CapabilityProfile::Curator, false));
+    let schema = tool_input_schema(&catalog, "retag");
+    for (expected, replacement, allowed) in [
+        ("Core", "core", false),
+        ("Core", "Core", false),
+        ("core", " Core ", true),
+        ("core", "ordinary", false),
+        ("ordinary", "CORE", false),
+    ] {
+        let arguments = json!({"db":"missing","expected_db_id":ulid::Ulid::from(2).to_string(),
+            "id":ulid::Ulid::from(1).to_string(),"expected_tags":[expected],"tags":[replacement]});
+        assert_eq!(schema_accepts(schema, &arguments), allowed, "{arguments}");
+        let parsed = ValidatedToolArguments::parse("retag", &arguments).unwrap();
+        assert_eq!(
+            parsed.kind().capability_class() == CapabilityClass::Curator,
+            allowed,
+            "{arguments}"
+        );
+    }
+}
+
 #[test]
 fn golden_tool_catalogs_match_capability_profiles() {
     let cases: &[(CapabilityProfile, &[&str])] = &[
@@ -289,6 +378,8 @@ fn golden_tool_catalogs_match_capability_profiles() {
                 "episode",
                 "concern",
                 "retag",
+                "edit_body",
+                "edit_summary",
                 "get",
                 "list",
                 "neighbors",

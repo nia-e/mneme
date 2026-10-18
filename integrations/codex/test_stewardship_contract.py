@@ -37,8 +37,54 @@ class ContractTests(unittest.TestCase):
         _,ctx=self.prepare([node])
         for tags in (["rust"],[*node["tags"],"pursuing"],["rust","core","identity:person-43","closed","possibility"]):
             with self.assertRaises(ValueError):contract.validate_answer({"decisions":[{"id":A,"disposition":"retag","tags":tags}]},ctx)
+        # Retained colon tags must survive unchanged, not be silently renamed
+        # by Rust's fresh replacement normalization. Only inspection is safe.
+        with self.assertRaises(ValueError):
+            contract.validate_answer({"decisions":[{"id":A,"disposition":"retag","tags":[*node["tags"],"people"]}]},ctx)
+        for disposition in ("noop", "unresolved"):
+            result=contract.validate_answer({"decisions":[{"id":A,"disposition":disposition,"tags":node["tags"]}]},ctx)
+            self.assertEqual(result["decisions"][0]["tags"], sorted(node["tags"]))
+        node["tags"].remove("identity:person-42")
+        _,ctx=self.prepare([node])
         result=contract.validate_answer({"decisions":[{"id":A,"disposition":"retag","tags":[*node["tags"],"people"]}]},ctx)
-        self.assertIn("people",result["decisions"][0]["tags"])
+        self.assertIn("people", result["decisions"][0]["tags"])
+
+    def test_protected_aliases_cannot_enter_a_fresh_replacement(self):
+        _,ctx=self.prepare()
+        for tag in ("Core", "core_", "Routing_Judgment", "Collaboration.Preference", "Possibility",
+                    "rust/compiler", "rust:compiler", "rust compiler", "a--b", "café", "C++"):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                contract.validate_answer({"decisions":[{"id":A,"disposition":"retag","tags":["rust", tag]}]},ctx)
+        self.assertIn("[a-z0-9]+(?:-[a-z0-9]+)*", contract.instructions(ctx))
+
+    def test_historical_aliases_are_readable_but_never_renormalized_in_writes(self):
+        node=target();node["tags"]=["Core", "Rust Compiler", "producer:codex", "café"]
+        before=copy.deepcopy(node)
+        prompt,ctx=self.prepare([node])
+        self.assertEqual(json.loads(prompt)["targets"][0]["tags"], sorted(node["tags"]))
+        for disposition in ("noop", "unresolved"):
+            result=contract.validate_answer({"decisions":[{"id":A,"disposition":disposition,"tags":node["tags"]}]},ctx)
+            self.assertEqual(result["decisions"][0]["tags"], sorted(node["tags"]))
+        with self.assertRaises(ValueError):
+            contract.validate_answer({"decisions":[{"id":A,"disposition":"retag","tags":[*node["tags"],"people"]}]},ctx)
+        self.assertEqual(node,before)
+        with self.assertRaises(ValueError):
+            contract.validate_retag_tags(["rust"], ["Core", "rust"])
+        with self.assertRaises(ValueError):
+            contract.validate_retag_tags(["Core", "rust"], ["Core", "people"])
+        self.assertEqual(contract.validate_retag_tags(["core", "rust"], ["core", "rust", "people"]),
+                         ("core", "people", "rust"))
+
+    def test_foreground_only_core_cleanup_is_refused_before_prompt_and_on_typed_context(self):
+        node = target()
+        node["tags"].append("core")
+        self.assertIsNone(contract.prepare([node], context(), budget=LibrarianBudget(), core_cleanup=False)[0])
+        prompt, checked = contract.prepare([node], context(), budget=LibrarianBudget())
+        self.assertIsNotNone(prompt)
+        narrowed = contract.Context(checked.targets_json, checked.answer_bytes, False)
+        with self.assertRaises(ValueError):
+            contract.validate_answer({"decisions":[{"id":A,"disposition":"retag","tags":["rust","core","people"]}]}, narrowed)
+        self.assertIsNotNone(contract.prepare([target()], context(), budget=LibrarianBudget(), core_cleanup=False)[0])
 
     def test_noop_and_unresolved_cannot_smuggle_mutations(self):
         _,ctx=self.prepare()

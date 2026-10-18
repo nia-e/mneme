@@ -31,6 +31,7 @@ mod save;
 mod snapshot;
 mod touchstone;
 
+use mneme_app::query::SummaryMaxBytes;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::num::{NonZeroU16, NonZeroU32};
@@ -1082,7 +1083,14 @@ async fn call_tool_authorized(
             let primary = batch
                 .primary
                 .into_iter()
-                .map(mcp_query_hit)
+                .map(|hit| {
+                    mcp_query_hit(
+                        hit,
+                        request
+                            .summary_max_bytes
+                            .unwrap_or(SummaryMaxBytes::MCP_DEFAULT),
+                    )
+                })
                 .collect::<Vec<_>>();
             let ids = primary
                 .iter()
@@ -1427,7 +1435,7 @@ async fn call_tool_authorized(
             )
         }
 
-        ToolRequestKind::Episode(_) => {
+        ToolRequestKind::Episode { .. } => {
             let prepared = episode::PreparedEpisode::parse(a)?;
             let is_mutation = prepared.is_mutation();
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
@@ -1653,21 +1661,12 @@ async fn call_tool_authorized(
                         let neighbors = hit
                             .neighbors
                             .iter()
-                            .map(|nb| {
-                                let (summary, summary_truncated) =
-                                    bounded_summary(nb.node.summary(), MAX_SUMMARY_BYTES);
-                                json!({
-                                    "id": nb.node.id().0.to_string(),
-                                    "summary": summary,
-                                    "summary_truncated": summary_truncated,
-                                    "kind": kind_str(nb.kind),
-                                    "incoming": nb.incoming,
-                                    "weight": nb.weight,
-                                })
-                            })
+                            .map(mcp_recall_neighbor)
                             .collect::<Vec<_>>();
                         json!({
                             "id": hit.node.id().0.to_string(),
+                            "created": hit.node.created(),
+                            "created_utc": mneme_present::format_timestamp_millis(hit.node.created()),
                             "score": hit.score,
                             "status": status_str(hit.node.status()),
                             "summary": summary,
@@ -2343,14 +2342,29 @@ fn context_presentation_budget(max_nodes: usize) -> PresentationBudget {
     .expect("the fixed MCP context budget is valid")
 }
 
-fn mcp_query_hit(hit: RetrievalHit) -> QueryHit {
-    let (summary, summary_truncated) = bounded_summary(hit.node.summary(), MAX_SUMMARY_BYTES);
+fn mcp_recall_neighbor(neighbor: &mneme_engine::RecalledNeighbor) -> Value {
+    let (summary, summary_truncated) = bounded_summary(neighbor.node.summary(), MAX_SUMMARY_BYTES);
+    json!({
+        "id": neighbor.node.id().0.to_string(),
+        "created": neighbor.node.created(),
+        "created_utc": mneme_present::format_timestamp_millis(neighbor.node.created()),
+        "summary": summary,
+        "summary_truncated": summary_truncated,
+        "kind": kind_str(neighbor.kind),
+        "incoming": neighbor.incoming,
+        "weight": neighbor.weight,
+    })
+}
+
+fn mcp_query_hit(hit: RetrievalHit, limit: SummaryMaxBytes) -> QueryHit {
+    let (summary, summary_truncated) = limit.prefix(hit.node.summary());
     let status = match hit.node.status() {
         NodeStatus::Active => QueryNodeStatus::Active,
         NodeStatus::Archived => QueryNodeStatus::Archived,
     };
     QueryHit::new(
         hit.node.id(),
+        hit.node.created(),
         hit.lane_rank,
         mcp_rank_evidence(hit.evidence),
         status,
@@ -2522,7 +2536,10 @@ impl CapabilityClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolRequestKind {
     Databases,
-    Activity { after: u64, limit: usize },
+    Activity {
+        after: u64,
+        limit: usize,
+    },
     DatabaseControl(DatabaseControlRequest),
     SnapshotCreate,
     Status,
@@ -2542,7 +2559,10 @@ enum ToolRequestKind {
     EditSummary,
     Save(IngestRequest),
     Concern(concern::ConcernAction),
-    Episode(EpisodeAction),
+    Episode {
+        action: EpisodeAction,
+        capability: EpisodeCapability,
+    },
     Feedback,
     Forget,
     Link(LinkRequest),
@@ -2582,7 +2602,7 @@ impl ToolRequestKind {
             Self::EditSummary => "edit_summary",
             Self::Save(_) => "save",
             Self::Concern(_) => "concern",
-            Self::Episode(_) => "episode",
+            Self::Episode { .. } => "episode",
             Self::Feedback => "feedback",
             Self::Forget => "forget",
             Self::Link(_) => "link",
@@ -2621,7 +2641,8 @@ impl ToolRequestKind {
                     CapabilityClass::Operator
                 }
             },
-            Self::SnapshotCreate | Self::EditBody | Self::EditSummary => CapabilityClass::Operator,
+            Self::SnapshotCreate => CapabilityClass::Operator,
+            Self::EditBody | Self::EditSummary => CapabilityClass::Curator,
             Self::Concern(action) => match action {
                 concern::ConcernAction::List => CapabilityClass::ReadOnly,
                 concern::ConcernAction::Notice | concern::ConcernAction::RecordFinding => {
@@ -2646,7 +2667,7 @@ impl ToolRequestKind {
                 IngestRequest::Ordinary => CapabilityClass::Curator,
                 IngestRequest::Core => CapabilityClass::Operator,
             },
-            Self::Episode(action) => match action.capability() {
+            Self::Episode { capability, .. } => match capability {
                 EpisodeCapability::ReadOnly => CapabilityClass::ReadOnly,
                 EpisodeCapability::Curator => CapabilityClass::Curator,
                 EpisodeCapability::Operator => CapabilityClass::Operator,
@@ -2698,7 +2719,10 @@ impl ToolRequestKind {
                 | Self::Concern(
                     concern::ConcernAction::Notice | concern::ConcernAction::RecordFinding
                 )
-                | Self::Episode(EpisodeAction::Append | EpisodeAction::Revise)
+                | Self::Episode {
+                    action: EpisodeAction::Append | EpisodeAction::Revise,
+                    ..
+                }
                 | Self::Feedback
                 | Self::Forget
                 | Self::Link(_)
@@ -2718,6 +2742,7 @@ impl ToolRequestKind {
 /// embedder, or reach a backend. Caller-supplied budgets are rejected outside
 /// the public range; only trusted configured defaults are clamped.
 struct PublicQueryInput<'a> {
+    summary_max_bytes: Option<SummaryMaxBytes>,
     text: &'a str,
     k: Option<usize>,
     depth: Option<u8>,
@@ -2729,6 +2754,13 @@ struct PublicQueryInput<'a> {
 
 impl<'a> PublicQueryInput<'a> {
     fn parse(arguments: &'a Value, lifecycle_flags: bool) -> Result<Self, AnyErr> {
+        let summary_max_bytes = arguments
+            .get("summary_max_bytes")
+            .map(|value| serde_json::from_value::<SummaryMaxBytes>(value.clone()))
+            .transpose()?;
+        if !lifecycle_flags && summary_max_bytes.is_some() {
+            return Err("summary_max_bytes is only supported by query; recall_context has its own bounded presentation".into());
+        }
         let text = bounded_required(arguments, "text", MAX_QUERY_BYTES)?;
         let k = optional_bounded_usize(arguments, "k", 1, MAX_QUERY_K)?;
         let depth = optional_bounded_usize(arguments, "depth", 0, usize::from(MAX_QUERY_DEPTH))?
@@ -2743,6 +2775,7 @@ impl<'a> PublicQueryInput<'a> {
             false
         };
         Ok(Self {
+            summary_max_bytes,
             text,
             k,
             depth,
@@ -2955,26 +2988,18 @@ fn validate_tags(tags: &[String]) -> Result<(), AnyErr> {
     if tags.len() > MAX_TAGS {
         return Err(format!("tags has {} entries; maximum is {MAX_TAGS}", tags.len()).into());
     }
-    let mut unique = HashSet::new();
-    for (index, tag) in tags.iter().enumerate() {
-        if tag.is_empty() || tag.trim() != tag || tag.chars().any(char::is_control) {
-            return Err(format!(
-                "tags[{index}] must be nonblank, trimmed, and contain no controls"
-            )
-            .into());
-        }
-        if tag.len() > MAX_TAG_BYTES {
-            return Err(format!(
-                "tags[{index}] is {} UTF-8 bytes; maximum is {MAX_TAG_BYTES}",
-                tag.len()
-            )
-            .into());
-        }
-        if !unique.insert(tag) {
-            return Err(format!("duplicate tag {tag:?}").into());
-        }
-    }
+    // These are fresh ingest/query/filter inputs, not exact submitted capture
+    // proofs or expected CAS values. Admission and materialization share policy.
+    mneme_core::normalize_tags(tags)?;
     Ok(())
+}
+
+/// JSON Schema counterpart of normalization to the protected `core` tag.
+/// Expected/current tag sets deliberately use literal membership instead.
+const CORE_TAG_INPUT_PATTERN: &str = "^[- _:/.]*[cC][oO][rR][eE][- _:/.]*$";
+
+fn core_tag_input_schema() -> Value {
+    json!({"pattern": CORE_TAG_INPUT_PATTERN})
 }
 
 fn unit_interval(label: &str, value: f64) -> Result<f32, AnyErr> {
@@ -3164,7 +3189,7 @@ fn parse_kind(s: &str) -> Result<EdgeKind, AnyErr> {
 
 fn node_json(n: &Node) -> Value {
     let (summary, summary_truncated) = bounded_summary(n.summary(), MAX_SUMMARY_BYTES);
-    json!({
+    let mut value = json!({
         "id": n.id().0.to_string(),
         "content_fingerprint": mneme_core::ports::routing_content_fingerprint(n),
         "content_fingerprint_codec": mneme_core::ports::ROUTING_CONTENT_FINGERPRINT_CODEC,
@@ -3187,7 +3212,7 @@ fn node_json(n: &Node) -> Value {
         "grounded_use_count": n.grounded_use_count(),
         "origin_commit": n.origin_commit(),
         "provenance": match n.provenance() {
-            Provenance::Web { url, fetched } => json!({ "type": "web", "url": url.as_str(), "fetched": *fetched as u64 }),
+            Provenance::Web { url, fetched } => json!({ "type": "web", "url": url.as_str(), "fetched": *fetched as u64, "fetched_utc":mneme_present::format_timestamp_millis(*fetched) }),
             Provenance::Conversation { session, turn } => json!({ "type": "conversation", "session": session.to_string(), "turn": turn }),
             Provenance::External { source } => json!({
                 "type": "external",
@@ -3203,7 +3228,18 @@ fn node_json(n: &Node) -> Value {
             }),
             Provenance::Derived { from } => json!({ "type": "derived", "from": from.iter().map(|id| id.0.to_string()).collect::<Vec<_>>() }),
         },
-    })
+    });
+    value
+        .as_object_mut()
+        .expect("node presentation object")
+        .extend(
+            serde_json::to_value(mneme_present::NodeTimePresentation::new(n))
+                .expect("typed calendar dates serialize")
+                .as_object()
+                .expect("calendar dates object")
+                .clone(),
+        );
+    value
 }
 
 // ---- tool schemas -----------------------------------------------------------
@@ -3635,7 +3671,10 @@ fn classify_tool_request(
             validate_tags(&tags)?;
             optional_unit_interval(arguments, "stability")?;
             optional_unit_interval(arguments, "confidence")?;
-            let action = if tags.iter().any(|tag| tag == "core") {
+            let action = if tags
+                .iter()
+                .any(|tag| mneme_core::normalize_tag(tag).is_ok_and(|tag| tag == "core"))
+            {
                 IngestRequest::Core
             } else {
                 IngestRequest::Ordinary
@@ -3655,9 +3694,13 @@ fn classify_tool_request(
         "capture" => Ok(ToolRequestKind::Capture(
             capture::PreparedCapture::parse(arguments)?.authority(),
         )),
-        "episode" => Ok(ToolRequestKind::Episode(
-            episode::PreparedEpisode::parse(arguments)?.action(),
-        )),
+        "episode" => {
+            let prepared = episode::PreparedEpisode::parse(arguments)?;
+            Ok(ToolRequestKind::Episode {
+                action: prepared.action(),
+                capability: prepared.capability(),
+            })
+        }
         "feedback" => {
             optional_string(arguments, "from")?
                 .map(parse_id)
@@ -3964,7 +4007,7 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
         ),
         tool(
             "query",
-            "Semantic recall as mneme.query.v3: one ordinary primary lane with rank evidence and a retrieval stamp. Tagged queries include primary seed_coverage and bounded work; seed coverage is not final graph-hit coverage. Read-only: retrieval records no exposure and trains nothing.",
+            "Semantic recall as mneme.query.v3: one ordinary primary lane with rank evidence and a retrieval stamp. Semantic created is node recording time in Unix epoch milliseconds; created_utc is its whole-second UTC calendar display (YYYY-MM-DDTHH:MM:SSZ), not update/verification time or proof of current validity. Tagged queries include primary seed_coverage and bounded work; seed coverage is not final graph-hit coverage. Read-only: retrieval records no exposure and trains nothing.",
             json!({
                 "db": db_prop(),
                 "text": { "type": "string", "maxLength": MAX_QUERY_BYTES, "description": "what you're working on / looking for (8192 UTF-8 bytes max)" },
@@ -3972,6 +4015,7 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
                 "depth": { "type": "integer", "minimum": 0, "maximum": MAX_QUERY_DEPTH, "description": "graph traversal depth; 0 is the exact sparse+dense graph-off baseline" },
                 "max_nodes": { "type": "integer", "minimum": 1, "maximum": MAX_QUERY_NODES },
                 "min_relevance": { "type": "number", "minimum": 0, "maximum": 1 },
+                "summary_max_bytes": SummaryMaxBytes::schema(),
                 "archived": { "type": "boolean", "description": "also search forgotten nodes" },
                 "tags": { "type": "array", "maxItems": MAX_TAGS, "items": { "type": "string", "maxLength": MAX_TAG_BYTES } },
             }),
@@ -3979,7 +4023,7 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
         ),
         tool(
             "recall_context",
-            "Recall task-relevant context with db and text (not query). Omitted db selects project or the sole registered owner; use db explicitly otherwise. Read-only mneme.context.v7: semantic memories plus current lexical and exact linked historical scenes, packed together into bounded JSON. Both lane capacities follow effective max_nodes and share the 32 KiB envelope (including a 2 KiB control reserve). Tag filters skip lexical episode search; links may supply indirect scenes, not episode tag matches. Frozen initial hits supply one-hop reference anchors; explicit reference coverage reports bounded work and unknown tails. These are partial request windows, not complete discovery. Retrieval metadata and overall partial report omissions or unavailable lanes. Optional observe makes non-authorizing exact card digests and contributing graph paths mandatory within the same total byte limit. Byte pressure triggers bounded same-window repacking without another retrieval; fewer cards may be emitted, with explicit omissions. Optional routing_hints (whole canonical compact array at most 16 KiB, fixed boost/weaken) affect ordering within the existing traversal shortlists; oversized or malformed batches are wholly neutral, never a signed prefix. Stale/wrong-db hints fall back to baseline ordering. Presence including [] requests validated/ignored diagnostics and, with observe, native semantic route bindings across the bounded returned window, without a separate eight-binding cutoff. Requested observation provenance is never silently dropped. Bindings exclude use timestamps and mutable external body bytes. No bodies, feedback receipt, exposure, or learning.",
+            "Recall task-relevant context with db and text (not query). Omitted db selects project or the sole registered owner; use db explicitly otherwise. Read-only mneme.context.v7: semantic memories plus current lexical and exact linked historical scenes, packed together into bounded JSON. Semantic created is node recording time in Unix epoch milliseconds; created_utc is its whole-second UTC calendar display (YYYY-MM-DDTHH:MM:SSZ), not update/verification time or proof of current validity. Episode scenes retain distinct numeric occurred, recorded_at and edition_recorded_at, with separate occurred_utc, recorded_at_utc and edition_recorded_at_utc calendar companions. Both lane capacities follow effective max_nodes and share the 32 KiB envelope (including a 2 KiB control reserve). Tag filters skip lexical episode search; links may supply indirect scenes, not episode tag matches. Frozen initial hits supply one-hop reference anchors; explicit reference coverage reports bounded work and unknown tails. These are partial request windows, not complete discovery. Retrieval metadata and overall partial report omissions or unavailable lanes. Optional observe makes non-authorizing exact card digests and contributing graph paths mandatory within the same total byte limit. Byte pressure triggers bounded same-window repacking without another retrieval; fewer cards may be emitted, with explicit omissions. Optional routing_hints (whole canonical compact array at most 16 KiB, fixed boost/weaken) affect ordering within the existing traversal shortlists; oversized or malformed batches are wholly neutral, never a signed prefix. Stale/wrong-db hints fall back to baseline ordering. Presence including [] requests validated/ignored diagnostics and, with observe, native semantic route bindings across the bounded returned window, without a separate eight-binding cutoff. Requested observation provenance is never silently dropped. Bindings exclude use timestamps and mutable external body bytes. No bodies, feedback receipt, exposure, or learning.",
             json!({
                 "db": db_prop(),
                 "routing_hints": context_observation::hints_schema(),
@@ -3995,7 +4039,7 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
         ),
         tool(
             "recall",
-            "Recall with a shallow one-hop expansion — the middle tier between `query` and a full `walk`. Returns bounded associative presentation candidates in one read-only call; it records no exposure and trains nothing. Use feedback/reflect only for grounded learning.",
+            "Recall with a shallow one-hop expansion — the middle tier between `query` and a full `walk`. Returns bounded associative presentation candidates in one read-only call. Hits and neighbors expose numeric created and whole-second UTC created_utc (YYYY-MM-DDTHH:MM:SSZ) as node recording time, not update/verification time or proof of current validity; it records no exposure and trains nothing. Use feedback/reflect only for grounded learning.",
             json!({
                 "db": db_prop(),
                 "text": { "type": "string", "maxLength": MAX_QUERY_BYTES, "description": "what you're working on / looking for (8192 UTF-8 bytes max)" },
@@ -4011,7 +4055,7 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
         edit_summary::tool_schema(),
         tool(
             "get",
-            "Read one memory by id in explicit db with its complete canonical summary (up to 16384 UTF-8 bytes; summary_truncated=false), content fingerprint and summary-only snapshot hash. Immutable touchstone metadata has separate current-resolution caveats. Historical episode editions stay exact. Optional body and edges are bounded; edge metadata reports returned/has_more, never a fake total. CORE/query/list summaries remain independently bounded.",
+            "Read one memory by id in explicit db with its complete canonical summary (up to 16384 UTF-8 bytes; summary_truncated=false), content fingerprint and summary-only snapshot hash. Dates have separate whole-second UTC companions; raw numeric times and immutable touchstone snapshots remain unchanged, with touchstone_references_utc rendering historical reference dates. Immutable touchstone metadata has separate current-resolution caveats. Historical episode editions stay exact. Optional body and edges are bounded; edge metadata reports returned/has_more, never a fake total. CORE/query/list summaries remain independently bounded.",
             json!({
                 "db": db_prop(), "id": { "type": "string" },
                 "expected_db_id": expected_db_id_prop(),
@@ -4038,7 +4082,7 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
         ),
         tool(
             "core",
-            "The always-loaded core set with bounded bodies. Returns truncation metadata, emits at most 32 nodes, and shares a 128 KiB body allowance fairly across them.",
+            "The always-loaded core set with bounded bodies and whole-second UTC date companions beside numeric timestamps. Returns truncation metadata, emits at most 32 nodes, and shares a 128 KiB body allowance fairly across them.",
             json!({
                 "db": db_prop(),
                 "max_body_bytes": { "type": "integer", "minimum": 1, "maximum": MAX_BODY_BYTES, "description": "per-body output cap; default 65536" },
@@ -4174,10 +4218,9 @@ fn catalog_minimum_capability(name: &str) -> Option<CapabilityClass> {
             Some(CapabilityClass::ReadOnly)
         }
         "reflect" => Some(CapabilityClass::ReceiptGrounded),
-        "snapshot_create" | "edit_body" | "edit_summary" => Some(CapabilityClass::Operator),
-        "retag" | "ingest" | "capture" | "save" | "link" | "contradict" => {
-            Some(CapabilityClass::Curator)
-        }
+        "snapshot_create" => Some(CapabilityClass::Operator),
+        "retag" | "edit_body" | "edit_summary" | "ingest" | "capture" | "save" | "link"
+        | "contradict" => Some(CapabilityClass::Curator),
         "decay" | "prune" | "feedback" | "forget" | "supersede" | "reconcile" | "merge" => {
             Some(CapabilityClass::Operator)
         }
@@ -4226,12 +4269,12 @@ fn apply_profile_schema_restrictions(tools: &mut [Value], profile: CapabilityPro
         ingest["description"] = json!(
             "Experimental raw ingest without replay identity; use save for ordinary memory. The core tag is forbidden; Core requires the operator profile."
         );
-        ingest["inputSchema"]["properties"]["tags"]["items"]["not"] = json!({ "const": "core" });
+        ingest["inputSchema"]["properties"]["tags"]["items"]["not"] = core_tag_input_schema();
         let capture = profile_tool_schema_mut(tools, "capture");
         capture["description"] = json!(
             "Save a sourced memory with explicit db, structured source, and summary. Compatibility route for installed callers; prefer save. The core tag is forbidden; Core requires the operator profile."
         );
-        capture["inputSchema"]["properties"]["tags"]["items"]["not"] = json!({ "const": "core" });
+        capture["inputSchema"]["properties"]["tags"]["items"]["not"] = core_tag_input_schema();
     }
 }
 

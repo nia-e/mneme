@@ -55,10 +55,12 @@ service, native database identity and workspace/session provenance together.
 
 ## At a natural checkpoint
 
-Save **zero to a few** items only when they would spare a later agent
-re-explanation, a repeated costly investigation, or a wrong decision. Good
-items are scoped work preferences, decisions with rationale,
-hard-won lessons and pitfalls. Do not archive the conversation, routine task
+Consider both useful knowledge and authored significance. Save scoped work
+preferences, decisions with rationale, hard-won lessons and pitfalls when they
+would spare a later agent re-explanation, a repeated costly investigation, or a
+wrong decision. Also consider a scene or changed understanding that matters to
+you even without a practical lesson; see [Authored meaning](#authored-meaning).
+Do not archive the conversation, routine task
 progress, secrets, raw prompts, or easy-to-rediscover source text. Keep
 cross-project user facts and personal/core identity out of project or misc work
 stores; generic reusable practice can be a scoped work lesson, not a user profile.
@@ -253,9 +255,28 @@ automatic write is added; zero records remains a valid outcome.
 
 ## Authored meaning
 
-The [touchstone contract](../../../docs/touchstones.md) separates deliberately
-authored personal meaning from librarian rediscovery. It does not expand startup
-core or authorize automatic identity edits. A memory packet may surface a relevant
-annotation and summary-only historical references; ordinary work decides what to
-do with them. Unsupported installed schemas remain unsupported, not upgraded by
-this skill.
+The foreground agent decides and authors its own meaning, not the user on its
+behalf. Consider touchstones at natural checkpoints; a reusable lesson is not
+required. Name the subject and write your own significance in first person,
+separately from factual claims about others. Briefly notify the user when useful;
+there is no user approval ceremony or quota to fill.
+
+A read-only worker can suggest a candidate; foreground judgment accepts, revises
+or declines it. You can also author directly under existing selected-owner write
+authority. The recorder's `touchstone_nomination` uses a bounded, durable local
+pending handoff, offered at a later prompt/tool boundary in the same session.
+Emitted means offered, not seen, approved or saved. The nomination is not a
+memory; do not simulate it with tag-only writes. Check installed handoff support.
+
+For a source-only nomination, inspect the cited source and decide whether to
+preserve the scene or note in the same authorized owner. If so, deliberately SAVE
+it, then GET its exact node or episode edition before authoring the touchstone.
+The nomination neither triggers an automatic scene write nor justifies an invented target.
+
+Follow the [touchstone contract](../../../docs/touchstones.md): ordinary note SAVE,
+explicit subject, and same-owner historical references from fresh foreground
+native GET snapshots.
+Core membership remains independent. A memory packet may rediscover an annotation,
+not rewrite its meaning. This guidance grants no new automatic writes or automatic
+identity edits; unsupported installed schemas remain unsupported, not upgraded by
+a skill.

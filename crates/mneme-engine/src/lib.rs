@@ -52,7 +52,7 @@ use mneme_core::{
     MAX_INCIDENT_EDGES, MAX_NODE_HYDRATION_BATCH, MAX_NODE_STATUS_BATCH, MAX_REMOTE_EDGE_PAGE_SIZE,
     MergeCandidate, MergeResolution, Node, NodeId, NodeInit, NodeStatus, NodeSummary, OriginCommit,
     Provenance, RemoteEdge, RemoteEdgeCursor, RemoteEdgePage, Resolution, Stability,
-    StrengthParams, Timestamp, validate_tag,
+    StrengthParams, Timestamp,
 };
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
@@ -519,7 +519,7 @@ struct PreparedCapture<'a> {
     legacy_active_digest: [u8; 32],
     summary: NodeSummary,
     body: &'a [u8],
-    tags: BoundedTagSet,
+    tags: mneme_core::SubmittedTagSet,
     links: Vec<CaptureLink>,
     touchstone: Option<mneme_core::touchstone::TouchstoneInput>,
     stability: Stability,
@@ -567,7 +567,7 @@ impl<'a> PreparedCapture<'a> {
         }
         let summary = NodeSummary::new(request.summary)
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
-        let tags = BoundedTagSet::try_from_iter(request.tags.iter().copied())
+        let tags = mneme_core::SubmittedTagSet::try_from_iter(request.tags.iter().copied())
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
         let stability = Stability::new(request.stability)
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
@@ -716,7 +716,7 @@ fn capture_request_digest(
     source: &CaptureSource,
     summary: &NodeSummary,
     body: &[u8],
-    tags: &BoundedTagSet,
+    tags: &mneme_core::SubmittedTagSet,
     stability: Stability,
     confidence: Confidence,
     links: &[CaptureLink],
@@ -804,7 +804,7 @@ impl<'a> TryFrom<Ingest<'a>> for PreparedIngest<'a> {
     fn try_from(request: Ingest<'a>) -> Result<Self> {
         let summary = NodeSummary::new(request.summary)
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
-        let tags = BoundedTagSet::try_from_iter(request.tags.iter().copied())
+        let tags = mneme_core::normalize_tags(request.tags.iter().copied())
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
         let stability = Stability::new(request.stability)
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
@@ -985,32 +985,18 @@ fn retrieval_index_semantics_fingerprint(
 /// Validate and canonicalize query tags before invoking the embedder. The core
 /// request repeats this check at the adapter boundary; doing it here prevents a
 /// malformed 33-tag or duplicate-tag request from buying model work first.
-fn normalize_tagged_query_tags<'a>(tags: &[&'a str]) -> Result<Vec<&'a str>> {
+fn normalize_tagged_query_tags(tags: &[&str]) -> Result<Vec<String>> {
     if tags.is_empty() || tags.len() > MAX_TAGGED_QUERY_TAGS {
         return Err(Error::InvalidInput(format!(
             "tagged retrieval requires 1..={MAX_TAGGED_QUERY_TAGS} query tags; got {}",
             tags.len()
         )));
     }
-    let mut normalized = Vec::with_capacity(tags.len());
-    for tag in tags {
-        validate_tag(tag).map_err(|error| {
-            Error::InvalidInput(format!(
-                "invalid tagged retrieval query tag {tag:?}: {error}"
-            ))
-        })?;
-        normalized.push(*tag);
-    }
-    normalized.sort_unstable();
-    if let Some(duplicate) = normalized
-        .windows(2)
-        .find_map(|pair| (pair[0] == pair[1]).then_some(pair[0]))
-    {
-        return Err(Error::InvalidInput(format!(
-            "tagged retrieval query tags must be unique; duplicate tag {duplicate:?}"
-        )));
-    }
-    Ok(normalized)
+    Ok(mneme_core::normalize_tags(tags.iter().copied())
+        .map_err(|error| Error::InvalidInput(error.to_string()))?
+        .iter()
+        .map(str::to_owned)
+        .collect())
 }
 
 /// Fingerprint only the declared tagged strategy and quota topology. Observed
@@ -1585,6 +1571,8 @@ impl Memory {
             }
         }
 
+        let tags = mneme_core::normalize_tags(request.tags.iter())
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
         let embedding = self.embed_one(request.summary.as_str()).await?;
         // BodyStore::put completes durable body publication before the backend
         // can point a canonical row at it. A cancelled/precommit call can leave
@@ -1598,7 +1586,7 @@ impl Memory {
             id,
             summary: request.summary,
             body: body_ref.clone(),
-            tags: request.tags,
+            tags,
             provenance: Provenance::External {
                 source: request.source,
             },
@@ -2043,8 +2031,12 @@ impl Memory {
             ))
         })?;
         let embedding = self.embedder.embed_query(query).await?;
-        let request =
-            TaggedAnnRequest::new(&embedding, normalized_tags.iter().copied(), &lanes, limits)?;
+        let request = TaggedAnnRequest::new(
+            &embedding,
+            normalized_tags.iter().map(String::as_str),
+            &lanes,
+            limits,
+        )?;
         let mut batch = self.vectors.tagged_ann(request.clone()).await?;
         // Storage adapters are trust boundaries. Validate again in the engine so
         // a custom implementation cannot smuggle malformed work, lanes, scores,
@@ -3640,8 +3632,10 @@ impl Memory {
         expected: &mneme_core::BoundedTagSet,
         replacement: &mneme_core::BoundedTagSet,
     ) -> Result<Node> {
+        let replacement = mneme_core::normalize_tags(replacement.iter())
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
         self.graph
-            .compare_replace_node_tags(id, expected, replacement)
+            .compare_replace_node_tags(id, expected, &replacement)
             .await
     }
 
@@ -3661,8 +3655,10 @@ impl Memory {
         replacement: &mneme_core::BoundedTagSet,
         guards: &mneme_core::ports::RetagContentGuards,
     ) -> Result<Node> {
+        let replacement = mneme_core::normalize_tags(replacement.iter())
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
         self.graph
-            .compare_replace_node_tags_guarded(id, expected, replacement, guards)
+            .compare_replace_node_tags_guarded(id, expected, &replacement, guards)
             .await
     }
 

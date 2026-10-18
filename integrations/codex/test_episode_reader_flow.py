@@ -22,6 +22,7 @@ from reader_contract import PROMPT_PREFIX
 from reader_runtime import ReaderRuntime
 from librarian_policy import resolve
 from reader_test_support import PublicationHandoff
+from fixture_model_dates import epoch_second_display
 from test_hook_recall import FakeClient, ID1, ID2, ID3, ID4, ID5, ID6, ID7, discovery_metadata, reference_origin
 
 
@@ -141,7 +142,8 @@ class EpisodeReaderFlowTests(unittest.TestCase):
                                              ["databases", "recall_context", "get", "get"])
                             self.assertEqual([card["summary"] for card in prompts[0]["cards"]], [summary, summary])
                             for projected, expected in zip(prompts[0]["cards"], episodes):
-                                self.assertEqual({key: projected[key] for key in expected}, expected)
+                                expected_view = epoch_second_display(expected)
+                                self.assertEqual({key: projected[key] for key in expected_view}, expected_view)
                             self.assertLessEqual(len(requests[0]["input"][0]["text"].encode()),
                                                  resolve(config).selector_prompt_bytes)
                             self.assertNotEqual(prompts[0]["cards"][0]["fingerprint"],
@@ -163,7 +165,8 @@ class EpisodeReaderFlowTests(unittest.TestCase):
                             text = delivered["hookSpecificOutput"]["additionalContext"]
                             shown, _ = json.JSONDecoder().raw_decode(text[text.index("["):])
                             self.assertEqual(len(shown), 1)
-                            self.assertEqual({key: shown[0][key] for key in wanted}, wanted)
+                            wanted_view = epoch_second_display(wanted)
+                            self.assertEqual({key: shown[0][key] for key in wanted_view}, wanted_view)
                             self.assertEqual(shown[0]["summary"], summary)
                             self.assertLessEqual(len(text.encode()), hooks.MAX_CONTEXT_BYTES)
                             state = json.loads(state_path.read_text())

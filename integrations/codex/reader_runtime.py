@@ -41,62 +41,9 @@ ROTATE_INPUT_TOKENS = 32_000
 USAGE_FIELDS = {"inputTokens": "input_tokens", "cachedInputTokens": "cached_input_tokens",
                 "cacheWriteInputTokens": "cache_write_input_tokens", "outputTokens": "output_tokens",
                 "reasoningOutputTokens": "reasoning_output_tokens", "totalTokens": "total_tokens"}
-RUNTIME_DIAGNOSTIC_REASONS = frozenset({
-    "unknown", "proposed", "abstained", "validation_failed", "invalid_output", "usage_unknown", "closed",
-    "invalid_timeout", "invalid_config", "unavailable", "binary_changed", "transport_error",
-    "frame_cap", "timeout", "invalid_events", "tool_activity", "provider_error", "thread_contract",
-    "invalid_input", "invalid_observation", "source_turn_incomplete", "unsupported_public_coverage",
-    "unsupported_public_selection",
-    "unsupported_public_omissions", "unsupported_json_depth", "unsupported_json_value",
-    "invalid_source_reference", "source_item_limit", "source_bytes_limit", "missing_tool_result",
-    "invalid_completion_boundary", "invalid_evidence_text", "evidence_item_limit",
-    "unsupported_evidence_kind", "source_prompt_missing", "source_order_invalid", "invalid_message_shape",
-    "unsupported_assistant_phase", "invalid_message_content", "invalid_content_slot", "invalid_tool_call",
-    "duplicate_tool_call", "invalid_tool_result", "unmatched_tool_result", "tool_type_mismatch",
-    "invalid_overlap_cards", "invalid_overlap_card", "static_prefix_limit", "authored_input_limit",
-    "invalid_project_focus", "invalid_project_focus_scope",
-})
-_VALIDATOR_DIAGNOSTIC_REASONS = frozenset({
-    "invalid_validation_context", "unsupported_json_depth", "unsupported_json_value", "answer_bytes_limit",
-    "invalid_answer_shape", "invalid_proposal_shape", "invalid_proposal_text", "invalid_citation_count",
-    "invalid_citation_shape", "invalid_citation_reference", "invalid_exact_quote", "duplicate_citation",
-    "invalid_association_shape", "invalid_association_reference", "invalid_association_kind",
-    "invalid_answer", "delivery_source_evidence_missing",
-})
-VALIDATION_DIAGNOSTIC_REASONS = _VALIDATOR_DIAGNOSTIC_REASONS | frozenset({
-    "unknown", "answer_missing", "answer_type", "invalid_json",
-})
+from assessment import (AssessmentMixin, AssessmentResponse, TransportError, assessment_diagnostic,
+    RUNTIME_DIAGNOSTIC_REASONS, VALIDATION_DIAGNOSTIC_REASONS, _VALIDATOR_DIAGNOSTIC_REASONS)
 _NO_ANSWER = object()
-
-
-def assessment_diagnostic(result):
-    """Project only static host codes; never serialize a model value or exception.
-
-    This optional diagnostic does not establish provenance or decide admission,
-    retry, accounting, or a write. Its two ASCII codes fit within 256 JSON bytes.
-    """
-    unknown = {"runtime_reason": "unknown", "validation_reason": "unknown"}
-    if type(result) is not dict:
-        return unknown
-    try:
-        reason = result.get("reason")
-        reason = (reason if type(reason) is str and len(reason) <= 64
-                  and reason in RUNTIME_DIAGNOSTIC_REASONS else "unknown")
-        validation = result.get("validation_reason")
-        validation = (validation if reason == "invalid_output" and type(validation) is str and len(validation) <= 64
-                      and validation in VALIDATION_DIAGNOSTIC_REASONS else "unknown")
-        return {"runtime_reason": reason, "validation_reason": validation}
-    except Exception:
-        return unknown
-
-
-class TransportError(Exception):
-    def __init__(self, reason, *, validation_reason=None):
-        super().__init__(reason)
-        self.reason = reason
-        self.validation_reason = (validation_reason if reason == "invalid_output"
-                                  and type(validation_reason) is str
-                                  and validation_reason in VALIDATION_DIAGNOSTIC_REASONS else "unknown")
 
 
 def _usage(value):
@@ -118,7 +65,7 @@ def _usage(value):
     return result
 
 
-class ReaderRuntime:
+class ReaderRuntime(AssessmentMixin):
     def __init__(self, config, scratch_dir: Path):
         self.config = dict(config) if isinstance(config, dict) else config
         try:
@@ -163,7 +110,7 @@ class ReaderRuntime:
         model = self._config("reader_model")
         if (not isinstance(codex, (str, Path)) or not Path(codex).is_absolute()
                 or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                or self.budget is None or model != self.budget.model):
+                or self.budget is None or self.budget.assessor != "codex" or model != self.budget.model):
             raise TransportError("invalid_config")
         codex = Path(codex)
         if not is_executable(codex):
@@ -359,7 +306,7 @@ class ReaderRuntime:
         self._pending.clear()
 
     def _turn(self, prompt, context, deadline, *, output_schema=OUTPUT_SCHEMA,
-              validator=validate_answer, answer_bytes=MAX_ANSWER_BYTES, strict_json=False):
+              validator=validate_answer, answer_bytes=MAX_ANSWER_BYTES, strict_json=False, raw_answer=False):
         thread_id = self._thread_id
         started = self._request("turn/start", {
             "threadId": thread_id, "input": [{"type": "text", "text": prompt}],
@@ -425,13 +372,15 @@ class ReaderRuntime:
         if not isinstance(answer, str):
             raise TransportError("invalid_output", validation_reason="answer_type")
         try:
-            raw_answer = answer.encode()
+            encoded_answer = answer.encode()
         except UnicodeError:
             raise TransportError("invalid_output") from None
-        if len(raw_answer) > answer_bytes:
+        if len(encoded_answer) > answer_bytes:
             raise TransportError("invalid_output", validation_reason="answer_bytes_limit")
+        if raw_answer:
+            return answer, last
         try:
-            parsed = decode_json(raw_answer) if strict_json else json.loads(answer)
+            parsed = decode_json(encoded_answer) if strict_json else json.loads(answer)
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise TransportError("invalid_output", validation_reason="invalid_json") from None
         try:
@@ -492,145 +441,42 @@ class ReaderRuntime:
                 receipt["elapsed_ms"] = (time.monotonic() - started) * 1000
         return receipt
 
-    def assess(self, observation, overlap_cards=None, *, timeout=TURN_SECONDS,
-               recording_scope="project", expected_db_id=None, global_preferences_enabled=False,
-               project_focus=None, tag_context=None, selected_stores=None) -> dict:
-        """Assess one complete public projection, never perform a native write.
+    def _assessment_seconds(self):
+        return TURN_SECONDS
 
-        A fresh recording-contract thread is used for every admitted assessment,
-        even after another assessment. The process can survive success, but its
-        thread cannot become a later reader/assessor conversation. A preflight
-        refusal leaves an existing reader thread alone. The caller must reserve
-        this one possible attempt durably before invoking us; no retry occurs.
-        """
-        receipt = self._fresh_assessment(
-            lambda: recording_contract.prepare(observation, overlap_cards, budget=self.budget,
-                recording_scope=recording_scope, expected_db_id=expected_db_id,
-                global_preferences_enabled=global_preferences_enabled, project_focus=project_focus,
-                **({"selected_stores": selected_stores} if selected_stores is not None else {}),
-                **({"tag_context": tag_context} if tag_context is not None else {})),
-            instructions=recording_contract.instructions_for, schema=recording_contract.schema_for,
-            validator=recording_contract.validate_answer, field="assessment", service_name="mneme_recorder",
-            success=lambda value: ("proposed" if value["proposal"] or value["maintenance"] else
-                                   "validation_failed" if (value.get("omissions", {}).get("proposal")
-                                       or value.get("omissions", {}).get("maintenance")) else "abstained"), timeout=timeout,
-            frame_bytes=MAX_RECORDING_FRAME_BYTES, answer_bytes=recording_contract.MAX_OUTPUT_BYTES)
-        value = receipt.pop("assessment")
-        if value is not None:
-            value = dict(value)
-            omissions = value.pop("omissions", None)
-            if omissions is not None:
-                receipt["intent_omissions"] = omissions
-        receipt.update(value if value is not None else {"proposal": None, "maintenance": []})
-        return receipt
+    def _begin_assessment(self, frame_bytes):
+        parked = (self.process, self._thread_id, self._turns, self._last_input)
+        self._frames = self._bytes = 0
+        self._current_usage = None
+        self._assessment_attempt = False
+        self._max_frame_bytes = frame_bytes
+        return parked
 
-    def steward(self, targets, tag_context, *, timeout=TURN_SECONDS) -> dict:
-        """Classify one finite summary batch, on a fresh tool-free thread."""
-        import stewardship_contract
-        receipt = self._fresh_assessment(
-            lambda: stewardship_contract.prepare(targets, tag_context, budget=self.budget),
-            instructions=stewardship_contract.instructions, schema=stewardship_contract.schema,
-            validator=stewardship_contract.validate_answer, field="stewardship",
-            service_name="mneme_tag_steward", success=lambda _: "classified", timeout=timeout,
-            frame_bytes=MAX_FRAME_BYTES,
-            answer_bytes=(self.budget.stewardship_answer_bytes if self.budget else MAX_ANSWER_BYTES))
-        value = receipt.pop("stewardship")
-        receipt["decisions"] = value["decisions"] if value is not None else None
-        return receipt
+    def _assessment_attempted(self):
+        return self._assessment_attempt or self.process is not None
 
-    def route(self, current, witnesses, *, expected_db_id, timeout=TURN_SECONDS) -> dict:
-        """One fresh bounded matching call; never a write or selector continuation."""
-        import routing_contract
-        return self._fresh_assessment(
-            lambda: routing_contract.prepare(current, witnesses, expected_db_id=expected_db_id, budget=self.budget),
-            instructions=lambda _: routing_contract.INSTRUCTIONS, schema=routing_contract.schema,
-            validator=routing_contract.validate_answer, field="routing", service_name="mneme_router",
-            success=lambda value: "matched" if value.hints else "neutral", timeout=timeout,
-            frame_bytes=MAX_FRAME_BYTES, answer_bytes=(self.budget.routing_answer_bytes if self.budget is not None
-                          else routing_contract.MAX_OUTPUT_BYTES))
+    def _run_assessment(self, request, *, service_name):
+        options = {"base_instructions": request.instructions, "service_name": service_name}
+        if self.process is None:
+            self._start(request.deadline, **options)
+        else:
+            self._start_thread(request.deadline, **options)
+        self._assessment_attempt = True
+        answer, usage = self._turn(request.prompt, None, request.deadline,
+            output_schema=request.output_schema, answer_bytes=request.answer_byte_limit,
+            strict_json=True, raw_answer=True)
+        return AssessmentResponse(answer, usage, self.budget.model)
 
-    def _fresh_assessment(self, preparation, *, instructions, schema, validator, field,
-                          service_name, success, timeout, frame_bytes, answer_bytes):
-        """Shared one-shot transport; role-specific context never leaks into select.
-
-        The caller owns durable reservation and accounting for this exact attempt.
-        Preflight refusal leaves the existing selector thread alone. Once work
-        starts, its selector handle and rotation counters are parked. Clean success
-        restores that selector on the same live process, never role history.
-        Any failure retires both handles; unknown usage still halts the runtime.
-        """
-        started = time.monotonic()
-        receipt = {field: None, "reason": "provider_error", "usage": None,
-                   "elapsed_ms": 0.0, "provider_attempt": False}
-        with self._lock:
-            preflight = True
-            parked = None
-            clean_success = False
-            try:
-                if self._closed or self._halted:
-                    raise TransportError("closed" if self._closed else "usage_unknown")
-                if self.budget is None:
-                    raise TransportError("invalid_config")
-                if (type(timeout) not in (int, float) or not 0 < timeout <= TURN_SECONDS
-                        or not math.isfinite(timeout)):
-                    raise TransportError("invalid_timeout")
-                prompt, context_or_reason = preparation()
-                if prompt is None:
-                    raise TransportError(context_or_reason)
-                deadline = started + timeout
-                if time.monotonic() >= deadline:
-                    raise TransportError("timeout")
-                parked = (self.process, self._thread_id, self._turns, self._last_input)
-                preflight = False
-                self._frames = self._bytes = 0
-                self._current_usage = None
-                self._max_frame_bytes = frame_bytes
-                options = {"base_instructions": instructions(context_or_reason),
-                           "service_name": service_name}
-                if self.process is None:
-                    self._start(deadline, **options)
-                else:
-                    self._start_thread(deadline, **options)
-                receipt["provider_attempt"] = True
-                value, usage = self._turn(
-                    prompt, context_or_reason, deadline,
-                    output_schema=schema(context_or_reason), validator=validator,
-                    answer_bytes=answer_bytes, strict_json=True)
-                receipt.update({field: value, "reason": success(value), "usage": usage})
-                clean_success = True
-            except TransportError as exc:
-                receipt["reason"] = exc.reason
-                if exc.reason == "invalid_output":
-                    receipt["validation_reason"] = exc.validation_reason
-                if not preflight:
-                    if self.process is not None:
-                        receipt["provider_attempt"] = True
-                    receipt["usage"] = self._current_usage
-                    if receipt["provider_attempt"] and receipt["usage"] is None:
-                        self._halted = True
-                    self._stop_process()
-            except (OSError, ValueError, TypeError, OverflowError):
-                receipt["reason"] = "provider_error"
-                if not preflight:
-                    if self.process is not None:
-                        receipt["provider_attempt"] = True
-                    receipt["usage"] = self._current_usage
-                    if receipt["provider_attempt"] and receipt["usage"] is None:
-                        self._halted = True
-                    self._stop_process()
-            finally:
-                if not preflight:
-                    if (clean_success and parked is not None and parked[0] is self.process
-                            and self.process is not None and self.process.poll() is None
-                            and not self._halted and not self._closed):
-                        self._thread_id, self._turns, self._last_input = parked[1:]
-                    else:
-                        self._thread_id = None
-                        self._turns = self._last_input = 0
-                    self._pending.clear()
-                    self._max_frame_bytes = MAX_FRAME_BYTES
-                receipt["elapsed_ms"] = (time.monotonic() - started) * 1000
-        return receipt
+    def _finish_assessment(self, parked, clean_success):
+        if (clean_success and parked is not None and parked[0] is self.process
+                and self.process is not None and self.process.poll() is None
+                and not self._halted and not self._closed):
+            self._thread_id, self._turns, self._last_input = parked[1:]
+        else:
+            self._thread_id = None
+            self._turns = self._last_input = 0
+        self._pending.clear()
+        self._max_frame_bytes = MAX_FRAME_BYTES
 
     def _stop_process(self):
         process = self.process

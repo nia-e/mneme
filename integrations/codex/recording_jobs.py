@@ -25,6 +25,7 @@ import time
 from rollout_primitives import decode_json, digest, encoded, read_regular
 import host_files
 import host_process
+import capture_source
 from turn_observer import (Limits, RecordAnchor, TurnAdmission, admit_source_turn,
                            observation_byte_ceiling, observe_source_turn,
                            validate_delivery_packet)
@@ -59,6 +60,11 @@ ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 
 
 def enabled(config):
+    try:
+        capture_source.source_host(config)
+        capture_source.assessor(config)
+    except (ValueError, TypeError):
+        return False
     if config.get("recording_mode") != "automatic":
         return False
     if "frozen_selection" in config:
@@ -78,20 +84,24 @@ def enabled(config):
 
 
 def _directory(config):
-    return Path(config["state_dir"]) / "recording"
+    return capture_source.directory(config, "recording")
 
 
 def _path(config, session):
     return _directory(config) / (digest(session.encode()) + ".json")
 
 
-def _cancel_path(config, session):
+def _cancel_path(config, session, turn=None):
+    if capture_source.source_host(config) == "claude_code" and turn is not None:
+        if not isinstance(turn, str) or not ID.fullmatch(turn):
+            raise ValueError("invalid_cancel_turn")
+        return _directory(config) / (digest(session.encode()) + "-" + digest(turn.encode()) + ".cancel")
     return _path(config, session).with_suffix(".cancel")
 
 
-def _cancel_marker(config, session):
+def _read_cancel_marker(path):
     try:
-        value = decode_json(read_regular(_cancel_path(config, session), 256))
+        value = decode_json(read_regular(path, 256))
         if (not isinstance(value, dict) or set(value) != {"token", "turn_id"}
                 or not isinstance(value["token"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["token"])
                 or (value["turn_id"] is not None and (not isinstance(value["turn_id"], str)
@@ -104,17 +114,46 @@ def _cancel_marker(config, session):
         return None
 
 
+def _cancel_marker(config, session, turn=None):
+    global_marker = _read_cancel_marker(_cancel_path(config, session))
+    if capture_source.source_host(config) == "codex" or turn is None or global_marker is None:
+        return global_marker
+    targeted = _read_cancel_marker(_cancel_path(config, session, turn))
+    if targeted is None or targeted["turn_id"] not in (None, turn):
+        return None
+    # Each turn retains its own out-of-lock fence; cancelling p1 cannot clear
+    # or rotate p2's fence, even if their lifecycle lock acquisitions time out.
+    return {"token": digest(encoded([global_marker["token"], targeted["token"]])),
+            "turn_id": targeted["turn_id"]}
+
+
+def _clean_turn_cancels(config, session, data):
+    if capture_source.source_host(config) != "claude_code":
+        return
+    prefix = digest(session.encode()) + "-"
+    active = {_cancel_path(config, session, job["turn_id"]).name for job in data["jobs"]}
+    cap = MAX_LEDGERS * (MAX_JOBS + 3) + 2
+    for candidate in itertools.islice(_directory(config).iterdir(), cap):
+        if (candidate.name.startswith(prefix) and re.fullmatch(r"[a-f0-9]{64}-[a-f0-9]{64}\.cancel", candidate.name)
+                and candidate.name not in active):
+            candidate.unlink(missing_ok=True)
+
+
 def _signal_cancel(config, session, turn):
     """Fence outside the optional queue lock; contention must not lose Interrupt."""
-    path = _cancel_path(config, session)
+    path = _cancel_path(config, session, turn)
     # No admitted work exists without its ledger; avoid lifetime orphan markers.
     if not _path(config, session).exists():
         return
+    if capture_source.source_host(config) == "claude_code" and turn is not None:
+        data = _load(_path(config, session), session, config)
+        if not any(job["turn_id"] == turn for job in data["jobs"]):
+            return  # A stale StopFailure cannot mint an orphan or affect another turn.
     host_files.atomic_write(path, encoded({"token": secrets.token_hex(32), "turn_id": turn}))
 
 
 def _cancelled(config, session, job):
-    marker = _cancel_marker(config, session)
+    marker = _cancel_marker(config, session, job["turn_id"])
     return marker is None or "cancel_token" not in job or job["cancel_token"] != marker["token"]
 
 
@@ -194,9 +233,12 @@ def revalidate_project_focus(store, job):
 
 
 def _config_digest(config):
+    host = capture_source.source_host(config)
+    assessor = capture_source.assessor(config)
     if "frozen_selection" in config:
         from registry_recording import config_digest
-        return config_digest(config)
+        value = config_digest(config)
+        return value if host == "codex" else digest(encoded([host, assessor, value]))
     raw = read_regular(Path(config["service_config"]), 8192)
     if len(raw) > 8192:
         raise ValueError("service_config_cap")
@@ -213,6 +255,8 @@ def _config_digest(config):
                            "memory_scope": config.get("memory_scope", "project"),
                            "tag_stewardship": config.get("tag_stewardship", False),
                            "tag_guide_id": config.get("tag_guide_id")}
+    if config.get("core_cleanup") is False:
+        binding["core_cleanup"] = False
     if (config.get("memory_scope", "project") == "project"
             and config.get("recording_mode") == "automatic"
             and config.get("memory_mode", config.get("recall_mode")) == "async"):
@@ -235,6 +279,8 @@ def _config_digest(config):
             raise ValueError("service_config_cap")
         binding["global_preferences"] = preference.canonical()
         binding["global_service_sha256"] = digest(preference_raw)
+    if host != "codex":
+        binding.update(source_host=host, assessor=assessor)
     return digest(encoded(binding))
 
 
@@ -281,10 +327,17 @@ def _unchanged(config, job):
         return False
 
 
-def _valid(data, session):
-    return (isinstance(data, dict) and data.get("schema") == SCHEMA and data.get("session_id") == session
+def _valid(data, session, config=None):
+    expected = SCHEMA if config is None else capture_source.schema(config, SCHEMA, "recording")
+    host = "codex" if config is None else capture_source.source_host(config)
+    return (isinstance(data, dict) and data.get("schema") == expected and data.get("session_id") == session
             and isinstance(data.get("jobs"), list) and len(data["jobs"]) <= MAX_JOBS
-            and all(isinstance(j, dict) and len(encoded(j)) <= MAX_JOB_BYTES for j in data["jobs"])
+            and all(isinstance(j, dict) and len(encoded(j)) <= MAX_JOB_BYTES
+                    and j.get("source_host", "codex") == host
+                    and j.get("assessor", "codex") in capture_source.HOSTS for j in data["jobs"])
+            and (host == "codex" or "watermark_exclusive" not in data
+                 or type(data["watermark_exclusive"]) is bool
+                 and isinstance(data.get("baseline_turn_id"), str) and ID.fullmatch(data["baseline_turn_id"]))
             and type(data.get("watermark")) is int and data["watermark"] >= -1
             and type(data.get("fresh")) is bool and type(data.get("ended")) is bool
             and isinstance(data.get("counts"), dict) and set(data["counts"]) == set(COUNTERS)
@@ -292,12 +345,12 @@ def _valid(data, session):
             and isinstance(data.get("receipts"), list) and len(data["receipts"]) <= MAX_RECEIPTS)
 
 
-def _load(path, session):
+def _load(path, session, config=None):
     raw = read_regular(path, MAX_STATE)
     if len(raw) > MAX_STATE:
         raise ValueError("recording_state_cap")
     data = decode_json(raw)
-    if not _valid(data, session):
+    if not _valid(data, session, config):
         raise ValueError("invalid_recording_state")
     return data
 
@@ -338,8 +391,8 @@ def _write(path, data):
     host_files.atomic_write(path, raw)
 
 
-def _new(session, fresh=False):
-    return {"schema": SCHEMA, "session_id": session, "pin": None, "watermark": -1,
+def _new(session, fresh=False, config=None):
+    return {"schema": SCHEMA if config is None else capture_source.schema(config, SCHEMA, "recording"), "session_id": session, "pin": None, "watermark": -1,
             "fresh": fresh, "ended": False, "jobs": [], "receipts": [],
             "counts": {key: 0 for key in COUNTERS}, "usage_unknown": False}
 
@@ -384,15 +437,19 @@ def _transaction(config, session, mutate, *, create=False, fresh=False, lock_tim
             host_files.lock_file(fd, blocking=False)
         path = _path(config, session)
         if path.exists():
-            data = _load(path, session)
+            data = _load(path, session, config)
         elif create:
-            entries = list(itertools.islice(directory.iterdir(), 130))
-            scan_full = len(entries) >= 130
+            scan_cap = 130 if capture_source.source_host(config) == "codex" else MAX_LEDGERS * (MAX_JOBS + 3) + 2
+            entries = list(itertools.islice(directory.iterdir(), scan_cap))
+            scan_full = len(entries) >= scan_cap
             # Cancellation can race clean retirement. Remove only orphan markers,
             # never a fence belonging to outstanding or ambiguous work.
             for candidate in list(entries):
-                if (re.fullmatch(r"[a-f0-9]{64}\.cancel", candidate.name)
-                        and not candidate.with_suffix(".json").exists()):
+                orphan = (re.fullmatch(r"[a-f0-9]{64}\.cancel", candidate.name)
+                          and not candidate.with_suffix(".json").exists())
+                if capture_source.source_host(config) == "claude_code" and re.fullmatch(r"[a-f0-9]{64}-[a-f0-9]{64}\.cancel", candidate.name):
+                    orphan = not (directory / (candidate.name[:64] + ".json")).exists()
+                if orphan:
                     candidate.unlink(); entries.remove(candidate)
             if scan_full:
                 return False, None
@@ -401,7 +458,8 @@ def _transaction(config, session, mutate, *, create=False, fresh=False, lock_tim
                 for candidate in ledgers:
                     try:
                         value = decode_json(read_regular(candidate, MAX_STATE))
-                        if (_valid(value, value.get("session_id")) and value["ended"] and not value["jobs"]):
+                        if (_valid(value, value.get("session_id"), config) and value["ended"] and not value["jobs"]):
+                            _clean_turn_cancels(config, value["session_id"], value)
                             candidate.unlink(); candidate.with_suffix(".cancel").unlink(missing_ok=True)
                             ledgers.remove(candidate)
                             break
@@ -409,13 +467,14 @@ def _transaction(config, session, mutate, *, create=False, fresh=False, lock_tim
                         continue
                 if len(ledgers) >= MAX_LEDGERS:
                     return False, None
-            data = _new(session, fresh)
+            data = _new(session, fresh, config)
         else:
             return True, None
         bound = _bind_workspace(config, data)
         value, changed = mutate(data)
         if changed or bound:
             _write(path, data)
+            _clean_turn_cancels(config, session, data)
         return True, value
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         return False, None
@@ -468,7 +527,7 @@ def _remaining(job):
 
 def sanitize_assessment_diagnostic(value):
     """Pure optional metadata projection; malformed diagnostics never change policy."""
-    from reader_runtime import assessment_diagnostic
+    from assessment import assessment_diagnostic
     if (type(value) is not dict
             or set(value) != {"runtime_reason", "validation_reason"}):
         return assessment_diagnostic(None)
@@ -638,7 +697,33 @@ def _maintenance_summary(item):
     return summary
 
 
+def _is_nomination_job(job):
+    """A nomination marker can never be interpreted as ordinary write authority."""
+    return ("nomination_envelope" in job or "nomination_outcome" in job
+            or job.get("phase") == "nomination_frozen"
+            or job.get("proposal_kind") in ("touchstone_nomination", "touchstone", "review_nomination"))
+
+
+def _nomination_summary(value):
+    """Outbox receipts prove local handoff only; never export candidate prose."""
+    allowed = {"queued", "replay", "expired", "capacity", "refused", "unavailable"}
+    if not isinstance(value, dict) or value.get("outcome") not in allowed:
+        return {"outcome": "unavailable"}
+    result = {"outcome": value["outcome"]}
+    if isinstance(value.get("id"), str) and re.fullmatch(r"[0-9a-f]{64}", value["id"]):
+        result["id"] = value["id"]
+    if value.get("status") in ("pending", "emitted", "suppressed"):
+        result["status"] = value["status"]
+    if result["outcome"] in ("queued", "replay") and ("id" not in result or "status" not in result):
+        return {"outcome": "unavailable"}
+    return result
+
+
 def _partial_receipt(job):
+    if _is_nomination_job(job):
+        return {"source_key": job["key"], "turn_id": job["turn_id"], "outcome": "unresolved",
+                "reason": job.get("reason", "interrupted_external_intent"),
+                "nomination": _nomination_summary(job.get("nomination_outcome"))}
     summary = {"source_key":job["key"],"turn_id":job["turn_id"],"outcome":"unresolved","reason":job.get("reason","interrupted_external_intent"),
                "maintenance":[_maintenance_summary(item) for item in job["maintenance"]]}
     if "save_outcome" in job:
@@ -679,9 +764,16 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
     admission = job["admission"]
     summary["source"] = {"session_id": admission["session_id"], "turn_id": job["turn_id"],
                          "prompt_sha256": admission["expected_prompt_sha256"],
-                         "start_ref": admission["start_record"]}
+                         "start_ref": job.get("source_start_ref", admission.get("start_record"))}
+    if job.get("source_host", "codex") != "codex":
+        summary.update(source_host=job["source_host"], assessor=job["assessor"])
+        summary["source"].update(source_host=job["source_host"], start_offset=admission["start_offset"])
     if "closure_ref" in job:
         summary["closure_ref"] = job["closure_ref"]
+    if "source_snapshot" in job:
+        # Mandatory provenance, unlike optional selection diagnostics. A verified
+        # native write never upgrades this read horizon into source finality.
+        summary["source_snapshot"] = job["source_snapshot"]
     if "destination" in job:
         summary["destination"] = job["destination"]
         if "frozen_selection" in job:
@@ -690,7 +782,10 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         else:
             summary["target"] = job.get("store_target", {
                 "scope": job["destination"], "db_alias": job.get("db_alias", "project"), "db_id": job["db_id"]})
-    if "payload" in job:
+    nomination = _is_nomination_job(job)
+    if nomination:
+        summary["nomination"] = _nomination_summary(job.get("nomination_outcome"))
+    if "payload" in job and not nomination:
         summary["proposal"] = {"kind": job["proposal_kind"], "summary": job["payload"]["summary"],
                                "body": job.get("note_body", job["payload"]["body"])}
         summary["citations"] = job["citations"]
@@ -699,9 +794,9 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
             summary["tag_context"] = job["tag_context"]
         elif "frozen_selection" in job:
             summary["proposal"]["tags"] = job["payload"].get("tags", [])
-    if "save_outcome" in job:
+    if "save_outcome" in job and not nomination:
         summary["save_outcome"] = {k:v for k,v in job["save_outcome"].items() if k != "native"}
-    if "maintenance" in job:
+    if "maintenance" in job and not nomination:
         summary["maintenance"] = [_maintenance_summary(item) for item in job["maintenance"]]
     if "intent_omissions" in job:
         summary["intent_omissions"] = job["intent_omissions"]
@@ -713,16 +808,16 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         summary["store_context"] = job["store_context"]
     if "maintenance_omitted_count" in job:
         summary["maintenance_omitted_count"] = job["maintenance_omitted_count"]
-    if "association" in job:
+    if "association" in job and not nomination:
         summary["association"] = job["association"]
-    if "routing" in job:
+    if "routing" in job and not nomination:
         summary["routing"] = job["routing"]
     if "observation" in job:
         summary["observation"] = job["observation"]
     for key in ("context_diagnostic", "context_diagnostic_omitted"):
         if key in job:
             summary[key] = job[key]
-    if receipt:
+    if receipt and not nomination:
         summary["native"] = receipt
     _normalize_context_in_place(summary, max_bytes=MAX_RECEIPT_BYTES - 192)
     if "observation" in summary and len(encoded(summary)) > MAX_RECEIPT_BYTES - 192:
@@ -767,7 +862,11 @@ def notice(config, event):
     """Foreground: local file/descriptor work only. Never native/provider calls."""
     # Supporting callers must preserve the same root-turn boundary as hooks.
     # Children can share session_id; never inspect/admit their source or state.
-    if event.get("agent_id") or event.get("agent_type"):
+    try:
+        source_host = capture_source.source_host(config)
+    except (ValueError, TypeError):
+        return {"outcome": "skipped"}
+    if event.get("agent_id") or source_host == "codex" and event.get("agent_type"):
         return {"outcome": "skipped"}
     if not enabled(config):
         return {"outcome": "skipped"}
@@ -791,24 +890,33 @@ def notice(config, event):
             or prompt.startswith("MNEME_CHECKPOINT_CONTINUATION") or len(prompt.encode()) > 8192):
         return {"outcome": "skipped"}
     try:
-        marker = _cancel_marker(config, session)
+        marker = _cancel_marker(config, session, turn)
         if marker is None or marker["turn_id"] == turn:
             return {"outcome": "deferred", "reason": "cancelled_or_invalid_fence"}
-        root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
-        result = admit_source_turn(event.get("transcript_path"), sessions_root=root,
-                                  session_id=session, turn_id=turn, expected_prompt_sha256=digest(prompt.encode()))
+        host = capture_source.source_host(config)
+        capture_source.assessor(config)
+        if host == "codex":
+            root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
+            result = admit_source_turn(event.get("transcript_path"), sessions_root=root,
+                session_id=session, turn_id=turn, expected_prompt_sha256=digest(prompt.encode()))
+        else:
+            result = capture_source.admit(config, event)
         if result["status"] != "admitted":
             return {"outcome": "deferred", "reason": result["reason"]}
         admission = result["admission"]
-        current = observe_source_turn(admission, limits=Limits(scan_bytes=256 * 1024, events=512))
-        if current["reason"] != "source_turn_not_closed":
+        current = (observe_source_turn(admission, limits=Limits(scan_bytes=256 * 1024, events=512))
+                   if host == "codex" else capture_source.observe(config, admission, limits=Limits(scan_bytes=256 * 1024, events=512)))
+        open_reasons = {"source_turn_not_closed"} | ({"source_prompt_pending"} if host == "claude_code" else set())
+        if current["reason"] not in open_reasons:
             return {"outcome": "deferred", "reason": "not_current_open_turn"}
-        snapshot_end = admission.start_record.byte_offset + current["work"]["source_bytes_read"]
+        snapshot_end = capture_source.snapshot_end(config, admission, current)
+        start_offset = capture_source.start_offset(config, admission)
         binding = _config_digest(config)
-        key = digest(encoded([session, turn, admission.expected_prompt_sha256]))
-        pin = _pin(admission)
+        key = digest(encoded(([session, turn, admission.expected_prompt_sha256] if host == "codex"
+                              else [host, session, turn, admission.expected_prompt_sha256])))
+        pin = capture_source.pin(config, admission)
         def accept(data):
-            if _cancel_marker(config, session) != marker:
+            if _cancel_marker(config, session, turn) != marker:
                 return "cancelled_or_changed_fence", False
             for job in data["jobs"]:
                 if job.get("turn_id") == turn:
@@ -817,17 +925,33 @@ def notice(config, event):
                 return "source_changed", False
             if data["ended"]:
                 return "ended", False
-            first = (data["fresh"] and admission.start_record.byte_offset == admission.session_record.line_bytes)
+            first = data["fresh"] and capture_source.first_turn(config, admission)
             if data["pin"] is None:
                 data["pin"] = pin
                 if not first:
                     data["watermark"] = snapshot_end
+                    if host == "claude_code":
+                        data.update(watermark_exclusive=True, baseline_turn_id=turn)
                     data["fresh"] = False
                     return "baseline_only", True
-            if not first and admission.start_record.byte_offset <= data["watermark"]:
-                return "replay", False
+            if not first:
+                # Codex retains its original inclusive source-start watermark.
+                # A Claude baseline is an exclusive EOF fence: a new preflush
+                # prompt starts AT that offset, not after an invented byte.
+                exclusive = host == "claude_code" and data.get("watermark_exclusive") is True
+                if (start_offset < data["watermark"] if exclusive else start_offset <= data["watermark"]):
+                    return "replay", False
+                if exclusive and data.get("baseline_turn_id") == turn:
+                    return "replay", False
             data["fresh"] = False
-            data["watermark"] = max(data["watermark"], admission.start_record.byte_offset)
+            data["watermark"] = max(data["watermark"], start_offset)
+            if host == "claude_code":
+                data.pop("watermark_exclusive", None)
+                data.pop("baseline_turn_id", None)
+            if host == "claude_code":
+                for prior in list(data["jobs"]):
+                    if prior["phase"] == "admitted":
+                        _finish(data, prior, "cancelled", "interrupted_before_stop")
             if len(data["jobs"]) >= MAX_JOBS:
                 _count(data, "capacity")
                 return "capacity", True
@@ -835,6 +959,9 @@ def notice(config, event):
                                  "cancel_token": marker["token"],
                                  "config_sha256": binding, "phase": "admitted", "polls": 0,
                                  "bytes_read": 0, "records_parsed": 0})
+            if host != "codex":
+                data["jobs"][-1].update(source_host=host, assessor=capture_source.assessor(config),
+                    source_start_ref=capture_source.start_record(config, admission))
             if "frozen_selection" in config:
                 data["jobs"][-1]["frozen_selection"] = json.loads(encoded(config["frozen_selection"]))
             if config.get("memory_scope") == "workshop":
@@ -885,13 +1012,119 @@ def attach_delivery(config, packet):
         return {"outcome": "invalid_or_unavailable"}
 
 
-def close_turn(config, session, turn=None, *, cancel=False, ended=False) -> bool:
+def interrupt_open_turns(config, session):
+    """Retire only unclosed prompts; trusted completed captures may finish later."""
+    def interrupt(data):
+        changed = False
+        for job in list(data["jobs"]):
+            if job["phase"] == "admitted":
+                _finish(data, job, "cancelled", "interrupted_before_stop")
+                changed = True
+        return None, changed
+    return _transaction(config, session, interrupt, lock_timeout=LIFECYCLE_LOCK_SECONDS)[0]
+
+
+def record_stop(config, session, turn, stop_receipt):
+    """A Claude Stop is only a response candidate, never provider admission.
+
+    Peer hooks may continue the same prompt. Keep only the latest exact digest;
+    a later root prompt, SessionEnd or legitimate resume requests observation.
+    None is a transcript-flush/finality proof. Repeated Stop never buys more work.
+    """
+    if capture_source.source_host(config) != "claude_code":
+        raise ValueError("provisional_stop_requires_claude")
+    from claude_observer import validate_stop_receipt
+    try:
+        receipt = validate_stop_receipt(stop_receipt, session_id=session, turn_id=turn)
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
+    def provisional(data):
+        job = next((j for j in data["jobs"] if j["turn_id"] == turn), None)
+        if job is None or job["phase"] != "admitted" or receipt["transcript_path"] != job["admission"]["path"]:
+            return None, False
+        if job.get("stop_receipt") == receipt:
+            return None, False
+        job["stop_receipt"] = receipt
+        return None, True
+    return _transaction(config, session, provisional, lock_timeout=LIFECYCLE_LOCK_SECONDS)[0]
+
+
+def _confirm_claude_boundary(config, event, kind):
+    from claude_observer import validate_boundary_receipt
+    session, next_turn = event.get("session_id"), event.get("turn_id")
+    if (capture_source.source_host(config) != "claude_code" or not isinstance(session, str)
+            or not ID.fullmatch(session) or event.get("agent_id")):
+        return False
+    if kind == "next_prompt" and (not isinstance(next_turn, str) or not ID.fullmatch(next_turn)
+                                   or not isinstance(event.get("prompt"), str)):
+        return False
+    now, monotonic, boot = time.time(), time.monotonic(), _boot_id()
+    def confirm(data):
+        if kind == "next_prompt":
+            known = {j["turn_id"] for j in data["jobs"]} | {r["turn_id"] for r in data["receipts"]}
+            if data.get("baseline_turn_id") is not None:
+                known.add(data["baseline_turn_id"])
+            if next_turn in known or data["ended"]:
+                return None, False
+        changed = False
+        if kind == "session_end" and not data["ended"]:
+            data["ended"] = True
+            changed = True
+        for job in list(data["jobs"]):
+            if job["phase"] != "admitted":
+                continue
+            if event.get("transcript_path") != job["admission"]["path"]:
+                continue
+            if not _unchanged(config, job):
+                _finish(data, job, "deferred", "config_changed")
+            elif _cancelled(config, session, job):
+                _finish(data, job, "cancelled", "interrupted_or_invalid_fence")
+            elif job.get("stop_receipt") is None:
+                _finish(data, job, "cancelled", "interrupted_before_stop")
+            elif boot is None:
+                _finish(data, job, "deferred", "clock_witness_unavailable")
+            else:
+                receipt = validate_boundary_receipt({"schema": "mneme.claude-boundary-receipt.v1",
+                    "session_id": session, "turn_id": job["turn_id"], "kind": kind,
+                    "next_turn_id": next_turn if kind == "next_prompt" else None,
+                    "prompt_sha256": digest(event["prompt"].encode()) if kind == "next_prompt" else None,
+                    "transcript_path": event["transcript_path"]}, session_id=session, turn_id=job["turn_id"])
+                job.update(phase="observing", boundary_receipt=receipt, closed_at=now,
+                           deadline=now + CLOSE_SECONDS, next_poll=now, closed_monotonic=monotonic,
+                           monotonic_deadline=monotonic + CLOSE_SECONDS, boot_id=boot)
+            changed = True
+        return None, changed
+    return _transaction(config, session, confirm, lock_timeout=LIFECYCLE_LOCK_SECONDS)[0]
+
+
+def confirm_prompt_boundary(config, event):
+    """A new trusted hook is a witness to verify, independent of new capture fit."""
+    return _confirm_claude_boundary(config, event, "next_prompt")
+
+
+def confirm_session_end(config, event):
+    return _confirm_claude_boundary(config, event, "session_end")
+
+
+def recover_stopped_turns(config, event):
+    """Resume only retained unstarted candidates, never paid/frozen intents.
+
+    SessionStart is an explicit host opportunity, not a daemon or a repair of
+    unknown accounting. The old admission/path/config/fence must still match.
+    Repeated resume does not renew an observing job's budget or deadline.
+    """
+    return _confirm_claude_boundary(config, event, "resume")
+
+
+def close_turn(config, session, turn=None, *, cancel=False, ended=False, stop_receipt=None) -> bool:
     """Close retained work durably, or report refusal after a bounded lock wait.
 
     A duplicate Stop never renews a closed job's deadlines. Cancellation writes
     its fence once before waiting, rather than replaying the entire operation
     and invalidating work that a newer prompt admitted during contention.
     """
+    if capture_source.source_host(config) == "claude_code" and not cancel:
+        return record_stop(config, session, turn, stop_receipt) if stop_receipt is not None else False
     if (("frozen_selection" not in config and not enabled(config))
             or not isinstance(session, str) or not ID.fullmatch(session)
             or (turn is not None and (not isinstance(turn, str) or not ID.fullmatch(turn)))):
@@ -933,8 +1166,12 @@ def close_turn(config, session, turn=None, *, cancel=False, ended=False) -> bool
     return ok and fenced
 
 
-def has_work(config, session):
-    ok, value = _transaction(config, session, lambda d: (any(j["phase"] != "unresolved" for j in d["jobs"]), False))
+def has_work(config, session, *, ready_only=None):
+    if ready_only is None:
+        ready_only = capture_source.source_host(config) == "claude_code"
+    ok, value = _transaction(config, session, lambda d: (any(
+        j["phase"] != "unresolved" and (not ready_only or j["phase"] != "admitted")
+        for j in d["jobs"]), False))
     return bool(ok and value)
 
 
@@ -948,6 +1185,8 @@ def _update(config, session, key, mutation):
 
 
 def _native_write(config, job, timeout):
+    if _is_nomination_job(job):
+        raise ValueError("nomination_is_not_native_write_authority")
     from mcp_client import McpClient
     from service import client_for_service, load_config
     deadline = time.monotonic() + timeout
@@ -985,7 +1224,7 @@ def _native_write(config, job, timeout):
                 or set(source) != {"namespace", "key", "reference"}
                 or source.get("namespace") != GLOBAL_PREFERENCE_NAMESPACE
                 or not isinstance(source.get("key"), str) or not re.fullmatch(r"[0-9a-f]{64}", source["key"])
-                or source.get("reference") != "codex-global-preference://sha256/" + source["key"]
+                or source.get("reference") != capture_source.provenance(config) + "-global-preference://sha256/" + source["key"]
                 or not isinstance(payload.get("summary"), str)
                 or not 0 < len(payload["summary"].encode()) <= MAX_PREFERENCE_SUMMARY_BYTES
                 or not isinstance(payload.get("body"), str)
@@ -1121,6 +1360,8 @@ def _native_write(config, job, timeout):
 
 
 def _native_maintenance(config, job, item, timeout):
+    if _is_nomination_job(job):
+        raise ValueError("nomination_is_not_native_write_authority")
     if "frozen_selection" in config or job.get("destination") == "global_preference":
         raise ValueError("global_preference_operation")
     from mcp_client import McpClient
@@ -1284,6 +1525,58 @@ def _routing_payload(proposal, context, *, db_id, session, turn):
         return None, "routing_invalid"
 
 
+def _publish_nomination(config, session, key):
+    """Replay only the persisted local handoff, never inference or native SAVE.
+
+    The recorder lock spans enqueue and the terminal receipt. If the outbox
+    commits but the recorder write fails, its original frozen envelope survives
+    and enqueue's source identity makes the next attempt an exact replay.
+    """
+    from touchstone_handoff import enqueue, validate_envelope
+
+    def publish(data, job):
+        if (job.get("phase") != "nomination_frozen"
+                or "frozen_selection" not in job
+                or any(field in job for field in ("payload", "proposal_kind", "citations",
+                    "maintenance", "save_outcome", "routing", "association", "active_branch"))):
+            _finish(data, job, "deferred", "nomination_intent_refused")
+            return
+        if _cancelled(config, session, job):
+            _finish(data, job, "cancelled", "interrupted_or_invalid_fence")
+            return
+        if _remaining(job) <= 0 or not _unchanged(config, job):
+            _finish(data, job, "deferred", "deadline_or_config_changed")
+            return
+        from registry_recording import selection
+        try:
+            envelope = validate_envelope(job["nomination_envelope"])
+            if (envelope["source_key"] != key or envelope["session_id"] != session
+                    or envelope["source_turn"] != job["turn_id"]
+                    or envelope["source_start_ref"] != job.get("source_start_ref", job["admission"].get("start_record"))
+                    or envelope["cancel_token"] != job["cancel_token"]
+                    or envelope["owner"]["name"] != job["destination"]
+                    or envelope["owner"]["db_id"] != job["db_id"]
+                    or envelope["owner"]["db_alias"] != job["db_alias"]):
+                raise ValueError("nomination_source_binding")
+            store = selection(config).named(job["destination"])
+            revalidate_project_focus(store, job)
+        except (ValueError, KeyError, TypeError, OSError):
+            _finish(data, job, "deferred", "nomination_intent_refused")
+            return
+        try:
+            result = _nomination_summary(enqueue(config, envelope))
+        except (ValueError, KeyError, TypeError, OSError):
+            result = {"outcome": "unavailable"}
+        job["nomination_outcome"] = result
+        reason = ("foreground_review_" + result["status"] if result["outcome"] in ("queued", "replay")
+                  and result["status"] in ("pending", "emitted")
+                  else "nomination_handoff_suppressed" if result.get("status") == "suppressed"
+                  else "nomination_handoff_" + result["outcome"])
+        _finish(data, job, "deferred", reason)
+
+    _update(config, session, key, publish)
+
+
 def step(config, session, runtime, reserve, account, *, native_write=None, native_maintenance=None):
     """One bounded worker step. Callback accounting is shared with reader usage."""
     now = time.time()
@@ -1299,6 +1592,10 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
     if not ok or job is None:
         return False
     key = job["key"]
+    host = capture_source.source_host(config)
+    if job.get("source_host", "codex") != host or job.get("assessor", "codex") != capture_source.assessor(config):
+        _update(config, session, key, lambda d, j: _finish(d, j, "deferred", "capture_host_changed"))
+        return True
     diagnostic = None
     context_diagnostic = None
     def finish(outcome, reason, receipt=None):
@@ -1326,12 +1623,16 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
     try:
         if not _unchanged(config, job):
             finish("deferred", "config_changed"); return True
+        if _is_nomination_job(job):
+            _publish_nomination(config, session, key)
+            return True
         if job["phase"] == "observing":
             # Charge worst-case parser work before touching the source. A crash
             # or failed progress write cannot refund an already performed poll.
             limits = Limits()
-            admission = _admission(job["admission"])
-            byte_charge = observation_byte_ceiling(admission, limits=limits)
+            admission = capture_source.restore(config, job["admission"])
+            byte_charge = (observation_byte_ceiling(admission, limits=limits) if host == "codex"
+                           else capture_source.byte_ceiling(config, admission, limits=limits))
             def reserve_poll(data, current):
                 if current["phase"] != "observing":
                     return None
@@ -1348,29 +1649,43 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
             if not ok or reserved is None:
                 return True
             job = reserved
-            observation = observe_source_turn(admission, limits=limits, delivery=job.get("delivery"))
+            observation = (observe_source_turn(admission, limits=limits, delivery=job.get("delivery"))
+                           if host == "codex" else capture_source.observe(config, admission, limits=limits,
+                               delivery=job.get("delivery"), stop_receipt=job.get("stop_receipt"),
+                               boundary_receipt=job.get("boundary_receipt"),
+                               snapshot=job.get("source_snapshot"),
+                               allow_partial=job["polls"] >= MAX_POLLS or time.time() >= job["closed_at"] + FLUSH_SECONDS))
             job["bytes_read"] += observation["work"]["bytes_read"]
             job["records_parsed"] += observation["work"]["records_parsed"]
             def progress(_data, current):
                 if current["phase"] != "observing" or current["polls"] != job["polls"]:
                     return False
                 current.update({k: job[k] for k in ("polls", "bytes_read", "records_parsed")})
-                if observation["status"] == "complete":
-                    current["closure_ref"] = observation["boundary"]
+                if capture_source.assessable(observation):
+                    if host == "codex":
+                        current["closure_ref"] = observation["boundary"]
+                    else:
+                        current["source_snapshot"] = observation["coverage"]["snapshot"]
                 return True
             ok, saved = _update(config, session, key, progress)
             if not ok or not saved:
                 return True
+            if host == "claude_code" and capture_source.assessable(observation):
+                job["source_snapshot"] = observation["coverage"]["snapshot"]
             if (observation["work"]["bytes_read"] > byte_charge
                     or observation["work"]["records_parsed"] > limits.events
                     or job["bytes_read"] > MAX_SCAN_WORK
                     or job["records_parsed"] > MAX_EVENT_WORK):
                 finish("deferred", "observation_work_cap"); return True
-            if observation["status"] != "complete":
-                retry = (observation["reason"] in ("source_turn_not_closed", "unflushed_record")
+            if not capture_source.assessable(observation):
+                retry_reasons = {"source_turn_not_closed", "unflushed_record"}
+                if host == "claude_code":
+                    retry_reasons.update({"source_incomplete_line", "source_prompt_pending", "source_boundary_pending",
+                                          "source_changed_during_read", "final_transcript_pending_or_mismatch", "missing_tool_result"})
+                retry = (observation["reason"] in retry_reasons
                          and job["polls"] < MAX_POLLS and time.time() < job["closed_at"] + FLUSH_SECONDS)
                 if retry:
-                    _update(config, session, key, lambda _d, j: j.update(next_poll=time.time() + .25 * job["polls"]))
+                    _update(config, session, key, lambda _d, j: j.update(next_poll=time.time() + (1.5 if host == "claude_code" else .25) * job["polls"]))
                 else:
                     finish("deferred", observation["reason"])
                 return True
@@ -1480,7 +1795,11 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                 finish("deferred", "assessment_input_refused"); return True
             context_diagnostic = _context_diagnostic(observation, _context)
             selected_coverage = json.loads(_context.coverage_json)["public_evidence"]
-            observation_summary = {"source_turn": "closed_verified", **selected_coverage}
+            source_coverage = json.loads(_context.coverage_json)
+            observation_summary = {"source_turn": source_coverage["source_turn"], **selected_coverage}
+            if host == "claude_code":
+                observation_summary.update(turn_finality=source_coverage["turn_finality"],
+                                           remaining_transcript=source_coverage["remaining_transcript"])
             # Persist the one-shot assessment intent before the shared reservation.
             def assessment_intent(_data, current):
                 if current["phase"] != "observing":
@@ -1511,7 +1830,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                 result = runtime.assess(observation, overlap["cards"], timeout=min(45, left()), **scope_options)
             except Exception:
                 result = {"provider_attempt": True, "usage": None, "reason": "assessment_failed"}
-            from reader_runtime import assessment_diagnostic
+            from assessment import assessment_diagnostic
             diagnostic = assessment_diagnostic(result)
             if not account(key, result):
                 _transaction(config, session, lambda d: (d.update(usage_unknown=True), True))
@@ -1528,6 +1847,62 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                 finish("abstained", "no_proposal"); return True
             proposal = result.get("proposal")
             maintenance = result.get("maintenance", [])
+            from recording_contract import TouchstoneNomination
+            if (isinstance(proposal, TouchstoneNomination)
+                    or getattr(proposal, "kind", None) in ("touchstone_nomination", "touchstone", "review_nomination")):
+                finish("deferred", "nomination_refused"); return True
+            if "nomination" in result:
+                # Distinct operation before ordinary proposal dispatch. A mixed,
+                # forged or invalid nomination never degrades into a SAVE.
+                from recording_contract import check_nomination
+                from registry_recording import freeze_destination
+                from touchstone_handoff import freeze as freeze_nomination
+                try:
+                    if (not registry_mode or result.get("reason") != "proposed"
+                            or proposal is not None or maintenance != []):
+                        raise ValueError("nomination_operation_refused")
+                    nomination = check_nomination(result["nomination"], _context)
+                    if re.search(r"(?i)-----BEGIN .*PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9]{16,}|bearer [A-Za-z0-9._-]{16,})",
+                                 nomination.summary + "\n" + nomination.body
+                                 + ("\n" + encoded(nomination.effect.to_handoff()).decode()
+                                    if hasattr(nomination, "effect") else "")):
+                        raise ValueError("sensitive_nomination")
+                    _, _, destination = freeze_destination(acquisition, nomination.destination, seconds=left())
+                    envelope = freeze_nomination(config, session, job["turn_id"], key,
+                        nomination, _context, source_start_ref=job.get("source_start_ref", job["admission"].get("start_record")))
+                    frozen = {"phase": "nomination_frozen", "nomination_envelope": envelope,
+                              "assessment_diagnostic": diagnostic,
+                              **{name: value for name, value in destination.items() if name in
+                                 ("destination", "db_id", "db_alias", "project_focus_witness")}}
+                except (ValueError, TypeError, AttributeError, KeyError, OSError):
+                    finish("deferred", "nomination_refused"); return True
+
+                def freeze_handoff(data, current):
+                    if current["phase"] != "assessing":
+                        return False
+                    if current.get("cancel_requested") or _cancelled(config, session, current):
+                        _finish(data, current, "cancelled", "interrupted_after_assessment", diagnostic=diagnostic)
+                        return False
+                    if not _unchanged(config, current) or _remaining(current) <= 0:
+                        _finish(data, current, "deferred", "deadline_or_config_changed", diagnostic=diagnostic)
+                        return False
+                    candidate = {**current, **frozen}
+                    # Reserve space for a compact local handoff acknowledgement.
+                    _normalize_context_in_place(candidate, max_bytes=MAX_JOB_BYTES - 512)
+                    if len(encoded(candidate)) > MAX_JOB_BYTES - 512:
+                        candidate.pop("observation", None)
+                        candidate.pop("assessment_diagnostic", None)
+                    if len(encoded(candidate)) > MAX_JOB_BYTES - 512:
+                        _finish(data, current, "deferred", "nomination_intent_cap", diagnostic=diagnostic)
+                        return False
+                    current.clear()
+                    current.update(candidate)
+                    return True
+
+                ok, changed = _update(config, session, key, freeze_handoff)
+                if ok and changed:
+                    _publish_nomination(config, session, key)
+                return True
             if result.get("reason") != "proposed" or (proposal is None and not maintenance):
                 finish("deferred", "assessment_refused"); return True
             destination = proposal.destination if proposal is not None else "project"
@@ -1606,9 +1981,12 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                             routing, job["workspace_binding"]["workspace_origin"], db_id=db_id)
                         if workspace_reason is not None:
                             routing_reason = workspace_reason
-                    payload = {"source": {"namespace": "codex-acquisition.v1", "key": key,
-                               "reference": f"codex://{session}/{job['turn_id']}", "session": session},
+                    host_prefix = capture_source.provenance(config)
+                    payload = {"source": {"namespace": host_prefix + "-acquisition.v1", "key": key,
+                               "reference": f"{host_prefix}://{session}/{job['turn_id']}", "session": session},
                                "summary": proposal.summary, "body": proposal.body}
+                    if "source_snapshot" in job:
+                        payload["source"]["reference"] += "?snapshot=" + job["source_snapshot"]["observed_sha256"]
                     if proposal.tags:
                         from tag_context import ordinary_tags
                         if registry_mode:
@@ -1625,7 +2003,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                                       "ordinals": [json.loads(c.source_ref_json)["ordinal"] for c in proposal.evidence]}
                         payload["source"] = {"namespace": GLOBAL_PREFERENCE_NAMESPACE,
                             "key": digest(encoded(coordinate)),
-                            "reference": "codex-global-preference://sha256/" + digest(encoded(coordinate))}
+                            "reference": capture_source.provenance(config) + "-global-preference://sha256/" + digest(encoded(coordinate))}
                         payload["tags"] = [GLOBAL_PREFERENCE_TAG]
                     elif config.get("memory_scope") == "workshop" and routing is None:
                         payload["source"]["reference"] += f"?scope=workshop&db_id={db_id}"
@@ -1736,6 +2114,9 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
             if not ok or refreshed is None:
                 return True
             job = refreshed
+        if _is_nomination_job(job):
+            _publish_nomination(config, session, key)
+            return True
         # Each branch has a frozen intent and independent acknowledgement.
         pending = (["save"] if "payload" in job and "save_outcome" not in job else [])
         pending += [index for index,item in enumerate(job.get("maintenance", [])) if item["status"] == "pending"]
@@ -1871,7 +2252,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
 
 
 def drain_status(config, session_ids):
-    result = {"schema": "mneme.codex-recording.drain.v1", "pending": 0, "unresolved": 0,
+    result = {"schema": "mneme." + capture_source.provenance(config) + "-recording.drain.v1", "pending": 0, "unresolved": 0,
               "usage_unknown": False, "counts": {k: 0 for k in COUNTERS}, "ledgers": [], "truncated": False}
     if "frozen_selection" not in config and not enabled(config):
         return result
@@ -1897,7 +2278,7 @@ def drain_status(config, session_ids):
 
 def export_receipts(config, session_ids):
     """Bounded private harness projection; never actor context or transcript export."""
-    result = {"schema": "mneme.codex-recording.receipts.v1", "receipts": [],
+    result = {"schema": "mneme." + capture_source.provenance(config) + "-recording.receipts.v1", "receipts": [],
               "truncated": False, "unknown": False}
     if "frozen_selection" not in config and not enabled(config):
         return result

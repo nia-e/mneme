@@ -37,6 +37,142 @@ class InstallTests(unittest.TestCase):
         before = {"config.toml": None, "hooks.json": None}
         self.assertEqual(install.config_outputs(old, before), install.config_outputs(current, before))
 
+    def test_touchstone_handoff_inventory_is_versioned_on_both_platforms(self):
+        self.assertEqual(len(install.V26_DESTINATIONS), 40)
+        self.assertEqual(install.V26_DESTINATIONS[-1], ("lib/guidance.py", False))
+        self.assertEqual(install.V28_DESTINATIONS,
+                         (*install.V26_DESTINATIONS, ("lib/touchstone_handoff.py", False)))
+        owner, _ = self.existing_owner()
+        for platform in ("posix", "windows"):
+            for revision in (26, 27, 28, 29):
+                with self.subTest(platform=platform, revision=revision), \
+                        patch("install.HOST_PLATFORM", platform), \
+                        patch("install.sys.executable", str(self.sources / "python.exe")
+                              if platform == "windows" else sys.executable):
+                    current = self.existing_plan(owner) if revision in (27, 29) else self.plan()
+                    self.assertEqual(current["config_revision"], install.EXISTING_SERVICE_REVISION if revision % 2 else install.CONFIG_REVISION)
+                    install.validate_plan(current)
+                    old = copy.deepcopy(current)
+                    old["config_revision"] = revision
+                    old["files"] = old["files"][:len(install.V28_DESTINATIONS if revision >= 28 else install.V26_DESTINATIONS)]
+                    old["plan_sha256"] = install.plan_hash(old)
+                    install.validate_plan(old)
+                    self.assertEqual(old["files"][0]["destination"],
+                                     "bin/mnemed.exe" if platform == "windows" else "bin/mnemed")
+                    for candidate, wrong_files in ((old, current["files"]), (current, old["files"])):
+                        invalid = copy.deepcopy(candidate)
+                        invalid["files"] = wrong_files
+                        invalid["plan_sha256"] = install.plan_hash(invalid)
+                        with self.assertRaisesRegex(ValueError, "installation files are incomplete"):
+                            install.validate_plan(invalid)
+                    future = copy.deepcopy(current)
+                    future["config_revision"] = install.EXISTING_SERVICE_REVISION + 1
+                    future["plan_sha256"] = install.plan_hash(future)
+                    with self.assertRaisesRegex(ValueError, "unsupported planned configuration revision"):
+                        install.validate_plan(future)
+
+    def test_genuine_prior_source_inventory_retains_revision26_and27(self):
+        fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
+            "codex-install-inventory-f516d62.json").read_text())
+        self.assertEqual(fixture["schema"], "mneme.installer-inventory-fixture.v1")
+        self.assertEqual((fixture["config_revision"], fixture["existing_service_revision"]), (26, 27))
+        self.assertEqual(fixture["install_schema"], install.SCHEMA)
+        self.assertEqual(install.V26_DESTINATIONS,
+                         (("bin/mnemed", True), ("bin/mneme-mcp", True),
+                          *(("lib/" + name, False) for name in fixture["programs"])))
+        self.assertEqual(list(install.PROGRAMS[:38]), fixture["programs"])
+
+    def test_shared_capture_inventory_has_one_owner_and_explicit_revision(self):
+        shared = ("assessment.py", "capture_source.py", "claude_observer.py", "claude_runtime.py",
+                  "claude_config.py", "claude_hooks.py")
+        self.assertEqual(install.PROGRAMS[39:45], shared)
+        self.assertEqual(install.PROGRAMS[45:], ("review_contract.py",))
+        self.assertEqual(len(install.PROGRAMS), len(set(install.PROGRAMS)))
+        self.assertEqual(install.V30_DESTINATIONS,
+                         (*install.V28_DESTINATIONS, *(("lib/" + name, False) for name in shared)))
+        self.assertEqual(install.DESTINATIONS, (*install.V30_DESTINATIONS, ("lib/review_contract.py", False)))
+        self.assertEqual(install.CONFIG_REVISION, 32)
+        self.assertEqual(install.EXISTING_SERVICE_REVISION, 33)
+
+    def test_genuine_revision30_inventory_and_old_plans_do_not_gain_review_module(self):
+        fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
+            "codex-install-inventory-revision30.json").read_text())
+        self.assertEqual((fixture["config_revision"], fixture["existing_service_revision"]), (30, 31))
+        self.assertEqual(list(install.PROGRAMS[:45]), fixture["programs"])
+        self.assertEqual(install.V30_DESTINATIONS,
+                         (("bin/mnemed", True), ("bin/mneme-mcp", True),
+                          *(("lib/" + name, False) for name in fixture["programs"])))
+        owner, _ = self.existing_owner()
+        for revision, current in ((30, self.plan()), (31, self.existing_plan(owner))):
+            with self.subTest(revision=revision):
+                old = copy.deepcopy(current)
+                old["config_revision"] = revision
+                old["files"] = old["files"][:len(install.V30_DESTINATIONS)]
+                old["plan_sha256"] = install.plan_hash(old)
+                install.validate_plan(old)
+                self.assertNotIn("lib/review_contract.py", [item["destination"] for item in old["files"]])
+                wrong = copy.deepcopy(old)
+                wrong["files"] = current["files"]
+                wrong["plan_sha256"] = install.plan_hash(wrong)
+                with self.assertRaisesRegex(ValueError, "installation files are incomplete"):
+                    install.validate_plan(wrong)
+
+    def test_revision26_through29_receipts_preserve_outputs_uninstall_and_recovery(self):
+        config_dir = self.project / ".codex"
+        config_dir.mkdir()
+        originals = {"config.toml": b'model = "fixture"\n',
+                     "hooks.json": b'{"hooks":{"Stop":[]}}\n'}
+        for name, data in originals.items():
+            (config_dir / name).write_bytes(data)
+        owner, _ = self.existing_owner()
+        plans = {26: self.plan(), 27: self.existing_plan(owner),
+                 28: self.plan(), 29: self.existing_plan(owner)}
+        # Old plans must not acquire a dependency on a newly packaged helper.
+        handoff = self.sources / "touchstone_handoff.py"
+        handoff_bytes = handoff.read_bytes()
+        handoff.unlink()
+        for name in install.PROGRAMS[39:]:
+            (self.sources / name).unlink()
+        for revision, current in plans.items():
+            if revision == 28:
+                handoff.write_bytes(handoff_bytes)
+            if revision == 29:
+                owner.write_bytes(install.json_bytes(current["existing_service_config"]["config"]))
+            with self.subTest(revision=revision):
+                prefix = self.prefix.with_name(f"runtime-{revision}")
+                current["prefix"] = str(prefix)
+                old = copy.deepcopy(current)
+                old["config_revision"] = revision
+                old["files"] = old["files"][:len(install.V28_DESTINATIONS if revision >= 28 else install.V26_DESTINATIONS)]
+                old["plan_sha256"] = install.plan_hash(old)
+                outputs = install.config_outputs(old, originals)
+                self.assertEqual(outputs, install.config_outputs(current, originals))
+                result = install.apply(old)
+                self.assertEqual((prefix / "lib/touchstone_handoff.py").exists(), revision >= 28)
+                self.assertFalse((prefix / "lib/assessment.py").exists())
+                receipt_path = Path(result["receipt"])
+                receipt_bytes = receipt_path.read_bytes()
+                import hook_trust
+                with self.assertRaisesRegex(hook_trust.TrustError, "installed_runtime_changed"):
+                    hook_trust.reviewed_definitions(self.project, prefix / "config/service.json",
+                                                    bundle_root=self.sources)
+                if revision in (27, 29) and owner.exists():
+                    owner.unlink()  # Recovery is bound to the receipt, not live owner inputs.
+                pending = prefix / "pending.json"
+                pending.write_bytes(install.json_bytes(old))
+                self.assertEqual(install.recover(pending)["status"], "configured")
+                self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+                self.assertFalse(pending.exists())
+                self.assertEqual(install.uninstall(receipt_path)["status"], "configuration removed")
+                self.assertEqual({name: (config_dir / name).read_bytes() for name in originals}, originals)
+                # An interrupted pre-receipt installation must restore those same bytes.
+                receipt_path.unlink()
+                (config_dir / "config.toml").write_bytes(outputs["config.toml"])
+                pending.write_bytes(install.json_bytes(old))
+                self.assertEqual(install.recover(pending)["status"], "aborted")
+                self.assertEqual({name: (config_dir / name).read_bytes() for name in originals}, originals)
+                self.assertFalse(pending.exists())
+
     def setUp(self):
         fixture = InstallFixture()
         self.temp = fixture.temp
@@ -529,7 +665,8 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(plan['librarian_effort'], 'medium')
         self.assertEqual(plan['reader_model'], 'gpt-6.1-sol')
         self.assertIn('lib/target_policy.py', [row['destination'] for row in plan['files']])
-        self.assertEqual(plan['files'][-1]['destination'], 'lib/guidance.py')
+        self.assertEqual(plan['files'][len(install.V28_DESTINATIONS)-1]['destination'], 'lib/touchstone_handoff.py')
+        self.assertEqual(plan['files'][-1]['destination'], 'lib/review_contract.py')
         for effort in ('low', 'medium', 'high'):
             altered = copy.deepcopy(plan); altered['librarian_effort'] = effort
             altered['plan_sha256'] = install.plan_hash(altered)
@@ -687,7 +824,8 @@ class InstallTests(unittest.TestCase):
                  'recording_contract.py', 'recording_jobs.py', 'routing_memory.py', 'routing_contract.py', 'librarian_policy.py', 'touchstone_contract.py', 'target_policy.py',
                  'misc_binding.py', 'misc_config.py', 'hook_launcher.py', 'tag_config.py',
                  'tag_context.py', 'stewardship.py', 'stewardship_contract.py', 'host_files.py', 'host_process.py', 'host_platform.py',
-                 'store_registry.py', 'registry_config.py', 'registry_runtime.py', 'registry_reader.py', 'registry_recording.py', 'core_hook.py', 'guidance.py')
+                 'store_registry.py', 'registry_config.py', 'registry_runtime.py', 'registry_reader.py', 'registry_recording.py', 'core_hook.py', 'guidance.py', 'touchstone_handoff.py',
+                 'assessment.py', 'capture_source.py', 'claude_observer.py', 'claude_runtime.py', 'claude_config.py', 'claude_hooks.py', 'review_contract.py')
         self.assertEqual([row['destination'] for row in plan['files'][-len(names):]],
                          ['lib/' + name for name in names])
         result = install.apply(plan)

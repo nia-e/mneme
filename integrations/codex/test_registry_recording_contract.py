@@ -170,7 +170,15 @@ class RegistryRecordingContractTests(unittest.TestCase):
         schema = contract.schema_for(context)
         for branch in schema["properties"]["proposal"]["anyOf"][1:]:
             self.assertEqual(branch["properties"]["destination"]["enum"], ["project", "personal", "scratch"])
-            self.assertIn("tags", branch["required"])
+            if branch["properties"]["kind"]["enum"] in (["touchstone_nomination"], ["review_nomination"]):
+                fields = {"kind", "summary", "body", "evidence_ids", "related_memory_ids", "destination"}
+                if branch["properties"]["kind"]["enum"] == ["review_nomination"]:
+                    fields.add("effect")
+                self.assertEqual(set(branch["required"]), fields)
+                self.assertEqual(set(branch["properties"]), set(branch["required"]))
+                self.assertNotIn("tags", branch["properties"])
+            else:
+                self.assertIn("tags", branch["required"])
             self.assertNotIn("routing_judgment", branch["properties"])
         self.assertNotIn("maintenance", schema["properties"])
         self.assertNotIn("A global_preference proposal", contract.instructions_for(context))

@@ -1,8 +1,8 @@
 //! Projection of the current owner-context envelope. Source selection is
 //! deliberately outside this module: semantic and episodic lanes travel together.
 use mneme_present::{
-    EpisodeReferenceRetrieval, TouchstoneRetrieval, validate_episode_card_metadata,
-    validate_touchstone_card_metadata,
+    EpisodeReferenceRetrieval, TouchstoneRetrieval, format_timestamp_millis,
+    validate_episode_card_metadata, validate_touchstone_card_metadata,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -101,6 +101,17 @@ pub(super) fn validate(value: &Value, requested_capacity: usize) -> Result<(), S
         semantic_count += cards.len();
         if cards.iter().any(|card| {
             !valid_card(card)
+                || match card.get("created") {
+                    Some(created) => {
+                        match serde_json::from_value::<mneme_core::Timestamp>(created.clone()) {
+                            Ok(created) => card
+                                .get("created_utc")
+                                .is_some_and(|value| value != &format_timestamp_millis(created)),
+                            Err(_) => true,
+                        }
+                    }
+                    None => card.get("created_utc").is_some(),
+                }
                 || card.get("kind").is_some()
                 || card.get("occurrence_contexts").is_some()
                 || card.get("recording_session").is_some()
@@ -367,6 +378,25 @@ pub(super) fn project(card: &Value, project: &str, db: &str, source: &Value, lan
         if let Some(contexts) = card.get("occurrence_contexts") {
             out["occurrence_contexts"] = contexts.clone();
         }
+        let metadata =
+            validate_episode_card_metadata(card, true).expect("validated native episode");
+        out.as_object_mut().expect("projected card object").extend(
+            serde_json::to_value(metadata.time_presentation())
+                .expect("typed calendar dates serialize")
+                .as_object()
+                .expect("calendar dates object")
+                .clone(),
+        );
+    }
+    // Older v7 producers omit this additive field. Unknown creation stays absent,
+    // never a fabricated zero/null timestamp or a reason to switch sources.
+    if lane != "episodic"
+        && let Some(created) = card.get("created")
+    {
+        out["created"] = created.clone();
+        let created = serde_json::from_value::<mneme_core::Timestamp>(created.clone())
+            .expect("validated native creation time");
+        out["created_utc"] = serde_json::json!(format_timestamp_millis(created));
     }
     // The compact native view is indivisible: keep its exact historical summary
     // prefixes, statuses, origin identities and omission count together.

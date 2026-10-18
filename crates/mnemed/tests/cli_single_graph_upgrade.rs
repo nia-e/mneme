@@ -268,10 +268,11 @@ fn touchstones_json_target_is_exact_detached_and_historical_targets_stay_frozen(
     assert_eq!(report["activated"], false);
     assert_eq!(report["source_replaced"], false);
     assert_eq!(std::fs::read(&source).unwrap(), before);
-    let upgraded = mneme_cozo::MemStore::load(&destination).unwrap();
-    assert_eq!(upgraded.db_id(), predecessor.db_id());
+    assert!(mneme_cozo::MemStore::load(&destination).is_err());
+    let upgraded = mneme_cozo::MemStore::load_touchstones_v5(&destination).unwrap();
+    assert_eq!(upgraded.db_id, predecessor.db_id());
     assert_eq!(
-        upgraded.export().canonical_value().unwrap(),
+        upgraded.canonical_value().unwrap(),
         predecessor.export().canonical_value().unwrap()
     );
     assert!(mneme_cozo::MemStore::load_episode_context_v4(&destination).is_err());

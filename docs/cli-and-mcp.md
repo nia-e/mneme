@@ -43,6 +43,33 @@ mnemed list --tag rust --limit 64
 Use `mnemed COMMAND --help` for arguments and limits. `--json` retains coverage
 and continuation metadata; `recall-context` always emits compact JSON.
 
+Semantic `query` and `recall-context` cards expose `created`: the node's original
+recording time in exact Unix epoch milliseconds. The additive `created_utc`
+companion and human output render dates as `2026-10-19T14:32:08Z`: UTC through
+whole seconds, with no fractional seconds. Display omits subsecond precision;
+retained timestamps and their units do not change. Values beyond year 9999 use
+`out of calendar range (<exact value> Unix epoch ms)` rather than a false date.
+Creation is not when the node was last updated or verified, and not evidence
+that its content is current. Legacy MCP `recall` hits and neighbors expose the
+same companions. Summary, body and tag edits preserve creation time.
+
+Episode responses retain distinct `occurred`, `recorded_at` (first account) and
+`edition_recorded_at` numeric timestamps. Their separate `occurred_utc`,
+`recorded_at_utc` and `edition_recorded_at_utc` companions are display-only.
+`occurred_utc` preserves the unknown/point/range distinction; a short range may
+show the same second at both ends without changing its exact numeric interval.
+Historical editions and immutable snapshot hashes stay exact. GET and MCP CORE
+also provide UTC companions for the exposed node dates; local CORE shows creation.
+Full touchstone GET records remain unchanged, with historical reference dates in
+separate identity-keyed `touchstone_references_utc` rows.
+
+Library context derives readable dates from supplied native timestamps, including
+older producers without UTC companions. If an older producer omits `created`,
+the library keeps both creation fields omitted: the time is unknown, not zero
+or a timestamp inferred from another source. Companions supplied by an owner
+must agree with its numeric timestamps. Context byte budgets and observation
+hashes include the actual rendered companions.
+
 ### Save and retry
 
 SAVE needs an existing current store. It does not initialize or upgrade storage.
@@ -125,8 +152,22 @@ return the complete canonical summary, up to 16 KiB of UTF-8; MCP reports
 `content_fingerprint_codec` for [guarded tag edits](#guard-content-used-to-choose-tags).
 Older owners may still truncate summaries: inspect `summary_truncated` before
 treating a response as complete. This does not widen presentation cards: MCP
-`core` and `query` summaries remain capped at 2 KiB, node inventory at 1 KiB, and
+`core` summaries remain capped at 2 KiB, node inventory at 1 KiB, and
 recall-context output at its own budget. Body ranges remain separate and bounded.
+
+For compact diagnostic hit lists, use
+`mnemed query "what you need" --summary-max-bytes 320` (add `--json` for the
+structured envelope), or pass `summary_max_bytes: 320` to MCP `query`. This
+optional bound accepts **1..=16384 UTF-8 bytes per summary**, not characters;
+truncation keeps complete Unicode scalars and reports `summary_truncated` (with
+a marker in human output). Use `get ID` to inspect the canonical summary.
+Omitting it preserves local CLI's full summaries (up to 16 KiB) and MCP's 2 KiB
+default. Explicit values have the same meaning locally and through configured or
+explicit remote CLI routes; remote owners must advertise support or the request
+is refused rather than silently ignoring the bound. Aggregate response/body
+limits still apply. This controls presentation only: authored notes, ranking and
+relevance thresholds are unchanged. `recall-context`/`recall_context` retain their
+own per-summary and total context budgets.
 
 `list [--status active|archived|all] [--tag TAG] [--limit N] [--after CURSOR]`
 returns nodes in canonical ID order, not relevance or newest-first order.
@@ -202,8 +243,8 @@ needs different authority:
 | --- | --- |
 | `read-only` | Retrieval, topology/body inspection, status and read-only walks |
 | `receipt-grounded` | Read-only operations plus `reflect` with a server-issued walk receipt |
-| `curator` | Adds non-core saves, episode appends, non-core tag edits, links and contradiction flagging |
-| `operator` | Adds core curation, note-body/summary editing, forgetting, adjudication, maintenance and lease control |
+| `curator` | Adds non-core saves, episode appends, store-wide note-body/summary edits, tag edits preserving core membership, links and contradiction flagging |
+| `operator` | Adds core creation and membership changes, forgetting, adjudication, maintenance and lease control |
 
 Profiles are fixed at startup and enforced in both the tool catalog and calls.
 They are authority limits, not authentication or isolation from another process
@@ -334,7 +375,9 @@ expansion beyond the tagged seeds.
 
 `retag` replaces a semantic note's **complete tag set** if it matches the complete
 `expected_tags` you inspected. Order does not matter; duplicates are invalid.
-Retain unrelated tags:
+Each tag flag accepts one comma-separated argument, space-separated from the flag
+or attached with `=`. For an empty set, put the ID before the bare flag.
+Whitespace-separated tag lists are not supported. Retain unrelated tags:
 
 ```sh
 mnemed get NODE_ID
@@ -348,7 +391,10 @@ retag {db:"project", expected_db_id:"<verified database ID>",
        tags:["possibility","closed","tui"]}
 ```
 
-Curator can edit non-core sets; either set containing `core` requires operator.
+Curator can edit tags store-wide, including on existing core notes. Adding or
+removing `core` requires operator; retaining `core` while changing other tags does
+not. The complete expected set is checked atomically, so omitting `core` from
+`expected_tags` cannot bypass this boundary.
 The reply returns `id`, canonical tags, `changed` and `db`/`db_id`. Other note content
 and state stay unchanged. Episode editions and authored touchstone restrictions
 still apply. Replaying original SAVE does not reset later tag edits.
@@ -398,11 +444,16 @@ the owner's advertised support before sending strong guards; an older owner may
 support tag-only edits but cannot silently receive an unguarded substitute. Profile
 requirements and the successful reply shape are unchanged.
 
+Curator authority is trusted store-wide content curation, not a per-agent ACL.
+Agents sharing an owner may edit each other's notes; submission provenance is
+historical context, not edit authority. Core creation, episode revision,
+destructive operations and owner lifecycle control still require operator.
+
 ## Edit a note body in place
 
-Operator `edit-body` / MCP `edit_body` replaces only an ordinary semantic note's
-body. Inspect the content, follow any body continuations, and keep the opaque
-`body_revision` from `get`:
+Curator `edit-body` / MCP `edit_body` replaces only a semantic note's body,
+including existing core notes. Inspect the content, follow any body continuations,
+and keep the opaque `body_revision` from `get`:
 
 ```sh
 mnemed --json get NODE_ID
@@ -433,9 +484,9 @@ nor browsable edit history. No schema migration or re-embedding is required.
 
 ## Edit a note summary without replacing its identity
 
-Operator `edit-summary` / MCP `edit_summary` replaces an ordinary semantic summary
-and its derived search projections atomically. Use it for wording corrections;
-a changed conclusion may deserve supersession instead.
+Curator `edit-summary` / MCP `edit_summary` replaces a semantic summary, including
+an existing core note, and its derived search projections atomically. Use it for
+wording corrections; a changed conclusion may deserve supersession instead.
 
 Read the full current summary and copy
 `summary_snapshot.expected_snapshot_sha256` from GET:

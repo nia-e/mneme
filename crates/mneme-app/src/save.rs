@@ -167,7 +167,7 @@ impl PreparedSave {
     pub fn requires_operator(&self) -> bool {
         match &self.request {
             SaveRequest::Note(request) => request.requires_operator(),
-            SaveRequest::Episode(_) => false,
+            SaveRequest::Episode(request) => request.requires_operator(),
         }
     }
 

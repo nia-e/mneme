@@ -2,6 +2,7 @@
 import unittest
 import json
 import reader_contract as contract
+from fixture_model_dates import epoch_second_display
 
 
 class ReaderContractTests(unittest.TestCase):
@@ -57,7 +58,7 @@ class EpisodeProjectionTests(unittest.TestCase):
                     key: candidate[key] for key in ("episode_id", "revision", "occurred", "recorded_at", "thread")}}}
         collector_card = _card(node, candidate["id"], candidate)
         payload, _, context = self.payload([collector_card])
-        self.assertEqual(payload["cards"], [{key: value for key, value in collector_card.items()
+        self.assertEqual(payload["cards"], [{key: value for key, value in epoch_second_display(collector_card).items()
                                              if key != "status"}])
         self.assertEqual(context["ids"], [candidate["id"]])
         self.assertIn("historical account, not present advice", contract.BASE_INSTRUCTIONS)
@@ -80,7 +81,7 @@ class EpisodeProjectionTests(unittest.TestCase):
                              current_edition_id="4" * 26, recording_session="late recap 🐙",
                              origins=origins)
         payload, _, _ = self.payload([scene])
-        self.assertEqual(payload["cards"], [scene])
+        self.assertEqual(payload["cards"], [epoch_second_display(scene)])
         self.assertIsNot(payload["cards"][0]["origins"], origins)
         self.assertEqual(contract.validate_answer({"selected_ids": [edition], "concerns": []},
                          {"ids": [edition]})["selected_ids"], [edition])
@@ -127,7 +128,7 @@ class EpisodeProjectionTests(unittest.TestCase):
                 {"namespace": "session", "key": "pi", "label": "Experiment 🐙"}]
         episode = self.episode(source="codex:later-recap", occurrence_contexts=refs)
         payload, _, _ = self.payload([episode])
-        self.assertEqual(payload["cards"][0], episode)
+        self.assertEqual(payload["cards"][0], epoch_second_display(episode))
         self.assertIsNot(payload["cards"][0]["occurrence_contexts"], refs)
         self.assertNotIn("occurrence_contexts", self.payload([self.episode()])[0]["cards"][0])
         for value in (None, [], {}, [{"namespace": "s"}], [{"namespace": "s", "key": "k", "label": None}],
@@ -169,7 +170,7 @@ class EpisodeProjectionTests(unittest.TestCase):
                               occurred={"kind": "range", "start": 1, "end": 5},
                               recorded_at=4, edition_recorded_at=6)]
         payload, _, context = self.payload(cards)
-        self.assertEqual(payload["cards"], cards)
+        self.assertEqual(payload["cards"], [epoch_second_display(card) for card in cards])
         self.assertEqual(context["ids"], [card["id"] for card in cards])
         self.assertNotIn("machine", payload["cards"][1])
         self.assertNotIn("session", payload["cards"][1])

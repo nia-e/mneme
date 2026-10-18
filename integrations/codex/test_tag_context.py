@@ -37,8 +37,8 @@ def guide(text="Preserve people and roles across time."):
 
 class TagContextTests(unittest.TestCase):
     def test_ordinary_names_are_not_ontology_and_special_tags_are_host_owned(self):
-        self.assertEqual(tags.ordinary_tags(["rust", "People", "new-concept"]),
-                         ("People", "new-concept", "rust"))
+        self.assertEqual(tags.ordinary_tags(["rust", "people", "new-concept"]),
+                         ("new-concept", "people", "rust"))
         for value in (["core"], ["possibility"], ["routing-judgment"], ["collaboration-preference"],
                       ["rust", "rust"], [" bad"], ["x\x85y"], ["é" * 129], "rust", [f"t{i}" for i in range(65)]):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -46,9 +46,53 @@ class TagContextTests(unittest.TestCase):
 
     def test_native_valid_long_identity_names_and_sixty_four_seeds_are_preserved(self):
         names = [f"identity-{i}" for i in range(63)] + ["rare-" + "é" * 90]
-        self.assertEqual(set(tags.ordinary_tags(names)), set(names))
+        # Historical vocabulary/lookup coordinates stay exact; fresh output is
+        # a separate admission boundary, never normalization on read.
+        with self.assertRaises(ValueError):
+            tags.ordinary_tags(names)
         self.assertEqual(tags.lookup_prefixes("", names), names)
         self.assertTrue(tags.validate_context(context([names[-1]])).enabled)
+
+    def test_fresh_tags_require_canonical_grammar_not_protected_aliases(self):
+        aliases = ["Core", "CORE", "core_", "core:", "core/", " core ",
+                   "Routing_Judgment", "collaboration.preference", "Possibility", "pursuing/", "Closed",
+                   "Rust Compiler", "rust_compiler", "rust:compiler", "rust/compiler", "rust.compiler",
+                   "a--b", "-a", "a-", "C++", "café", "x\ty", "x\ny", "x\0y"]
+        for tag in aliases:
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                tags.ordinary_tags([tag])
+        self.assertEqual(tags.ordinary_tags(["a" * 256, "cpp", "rust-compiler", "x0-y1"]),
+                         ("a" * 256, "cpp", "rust-compiler", "x0-y1"))
+        with self.assertRaises(ValueError):
+            tags.ordinary_tags(["a" * 257])
+        self.assertIn(tags.CANONICAL_TAG_PATTERN, tags.BUILTIN_GUIDANCE)
+
+    def test_retained_vocabulary_and_authored_guide_are_not_normalized(self):
+        names = ["Core", "producer:codex", "Rust Compiler", "café"]
+        original = context(names, guide=guide("Use Core or producer:codex; do not rewrite this authored text."))
+        packet = tags.validate_context(original).packet()
+        self.assertEqual([item["name"] for item in packet["vocabulary"]["items"]], names)
+        self.assertEqual(packet["guide"], original.guide["text"])
+        self.assertEqual(original.vocabulary["items"][0]["name"], "Core")
+
+    def test_frozen_native_and_legacy_required_tags_refuse_unsafe_aliases(self):
+        import store_registry
+        snapshot = {"schema": "mneme.config-selection.v1", "digest": "a" * 64,
+                    "config": {}, "cwd": "/fixture/work", "active": [{
+                        "name": "memory", "store": {"id": DB, "owner": {"db": "project"}},
+                        "eligible": dict.fromkeys(("read", "write", "core", "context", "recall", "record", "maintenance"), True)}]}
+        for tag in ("Core", "core_", "Routing_Judgment", "Collaboration_Preference", "producer:codex", "People"):
+            with self.subTest(tag=tag):
+                with self.assertRaises(ValueError):
+                    store_registry._policies({"record": {"required_tags": [tag]}})
+                frozen = json.loads(json.dumps(snapshot))
+                frozen["active"][0]["store"]["capture"] = {"required_tags": [tag]}
+                before = tags.encoded(frozen)
+                with self.assertRaises(ValueError):
+                    store_registry.NativeSelection(frozen, "/fixture/mneme.toml", "/fixture/mnemed")
+                self.assertEqual(tags.encoded(frozen), before)
+        rule = store_registry._policies({"record": {"required_tags": ["rust-compiler"]}})[2]
+        self.assertEqual(rule.required_tags, ("rust-compiler",))
 
     def test_guide_revision_is_not_observed_vocabulary_growth(self):
         first = context(["people"], guide=guide())

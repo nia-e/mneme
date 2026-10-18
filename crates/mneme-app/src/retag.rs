@@ -26,7 +26,7 @@ impl PreparedRetag {
         struct Input {
             id: NodeId,
             expected_tags: BoundedTagSet,
-            tags: BoundedTagSet,
+            tags: Vec<String>,
             expected_content_fingerprint: Option<String>,
             guard_nodes: Option<Vec<NodeContentGuard>>,
         }
@@ -37,7 +37,7 @@ impl PreparedRetag {
         let request = Self {
             id: input.id,
             expected_tags: input.expected_tags,
-            tags: input.tags,
+            tags: mneme_core::normalize_tags(input.tags.iter().map(String::as_str))?,
             expected_content_fingerprint: input.expected_content_fingerprint,
             guard_nodes: input.guard_nodes,
         };
@@ -63,7 +63,9 @@ impl PreparedRetag {
         Ok(request)
     }
     pub fn requires_operator(&self) -> bool {
-        self.expected_tags.contains("core") || self.tags.contains("core")
+        // Authority follows the membership transition. The complete-tag CAS in
+        // execute prevents a caller from hiding the actual core membership.
+        self.expected_tags.contains("core") != self.tags.contains("core")
     }
     pub fn into_json(self) -> Value {
         let mut value =
@@ -166,12 +168,16 @@ impl PreparedRetag {
     }
 }
 pub fn input_schema() -> Value {
-    let tags = json!({"type":"array","maxItems":mneme_core::MAX_NODE_TAGS,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":mneme_core::MAX_TAG_BYTES},"description":"Complete tag set; empty is valid. Native admission checks UTF-8 bytes, trim and controls."});
+    let tags = json!({"type":"array","maxItems":mneme_core::MAX_NODE_TAGS,"items":{"type":"string","minLength":1,"maxLength":mneme_core::MAX_TAG_BYTES},"description":"Complete replacement tag set; empty is valid. New tags normalize ASCII case and space, _, :, /, . separators to collapsed dashes; unsupported characters error. expected_tags stays exact."});
+    let mut expected_tags = tags.clone();
+    expected_tags["uniqueItems"] = json!(true);
+    expected_tags["description"] =
+        json!("Exact observed tag set for compare-and-replace; not normalized.");
     let fingerprint =
         json!({"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"});
     json!({"type":"object","additionalProperties":false,"required":["id","expected_tags","tags"],
         "dependentRequired":{"guard_nodes":["expected_content_fingerprint"]},
-        "properties":{"id":{"type":"string","minLength":26,"maxLength":26,"pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"},"expected_tags":tags,"tags":tags,
+        "properties":{"id":{"type":"string","minLength":26,"maxLength":26,"pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"},"expected_tags":expected_tags,"tags":tags,
             "expected_content_fingerprint":fingerprint,
             "guard_nodes":{"type":"array","maxItems":mneme_core::MAX_NODE_HYDRATION_BATCH,
                 "description":"Optional same-owner semantic nodes, checked atomically with target fingerprint and expected tags. For policy guides, use the complete bounded canonical summary, not body bytes. Fingerprints bind canonical content and body pointers, not mutable external body bytes.",
@@ -204,6 +210,16 @@ mod tests {
         json!({"id":ulid::Ulid::from(1).to_string(),"expected_tags":[],"tags":["possibility","closed"]})
     }
     #[test]
+    fn replacement_normalizes_but_expected_cas_stays_exact() {
+        let raw = json!({"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "expected_tags": ["Old_Tag"], "tags": [" Core ", "foo_bar", "foo-bar"]});
+        let request = PreparedRetag::parse(&raw).unwrap();
+        assert!(request.requires_operator());
+        let checked = request.into_json();
+        assert_eq!(checked["expected_tags"], json!(["Old_Tag"]));
+        assert_eq!(checked["tags"], json!(["core", "foo-bar"]));
+    }
+
+    #[test]
     fn complete_closed_bounded_canonical_request() {
         assert!(PreparedRetag::parse(&raw()).is_ok());
         for field in ["id", "expected_tags", "tags"] {
@@ -212,8 +228,8 @@ mod tests {
             assert!(PreparedRetag::parse(&r).is_err());
         }
         for tags in [
-            json!(["duplicate", "duplicate"]),
-            json!([" bad"]),
+            json!(["bad+tag"]),
+            json!(["---"]),
             json!(null),
             json!(["x".repeat(mneme_core::MAX_TAG_BYTES + 1)]),
         ] {
@@ -228,11 +244,37 @@ mod tests {
     #[test]
     fn maximum_valid_escaped_sets_fit_envelope() {
         let tags = (0..mneme_core::MAX_NODE_TAGS)
+            .map(|i| format!("{i:04}{}", "x".repeat(mneme_core::MAX_TAG_BYTES - 4)))
+            .collect::<Vec<_>>();
+        let legacy = (0..mneme_core::MAX_NODE_TAGS)
             .map(|i| format!("{i:04}{}", "\\".repeat(mneme_core::MAX_TAG_BYTES - 4)))
             .collect::<Vec<_>>();
-        let value = json!({"id":ulid::Ulid::from(1).to_string(),"expected_tags":tags,"tags":tags});
+        let value =
+            json!({"id":ulid::Ulid::from(1).to_string(),"expected_tags":legacy,"tags":tags});
         assert!(serde_json::to_vec(&value).unwrap().len() <= MAX_RETAG_REQUEST_BYTES);
         assert!(PreparedRetag::parse(&value).is_ok());
+    }
+    #[test]
+    fn only_core_membership_transitions_require_operator() {
+        for (before, after, operator) in [
+            (json!([]), json!(["closed"]), false),
+            (json!(["core"]), json!(["core", "closed"]), false),
+            (json!(["core", "fact"]), json!(["core"]), false),
+            (json!(["core"]), json!(["core"]), false),
+            (json!([]), json!(["core"]), true),
+            (json!(["Core"]), json!(["core"]), true),
+            (json!(["Core"]), json!(["Core"]), true),
+            (json!(["core"]), json!(["Core"]), false),
+            (json!(["core"]), json!([]), true),
+        ] {
+            let mut request = raw();
+            request["expected_tags"] = before;
+            request["tags"] = after;
+            assert_eq!(
+                PreparedRetag::parse(&request).unwrap().requires_operator(),
+                operator
+            );
+        }
     }
     #[test]
     fn core_authority_and_acknowledgement() {

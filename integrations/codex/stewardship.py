@@ -48,6 +48,25 @@ def enabled(config):
             and config.get("memory_mode", config.get("recall_mode")) == "async")
 
 
+def _core_cleanup(config):
+    value = config.get("core_cleanup", True)
+    if type(value) is not bool:
+        raise ValueError("core_cleanup must be a boolean")
+    return value
+
+
+def _require_background_retag(config, target, tags):
+    # This is a locus restriction for the existing trusted cleanup workflow,
+    # not foreground authentication or a proof that topic-tag edits preserve meaning.
+    from stewardship_contract import validate_retag_tags
+    validate_retag_tags(target["tags"], tags)
+    before, after = "core" in target["tags"], "core" in tags
+    if before != after:
+        raise ValueError("core_membership_requires_foreground")
+    if before and not _core_cleanup(config):
+        raise ValueError("core_cleanup_requires_foreground")
+
+
 def _selected_owner(config):
     """Revalidate all selected owners; the projected display name is not authority."""
     if config.get("memory_scope") != "registry":
@@ -58,7 +77,8 @@ def _selected_owner(config):
     if (store not in current.maintainable
             or config.get("memory_mode", config.get("recall_mode")) != "async"
             or str(config["service_config"]) != store.service_config
-            or config.get("tag_guide_id") != store.maintenance.tag_guide_id):
+            or config.get("tag_guide_id") != store.maintenance.tag_guide_id
+            or _core_cleanup(config) != store.maintenance.core_cleanup):
         raise ValueError("selected owner does not permit this maintenance pass")
     return store
 
@@ -492,6 +512,7 @@ class NativeOwner:
         return {"id":identifier,"summary":summary,"tags":tags,"content_fingerprint":fingerprint},fingerprint
 
     def retag(self, target, tags, guards):
+        _require_background_retag(self.config, target, tags)
         result = self.call("retag",{"id":target["id"],"expected_tags":target["tags"],"tags":tags,
             "expected_content_fingerprint":target["content_fingerprint"],"guard_nodes":guards})
         return result
@@ -509,6 +530,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
         # Freeze policy before opening the journal. Renaming an owner or editing
         # its purpose never creates a fresh accounting identity or allowance.
         selected = _selected_owner(config)
+        core_cleanup = _core_cleanup(config)
         budget=resolve(config)
         with NativeOwner(config,budget) as owner, Journal(owner.db_id) as journal, journal.lease():
             if selected is not None and selected.db_id is not None and selected.db_id != owner.db_id:
@@ -554,6 +576,10 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                     serve(identifier)
                     journal.mark(identifier,fingerprint,previous_guide,"ineligible")
                     continue
+                if "core" in target["tags"] and not core_cleanup:
+                    serve(identifier)
+                    journal.mark(identifier,fingerprint,previous_guide,"core_foreground_only")
+                    continue
                 pool.append(target)
             context=tag_context.collect(config,expected_db_id=owner.db_id,
                 timeout=max(.001,owner.deadline-time.monotonic()),max_bytes=max(1,min(context_room,owner.remaining_bytes)),
@@ -566,7 +592,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
             # Explicit classifier/envelope revisions can change feasibility and
             # judgment; vocabulary growth alone cannot invalidate examination.
             guide=hashlib.sha256(encoded({"guide":semantic_guide,"contract":stewardship_contract.REVISION,
-                "effort":budget.effort})).hexdigest()
+                "effort":budget.effort, **({"core_cleanup":False} if not core_cleanup else {})})).hexdigest()
             journal.put("guide_revision",semantic_guide)
             journal.candidates(guide,max_nodes)  # bounded policy invalidation, separate from cold cursor
             targets=[]
@@ -576,7 +602,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                     serve(identifier)
                     journal.db.execute("UPDATE work SET dirty=0,cold=0 WHERE id=?",(identifier,))
                     continue
-                prompt,_=stewardship_contract.prepare([*targets,target],context,budget=budget)
+                prompt,_=stewardship_contract.prepare([*targets,target],context,budget=budget,core_cleanup=core_cleanup)
                 if prompt is None:
                     if not targets:
                         serve(identifier)
@@ -610,7 +636,7 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
             decisions=result.get("decisions")
             # Validate again at authority boundary: injected or replaced runtimes
             # cannot supply unchecked mutations.
-            _,validation=stewardship_contract.prepare(targets,context,budget=budget)
+            _,validation=stewardship_contract.prepare(targets,context,budget=budget,core_cleanup=_core_cleanup(config))
             try:
                 decisions=stewardship_contract.validate_answer({"decisions":decisions},validation)["decisions"]
             except (ValueError,TypeError,KeyError):
@@ -641,6 +667,11 @@ def step(config, session_id, runtime, reserve, account, *, allowed=lambda:True):
                 disposition=decision["disposition"]
                 if disposition!="retag":
                     journal.mark(target["id"],target["content_fingerprint"],guide,disposition)
+                    continue
+                try:
+                    _require_background_retag(config, target, decision["tags"])
+                except ValueError:
+                    journal.mark(target["id"],target["content_fingerprint"],guide,"core_foreground_only")
                     continue
                 seq=journal.intent(target,guide,decision["tags"])
                 try:

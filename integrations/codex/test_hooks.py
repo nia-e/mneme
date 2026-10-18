@@ -16,6 +16,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
+from fixture_model_dates import epoch_second_display
 
 SPEC = importlib.util.spec_from_file_location("mneme_codex_hooks", Path(__file__).with_name("hooks.py"))
 hooks = importlib.util.module_from_spec(SPEC)
@@ -449,8 +450,9 @@ class HookTests(unittest.TestCase):
         encoded = context[context.index('[{"id"'):]
         rendered, _ = json.JSONDecoder().raw_decode(encoded)
         self.assertEqual(rendered[0]["kind"], "episode")
-        for key in hooks.EPISODE_CARD_FIELDS:
-            self.assertEqual(rendered[0][key], card[key])
+        expected = epoch_second_display(card)
+        for key in set(expected) - {"fingerprint"}:
+            self.assertEqual(rendered[0][key], expected[key])
         self.assertEqual(rendered[0]["occurrence_contexts"], card["occurrence_contexts"])
         self.assertLessEqual(len(context.encode()), hooks.MAX_CONTEXT_BYTES)
 
@@ -898,8 +900,9 @@ class AsyncBytePackingTests(unittest.TestCase):
         self.assertIn("s" * 160, packed["context"])
         items, _ = json.JSONDecoder().raw_decode(packed["context"][packed["context"].index('[{"id"'):])
         for shown, card in zip(items, packed["cards"]):
-            for key in hooks.EPISODE_CARD_FIELDS:
-                self.assertEqual(shown[key], card[key])
+            expected = epoch_second_display(card)
+            for key in set(expected) - {"fingerprint"}:
+                self.assertEqual(shown[key], expected[key])
             self.assertEqual(shown["summary"], card["summary"])
         repeated = hooks._pack_async_delivery(packed["cards"], "s" * 160, "t" * 160, "0" * 26,
                                              prior_budget_omitted=packed["budget_omitted_count"])

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import turn_observer as observer
+from fixture_model_dates import epoch_second_display
 from fixture_source_turn import (
     META, PROMPT, SESSION, TURN, SourceTurnFixture, assistant, call, complete_turn,
     context, delivered, delivery_packet, encoded, event, header, opening, output,
@@ -1183,7 +1184,7 @@ class EpisodeDisplayBindingTests(unittest.TestCase):
         packet = self.packet(card)
         copied = observer.validate_delivery_packet(packet)
         shown = copied["displayed"][0]
-        self.assertEqual(shown["displayed_view"], {k: v for k, v in card.items() if k != "fingerprint"})
+        self.assertEqual(shown["displayed_view"], {k: v for k, v in epoch_second_display(card).items() if k != "fingerprint"})
         self.assertFalse(any(k in shown for k in ("routing_binding", "entry_kind", "conditional_binding")))
         for changes in ({"current_edition_id": "4" * 26}, {"origins": [{"kind": "lexical"}]},
                         {"source": "another display preview"}):

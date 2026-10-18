@@ -46,6 +46,10 @@ impl PreparedEpisode {
         self.inner.action()
     }
 
+    pub(crate) fn capability(&self) -> shared::EpisodeCapability {
+        self.inner.capability()
+    }
+
     pub(crate) fn is_mutation(&self) -> bool {
         self.inner.is_mutation()
     }
@@ -69,6 +73,9 @@ pub(crate) fn tool_schema(profile: CapabilityProfile) -> Value {
         CapabilityProfile::Operator => &EpisodeAction::ALL,
     };
     let mut schema = shared::input_schema(allowed);
+    if profile != CapabilityProfile::Operator {
+        schema["properties"]["tags"]["items"]["not"] = crate::core_tag_input_schema();
+    }
     schema["properties"]["db"] = crate::db_prop();
     schema["properties"]["expected_db_id"] = crate::expected_db_id_prop();
     // Hosts may render each oneOf branch independently, without intersecting
@@ -83,6 +90,9 @@ pub(crate) fn tool_schema(profile: CapabilityProfile) -> Value {
             branch["properties"]["action"]["const"].as_str(),
             Some("append" | "revise")
         ) {
+            if profile != CapabilityProfile::Operator {
+                branch["properties"]["tags"]["items"]["not"] = crate::core_tag_input_schema();
+            }
             branch["required"]
                 .as_array_mut()
                 .expect("episode action required fields")

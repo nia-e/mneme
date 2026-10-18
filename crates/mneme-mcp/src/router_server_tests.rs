@@ -349,6 +349,102 @@ mod http_tests {
     }
 
     #[tokio::test]
+    async fn query_summary_bound_matches_each_router_catalog_and_never_reaches_legacy_owner() {
+        for profile in [CapabilityProfile::ReadOnly, CapabilityProfile::Operator] {
+            for supported in [false, true] {
+                let mut tools = crate::tool_schemas(CapabilityPolicy::new(profile, false));
+                if !supported {
+                    tools
+                        .iter_mut()
+                        .find(|tool| tool["name"] == "query")
+                        .unwrap()["inputSchema"]["properties"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("summary_max_bytes");
+                }
+                let mock = Mock::with_catalog(ID, profile, tools).await;
+                *mock.state.response.lock().unwrap() = Some(crate::response::tool_success(
+                    &json!({
+                        "schema":"mneme.query.v3", "lanes":{"primary":{"hits":[{
+                            "summary":if supported { "l" } else { "legacy owner ignores requested prefix" },
+                            "summary_truncated":supported, "created":61234, "id":ID, "lane_rank":1,
+                            "status":"active", "evidence":{}
+                        }]}}
+                    }),
+                ));
+                let router = server(
+                    config(vec![owner("memory", mock.port, ID)], "memory"),
+                    Path::new("."),
+                )
+                .await;
+                let emitted = router.dispatch("tools/list", json!({})).await.unwrap();
+                assert_eq!(
+                    mneme_app::query::SummaryMaxBytes::advertised(
+                        emitted["tools"].as_array().unwrap()
+                    ),
+                    supported
+                );
+                let before = mock.wire_count();
+                // Shared typed admission must fail even when the owner would
+                // accept arbitrary extra fields; no database verification call.
+                for invalid in [
+                    json!(0),
+                    json!(16385),
+                    json!(u64::MAX),
+                    json!(true),
+                    json!(1.0),
+                    json!("1"),
+                    Value::Null,
+                ] {
+                    let refused = call(
+                        &router,
+                        "query",
+                        json!({"db":"memory","text":"q","summary_max_bytes":invalid}),
+                    )
+                    .await;
+                    assert_eq!(refused["isError"], true, "{refused}");
+                }
+                assert_eq!(mock.wire_count(), before);
+                let result = call(
+                    &router,
+                    "query",
+                    json!({"db":"memory","text":"q","summary_max_bytes":1}),
+                )
+                .await;
+                if supported {
+                    assert_eq!(result["isError"], false, "{result}");
+                    assert_eq!(
+                        body(&result)["result"]["lanes"]["primary"]["hits"][0]["summary"],
+                        "l"
+                    );
+                    let calls = mock.state.calls.lock().unwrap();
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0].0["arguments"]["summary_max_bytes"], 1);
+                    assert_eq!(calls[0].0["arguments"]["db"], "user");
+                    assert_eq!(calls[0].0["arguments"]["expected_db_id"], ID);
+                } else {
+                    assert_eq!(result["isError"], true, "{result}");
+                    assert!(
+                        body(&result)
+                            .to_string()
+                            .contains("summary_max_bytes is not advertised"),
+                        "{result}"
+                    );
+                    assert_eq!(mock.wire_count(), before);
+                    assert!(mock.state.calls.lock().unwrap().is_empty());
+                    // Omission preserves the old owner's existing QUERY path.
+                    assert_eq!(
+                        call(&router, "query", json!({"db":"memory","text":"q"})).await["isError"],
+                        false
+                    );
+                    assert_eq!(mock.state.calls.lock().unwrap().len(), 1);
+                }
+                router.close().await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn default_explicit_reads_and_explicit_mutations_share_one_catalog() {
         let user = Mock::new(ID, CapabilityProfile::Operator).await;
         let misc = Mock::new(OTHER_ID, CapabilityProfile::Curator).await;
@@ -536,6 +632,30 @@ mod http_tests {
                     profile == CapabilityProfile::Operator,
                 ),
                 (
+                    "retag",
+                    json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_tags":["core"],"tags":["core","fact"]}),
+                    matches!(
+                        profile,
+                        CapabilityProfile::Curator | CapabilityProfile::Operator
+                    ),
+                ),
+                (
+                    "edit_body",
+                    json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_body_revision":"a".repeat(64),"body":"replacement"}),
+                    matches!(
+                        profile,
+                        CapabilityProfile::Curator | CapabilityProfile::Operator
+                    ),
+                ),
+                (
+                    "edit_summary",
+                    json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_snapshot_sha256":"a".repeat(64),"summary":"replacement"}),
+                    matches!(
+                        profile,
+                        CapabilityProfile::Curator | CapabilityProfile::Operator
+                    ),
+                ),
+                (
                     "forget",
                     json!({"db":"memory","id":ID}),
                     profile == CapabilityProfile::Operator,
@@ -559,6 +679,21 @@ mod http_tests {
                     profile == CapabilityProfile::Operator,
                 ),
             ] {
+                if matches!(name, "retag" | "edit_body" | "edit_summary") {
+                    let schema = list["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|tool| tool["name"] == name);
+                    assert_eq!(
+                        schema.is_some_and(|tool| crate::tests::schema_accepts(
+                            &tool["inputSchema"],
+                            &args
+                        )),
+                        allowed,
+                        "routed catalog disagrees with {profile:?} {name}: {args}"
+                    );
+                }
                 let count = mock.wire_count();
                 let result = call(&router, name, args).await;
                 assert_eq!(
@@ -778,7 +913,7 @@ mod http_tests {
         let before = mock.wire_count();
         for args in [
             json!({"db":"memory","id":ID,"expected_tags":[],"tags":[]}),
-            json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_tags":[],"tags":["x","x"]}),
+            json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_tags":[],"tags":["bad+tag"]}),
             json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_tags":null,"tags":[]}),
             json!({"db":"memory","expected_db_id":OTHER_ID,"id":ID,"expected_tags":[],"tags":[]}),
             json!({"db":"memory","expected_db_id":ID,"id":ID,"expected_tags":[],"tags":[],"snapshot":{"source_device_id":"pi","generation":"G1"}}),

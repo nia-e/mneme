@@ -29,7 +29,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
     }
     assert_eq!(
         names.iter().filter(|name| name.as_str() != "help").count(),
-        40,
+        41,
         "review the workflow guide when commands change"
     );
     for heading in ["Read:", "Inspect:", "Write:", "Curate:", "Maintain:"] {
@@ -56,6 +56,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
     assert!(help.contains("capture add --input PATH"));
     assert!(help.contains("episode append --input PATH"));
     assert!(help.contains("single-graph-upgrade"));
+    assert!(names.iter().any(|name| name == "tag-format-migration"));
     assert!(!help.contains("episode-upgrade"));
     assert!(!help.contains("upgrade-index"));
     assert!(!help.contains("consolidate"));

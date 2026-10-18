@@ -426,6 +426,13 @@ impl Memory {
         now: EpisodeTime,
         expectation: EpisodeWriteExpectation,
     ) -> Result<EpisodeWriteResult> {
+        let tags = mneme_core::normalize_tags(request.capture.tags.iter())
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
+        if tags.contains(super::CORE_TAG) {
+            return Err(Error::InvalidInput(
+                "episodes cannot be always-loaded core memory".into(),
+            ));
+        }
         let embedding = self.embed_one(request.capture.summary.as_str()).await?;
         let body_ref = self
             .bodies
@@ -437,7 +444,7 @@ impl Memory {
             id,
             summary: request.capture.summary,
             body: body_ref.clone(),
-            tags: request.capture.tags,
+            tags,
             provenance: Provenance::External {
                 source: request.capture.source,
             },

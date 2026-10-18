@@ -146,9 +146,7 @@ fn required_profile(tool: &str, args: &Value, access: RequestAccess) -> u8 {
     }
     if matches!(
         tool,
-        "edit_body"
-            | "edit_summary"
-            | "supersede"
+        "supersede"
             | "forget"
             | "reconcile"
             | "feedback"
@@ -157,10 +155,17 @@ fn required_profile(tool: &str, args: &Value, access: RequestAccess) -> u8 {
             | "prune"
             | "snapshot_create"
     ) || (tool == "episode" && args["action"] == "revise")
-        || args
-            .get("tags")
-            .and_then(Value::as_array)
-            .is_some_and(|tags| tags.iter().any(|tag| tag == "core"))
+        || (matches!(tool, "save" | "capture" | "ingest" | "episode")
+            && args
+                .get("tags")
+                .and_then(Value::as_array)
+                .is_some_and(|tags| {
+                    tags.iter().any(|tag| {
+                        tag.as_str().is_some_and(|tag| {
+                            mneme_core::normalize_tag(tag).is_ok_and(|tag| tag == "core")
+                        })
+                    })
+                }))
     {
         3
     } else {
@@ -676,6 +681,13 @@ impl ConfiguredClient {
                     );
                 }
 
+                if tool == "query" && args.get("summary_max_bytes").is_some() {
+                    tokio::time::timeout_at(budget.deadline, client.ensure_catalog())
+                        .await.map_err(|_| "shared catalog deadline exhausted")??;
+                    if !mneme_app::query::SummaryMaxBytes::advertised(client.tool_catalog()) {
+                        return Err("query summary_max_bytes is unavailable on this owner; update the owner build or omit the bound. No fallback attempted".into());
+                    }
+                }
                 if tool != "activity" {
                     args["db"] = json!(
                         route

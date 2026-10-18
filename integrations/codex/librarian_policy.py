@@ -5,6 +5,7 @@ provider/backend spending caps. Actual usage remains in the parent session ledge
 """
 from dataclasses import dataclass
 from collections.abc import Mapping
+import re
 
 MODEL = "gpt-6.1-sol"
 EFFORTS = ("low", "medium", "high")
@@ -28,10 +29,17 @@ class LibrarianBudget:
     # Configured jobs MUST use resolve(); it never supplies these defaults.
     model: str = MODEL
     effort: str = "medium"
+    assessor: str = "codex"
 
     def __post_init__(self):
-        if type(self.model) is not str or self.model != MODEL:
-            raise ValueError("reader_model must explicitly select gpt-6.1-sol; reprepare async configuration")
+        if type(self.assessor) is not str or self.assessor not in ("codex", "claude_code"):
+            raise ValueError("assessor must explicitly select codex or claude_code")
+        if self.assessor == "codex":
+            if type(self.model) is not str or self.model != MODEL:
+                raise ValueError("reader_model must explicitly select gpt-6.1-sol; reprepare async configuration")
+        elif (type(self.model) is not str or len(self.model) > 128
+              or re.fullmatch(r"claude-(?:[a-z][a-z0-9]*-)+[0-9][a-z0-9-]*", self.model) is None):
+            raise ValueError("reader_model must explicitly select a full Claude model ID, not an alias")
         if type(self.effort) is not str or self.effort not in EFFORTS:
             raise ValueError("librarian_effort must explicitly select low, medium, or high")
 
@@ -72,7 +80,9 @@ def resolve(config):
     """Constructor-checked policy; missing, legacy or coerced fields fail closed."""
     if isinstance(config, Mapping):
         model, effort = config.get("reader_model"), config.get("librarian_effort")
+        assessor = config.get("assessor", "codex")
     else:
         model = getattr(config, "reader_model", None)
         effort = getattr(config, "librarian_effort", None)
-    return LibrarianBudget(model, effort)
+        assessor = getattr(config, "assessor", "codex")
+    return LibrarianBudget(model, effort, assessor)

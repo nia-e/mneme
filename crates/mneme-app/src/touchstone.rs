@@ -181,12 +181,7 @@ impl PreparedTouchstoneList {
         let items = page
             .items
             .iter()
-            .map(|header| {
-                json!({
-                    "id":header.id,"summary":header.summary,"subject":header.subject,
-                    "reference_count":header.reference_count,"status":header.status
-                })
-            })
+            .map(touchstone_header_json)
             .collect::<Vec<_>>();
         Ok(json!({"kind":"touchstones","db_id":db_id.to_string(),
             "items":items,"next_cursor":page.next,"has_more":page.next.is_some()}))
@@ -253,6 +248,15 @@ pub async fn node_touchstone_projection(
             }
             current.push(item);
         }
+        // Keep immutable snapshot bytes and proofs untouched. Calendar rendering
+        // is a separate, identity-keyed read projection, not part of the record.
+        value["touchstone_references_utc"] = serde_json::to_value(
+            record
+                .references()
+                .iter()
+                .map(mneme_present::SnapshotTimePresentation::new)
+                .collect::<Vec<_>>(),
+        )?;
         value["touchstone"] = serde_json::to_value(record)?;
         value["touchstone_current"] = json!({"coverage":"summary_only","references":current});
     }
@@ -267,9 +271,39 @@ pub async fn node_touchstone_projection(
     Ok(value)
 }
 
+fn touchstone_header_json(header: &mneme_core::TouchstoneHeader) -> Value {
+    // Browse did not expose raw creation before UTC presentation. Keep it a
+    // display-only addition rather than introducing a new u128 JSON constraint.
+    json!({
+        "id":header.id,"summary":header.summary,"subject":header.subject,
+        "created_utc":mneme_present::format_timestamp_millis(header.created),
+        "reference_count":header.reference_count,"status":header.status
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browse_creation_display_accepts_the_full_domain_timestamp_without_a_new_raw_field() {
+        let header = mneme_core::TouchstoneHeader {
+            id: mneme_core::NodeId(Ulid::from(1_u128)),
+            created: u128::MAX,
+            summary: mneme_core::NodeSummary::new("An old annotation").unwrap(),
+            subject: mneme_core::TouchstoneSubject::new("The scene").unwrap(),
+            reference_count: 0,
+            status: mneme_core::NodeStatus::Active,
+        };
+        let shown = touchstone_header_json(&header);
+        assert_eq!(
+            shown["created_utc"],
+            format!("out of calendar range ({} Unix epoch ms)", u128::MAX)
+        );
+        assert!(shown.get("created").is_none());
+        assert_eq!(shown["id"], json!(header.id));
+        assert_eq!(header.created, u128::MAX);
+    }
 
     fn authored() -> Value {
         json!({"subject":"The scene that changed the checklist", "references":[{
@@ -386,6 +420,35 @@ mod tests {
         assert_eq!(
             projection["touchstone_current"]["references"][0]["status"],
             "unchanged"
+        );
+        assert_eq!(
+            projection["touchstone_references_utc"][0]["id"],
+            json!(target.id)
+        );
+        assert_eq!(
+            projection["touchstone_references_utc"][0]["created_utc"],
+            mneme_present::format_timestamp_millis(snapshot.created())
+        );
+        let retained: mneme_core::TouchstoneRecord =
+            serde_json::from_value(projection["touchstone"].clone()).unwrap();
+        assert_eq!(
+            retained.references()[0].canonical_bytes(),
+            snapshot.canonical_bytes()
+        );
+        assert_eq!(retained.references()[0].digest(), snapshot.digest());
+        assert_eq!(
+            memory
+                .summary_snapshot(target.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .digest(),
+            snapshot.digest()
+        );
+        assert!(
+            projection["touchstone"]["references"][0]
+                .get("created_utc")
+                .is_none()
         );
         let mneme_core::Provenance::External { source } = owner_node.provenance() else {
             panic!("missing source")

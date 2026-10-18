@@ -924,10 +924,14 @@ fn ingest_limits_are_enforced_independently_of_transport() {
     assert!(validate_tags(&["valid".into(), "two".into()]).is_ok());
     assert!(validate_tags(&["x".repeat(256)]).is_ok());
     assert!(validate_tags(&["x".repeat(257)]).is_err());
-    assert!(validate_tags(&["é".repeat(128)]).is_ok());
+    // Fresh tag intent must normalize to ASCII slugs; UTF-8 byte admission
+    // alone no longer makes an unsupported spelling materializable.
+    assert!(validate_tags(&["é".repeat(128)]).is_err());
     assert!(validate_tags(&["é".repeat(129)]).is_err());
-    assert!(validate_tags(&[" duplicate".into()]).is_err());
-    assert!(validate_tags(&["same".into(), "same".into()]).is_err());
+    assert!(validate_tags(&[" Rust Compiler ".into()]).is_ok());
+    assert!(validate_tags(&["same".into(), "same".into()]).is_ok());
+    assert!(validate_tags(&["C++".into()]).is_err());
+    assert!(validate_tags(&["---".into()]).is_err());
     assert!(unit_interval("confidence", 1.0).is_ok());
     assert!(unit_interval("confidence", 1.1).is_err());
     assert_eq!(unit_interval("confidence", 0.1).unwrap(), 0.1_f32);

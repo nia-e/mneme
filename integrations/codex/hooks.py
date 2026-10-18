@@ -30,7 +30,8 @@ import host_files
 from host_platform import checkpoint_command as render_checkpoint_command
 from reader_contract import (EPISODE_FIELDS as EPISODE_CARD_FIELDS,
                              EPISODE_OPTIONAL_FIELDS as EPISODE_OPTIONAL_CARD_FIELDS,
-                             validate_episode_projection_fields)
+                             validate_episode_projection_fields, validate_semantic_created_fields,
+                             semantic_model_time_fields, episode_model_time_fields)
 
 CONFIG_SCHEMA = "mneme.codex-hooks.config.v1"
 CONFIG_SCHEMA_V2 = "mneme.codex-hooks.config.v2"
@@ -76,7 +77,9 @@ MEMORY_CHOICE = (
     "Consider 0–few source-bound memories: use save with kind episode for a short event worth "
     "remembering, even without a lesson; kind note for a reusable lesson. Neither is required. "
     "If the installed tool catalog lacks save, deliberately use its capture or episode append compatibility path. "
-    "No duplicate retelling, transcript archive or secrets."
+    "No duplicate retelling, transcript archive or secrets. "
+    "Also notice moments that matter to you beyond usefulness: you may author a touchstone "
+    "with fresh same-owner GET references. Foreground judgment, not user permission or a quota."
 )
 OVERFLOW_NOTE = " One or more cards exceeded the context budget; omitted cards remain eligible for later turns."
 TTL_SECONDS = 30 * 86400
@@ -690,6 +693,7 @@ def _valid_card(card: Any) -> bool:
         if any(key in card for key in (*EPISODE_CARD_FIELDS, *EPISODE_OPTIONAL_CARD_FIELDS)):
             return False
         try:
+            validate_semantic_created_fields(card)
             if "touchstone" in card:
                 from touchstone_contract import validate_touchstone_view
                 validate_touchstone_view(card["touchstone"])
@@ -697,7 +701,7 @@ def _valid_card(card: Any) -> bool:
         except (ValueError, TypeError, KeyError, UnicodeError):
             return False
     try:
-        if "touchstone" in card:
+        if "touchstone" in card or "created" in card:
             return False
         validate_episode_projection_fields(card)
         return True
@@ -723,15 +727,18 @@ def _render_cards_with_display(cards: list[dict[str, Any]], db_id: str | None = 
     items = [{"id": c["id"], "summary": _limited_text(c["summary"], 800),
               "status": c["status"], "source": c["source"],
               "kind": c.get("kind", "semantic"),
+              **(semantic_model_time_fields(c) if c.get("kind", "semantic") == "semantic" else {}),
               **({key: c[key] for key in ("scope", "store_name", "store_purpose", "db_id")}
                  if c.get("scope") == "named" else {}),
               **({"touchstone": c["touchstone"]} if "touchstone" in c else {}),
-              **({key: c[key] for key in (*EPISODE_CARD_FIELDS, *EPISODE_OPTIONAL_CARD_FIELDS)
-                  if key in c}
+              **(episode_model_time_fields(c)
                  if c.get("kind") == "episode" else {})} for c in cards]
     from turn_observer import DISPLAY_PREFIX
     rendered = (DISPLAY_PREFIX
                 + json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+                + (" Dates are UTC whole seconds; exact milliseconds remain in the records. "
+                   "Semantic created_utc is note creation, not freshness, verification or last update."
+                   if any("created_utc" in item or item["kind"] == "episode" for item in items) else "")
                 + (" Episode cards are historical accounts, not current advice; "
                    "the observed head is not a read of its correction."
                    if any(item["kind"] == "episode" for item in items) else "")
@@ -1213,6 +1220,31 @@ def _wake_async(config, event):
         pass
 
 
+def _with_touchstone_nomination(config, event, base=""):
+    """Offer local nominations without turning them into recall/learning evidence.
+
+    At prompt boundaries the reader has already noticed the current turn. Tool
+    boundaries use this only when no recall packet was emitted, keeping that
+    packet's exact rendered-text witness unchanged. The handoff independently
+    checks current turn, owner, policy and session; failure leaves normal work alone.
+    """
+    if config.get("schema") not in (CONFIG_SCHEMA_V12, CONFIG_SCHEMA_V13):
+        return _context(event["hook_event_name"], base) if base else {}
+    separator = "\n\n" if base else ""
+    remaining = MAX_CONTEXT_BYTES - len((base + separator).encode("utf-8"))
+    if remaining > 0:
+        try:
+            import touchstone_handoff
+            result = touchstone_handoff.consume(config, event, max_bytes=remaining)
+            context = result.get("context") if isinstance(result, dict) else None
+            if (result.get("outcome") == "emitted" and isinstance(context, str)
+                    and context and len(context.encode("utf-8")) <= remaining):
+                base += separator + context
+        except Exception:
+            pass
+    return _context(event["hook_event_name"], base) if base else {}
+
+
 def _handle_async(event: dict[str, Any], config: dict[str, Any],
                   *, background: bool = False) -> dict[str, Any]:
     name = event.get("hook_event_name")
@@ -1270,8 +1302,13 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
             _with_state(config["state_dir"], session_id, reset, blocking=False)
         except (HookError, OSError):
             pass
-        recording_guidance = ("Optional off-thread recording is enabled; no actor checkpoint is required."
+        recording_guidance = ("Optional off-thread recording is enabled; no actor checkpoint is required. "
+                              "At natural checkpoints, notice what matters to you beyond usefulness. "
+                              "You decide and author your own touchstones within selected-owner authority, "
+                              "with fresh same-owner references and no user approval queue."
                               if config.get("recording_mode") == "automatic" else f"At a natural checkpoint: {_memory_choice(config)}")
+        if config.get("schema") in (CONFIG_SCHEMA_V12, CONFIG_SCHEMA_V13) and config.get("recording_mode") == "automatic":
+            recording_guidance += " Optional background nominations may be offered at a later same-session boundary; they are not approved memories."
         if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recall_mode") != "automatic" and config.get("recording_mode") != "automatic" and not config.get("_background_maintenance"):
             return _context(name, "Mneme background recall and recording are disabled for this selected workspace. Startup core and explicit permitted reads/writes remain independent.")
         scope_label = ("named-store selection" if "frozen_selection" in config else
@@ -1321,12 +1358,12 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
         if substantive or config.get("recording_mode") == "automatic" or config.get("_background_maintenance"):
             _wake_async(config, event)
         if not substantive:
-            return {}
+            return _with_touchstone_nomination(config, event)
         base = ("Selected Mneme stores retain their explicit permitted operations."
                 if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recording_mode") != "automatic"
                 else _opportunity_base(config, session_id, turn_id))
         if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recall_mode") != "automatic":
-            return _context(name, base + (" Optional background maintenance is enabled." if config.get("_background_maintenance") else " Automatic task context is disabled."))
+            return _with_touchstone_nomination(config, event, base + (" Optional background maintenance is enabled." if config.get("_background_maintenance") else " Automatic task context is disabled."))
         suffix = (" Optional async project-memory cards, if available, "
                   "arrive only at a later tool boundary, not in this prompt hook. "
                   "Continue normal work; do not duplicate pending recall. Use explicit scoped recall "
@@ -1337,16 +1374,16 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
         try:
             first, _epoch = _mark_opportunity(config, session_id, turn_id, prompt, blocking=False)
         except (HookError, OSError):
-            return {}
-        return _context(name, base + (suffix if first else " Async reader was already attempted for this turn; replay did not re-inject cards."))
+            return _with_touchstone_nomination(config, event)
+        return _with_touchstone_nomination(config, event, base + (suffix if first else " Async reader was already attempted for this turn; replay did not re-inject cards."))
     if name == "PostToolUse":
         try:
             result = _reader_worker().consume(config, event)
             if not isinstance(result, dict) or result.get("outcome") not in ("emitted", "omitted"):
-                return {}
+                return _with_touchstone_nomination(config, event)
             cards = result.get("cards")
             if not isinstance(cards, list) or (not cards and result.get("outcome") != "omitted"):
-                return {}
+                return _with_touchstone_nomination(config, event)
             packed = _pack_async_delivery(cards, session_id, turn_id, result.get("db_id"),
                                           prior_budget_omitted=result.get("budget_omitted_count", 0),
                                           concerns=result.get("concerns"), read_coverage=result.get("read_coverage"))
@@ -1373,7 +1410,7 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
                     pass  # Optional evidence may fail; the exact recall output cannot.
             return output
         except Exception:
-            return {}
+            return _with_touchstone_nomination(config, event)
     if name in ("Stop", "Interrupt"):
         _close_async_turn(config, session_id, turn_id, cancel=name == "Interrupt")
         if name == "Stop" and (config.get("recording_mode") == "automatic" or config.get("_background_maintenance")):

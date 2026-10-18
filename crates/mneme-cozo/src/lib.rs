@@ -36,12 +36,13 @@ pub use canonical_node_contract::MAX_CANONICAL_NODE_JSON_BYTES;
 pub use cozo_store::{
     BackendActivity, BackendActivityGuard, CozoStore, FreshCurrentMaterializationErrorV1,
     FreshCurrentMaterializationFailurePhaseV1, FreshCurrentMaterializationResultV1,
-    FreshCurrentTargetPublicationStateV1,
+    FreshCurrentTargetPublicationStateV1, SqliteTagFormatMigration,
 };
 
 mod mem_episodes;
 mod mem_touchstones;
 mod routing_probe;
+pub mod tag_format_migration;
 mod tag_stewardship;
 #[cfg(test)]
 mod touchstone_tests;
@@ -1329,7 +1330,7 @@ impl MemStore {
             }
             self.export_locked(&g)
         };
-        let bytes = serde_json::to_vec_pretty(&StoreExportEnvelopeV5::new(snap))
+        let bytes = serde_json::to_vec_pretty(&StoreExportEnvelopeV6::new(snap))
             .map_err(|e| Error::Backend(format!("serialize snapshot: {e}")))?;
         atomic_replace(path.as_ref(), &bytes)
     }
@@ -1341,7 +1342,9 @@ impl MemStore {
         let value: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| Error::InvalidInput(format!("invalid snapshot: {e}")))?;
         match value.get("schema").and_then(|schema| schema.as_str()) {
-            Some(STORE_EXPORT_SCHEMA_V5) => {},
+            Some(STORE_EXPORT_SCHEMA_V6) => {},
+            Some(STORE_EXPORT_SCHEMA_V5) => return Err(Error::InvalidInput(
+                "TouchstonesV1 JSON predecessor requires explicit tag normalization migration".into())),
             Some(STORE_EXPORT_SCHEMA_V4) => return Err(Error::InvalidInput(
                 "EpisodeContextV2 JSON predecessor requires explicit single-graph-upgrade --target-generation touchstones-v1".into())),
             Some(STORE_EXPORT_SCHEMA_V3) => return Err(Error::InvalidInput(
@@ -1364,9 +1367,33 @@ impl MemStore {
                 "v5 snapshot requires touchstones field".into(),
             ));
         }
-        let envelope: StoreExportEnvelopeV5 = serde_json::from_value(value)
+        let envelope: StoreExportEnvelopeV6 = serde_json::from_value(value)
             .map_err(|e| Error::Backend(format!("parse snapshot: {e}")))?;
         Self::from_export_unchecked(envelope.into_store()?)
+    }
+
+    /// Explicit exact predecessor decoder for inspection/migration only. No tag
+    /// normalization is performed and ordinary writable load refuses this schema.
+    pub fn load_touchstones_v5(path: impl AsRef<Path>) -> Result<StoreExport> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| Error::Backend(format!("read predecessor snapshot: {e}")))?;
+        let envelope: StoreExportEnvelopeV5 = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::InvalidInput(format!("invalid predecessor snapshot: {e}")))?;
+        envelope.into_store()
+    }
+
+    /// Frozen TouchstonesV1 predecessor output for the named historical ladder.
+    /// This is never a current canonical-tag writable publication.
+    pub fn save_touchstones_v5(&self, path: impl AsRef<Path>) -> Result<()> {
+        let g = self.lock();
+        if g.managed_reference.is_some() {
+            return Err(Error::Conflict(
+                "managed stores cannot export conventional snapshots".into(),
+            ));
+        }
+        let bytes = serde_json::to_vec_pretty(&StoreExportEnvelopeV5::new(self.export_locked(&g)))
+            .map_err(|e| Error::InvalidInput(format!("serialize predecessor: {e}")))?;
+        atomic_replace(path.as_ref(), &bytes)
     }
 
     /// Frozen EpisodeContextV2 predecessor output, never drops touchstone rows.
@@ -2149,6 +2176,86 @@ fn normalize_export_tag_arrays(value: &mut serde_json::Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Canonical-tag writable successor. The schema change is intentional: genuine
+/// v5 writers reject it before reconstructing a mutable store.
+pub const STORE_EXPORT_SCHEMA_V6: &str = "mneme.store-export.v6";
+
+#[derive(Clone, Debug)]
+pub struct StoreExportEnvelopeV6 {
+    pub store: StoreExport,
+}
+impl StoreExportEnvelopeV6 {
+    pub fn new(store: StoreExport) -> Self {
+        Self { store }
+    }
+    pub fn into_store(self) -> Result<StoreExport> {
+        validate_canonical_export_tags(&self.store)?;
+        mem_touchstones::validate_touchstone_import(&self.store)?;
+        Ok(self.store)
+    }
+}
+pub(crate) fn validate_current_node_tags(node: &Node) -> Result<()> {
+    if node.tags().any(|tag| !mneme_core::is_normalized_tag(tag)) {
+        return Err(Error::InvalidInput(
+            "new materialized node tags must be canonical ascii-slug-v1".into(),
+        ));
+    }
+    Ok(())
+}
+fn validate_canonical_export_tags(store: &StoreExport) -> Result<()> {
+    if store
+        .nodes
+        .iter()
+        .any(|node| node.tags().any(|tag| !mneme_core::is_normalized_tag(tag)))
+    {
+        return Err(Error::InvalidInput(
+            "v6 snapshot contains noncanonical materialized tags; explicit migration required"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+impl Serialize for StoreExportEnvelopeV6 {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        validate_canonical_export_tags(&self.store).map_err(serde::ser::Error::custom)?;
+        let mut value = serde_json::to_value(StoreExportEnvelopeV5::new(self.store.clone()))
+            .map_err(serde::ser::Error::custom)?;
+        value["schema"] = STORE_EXPORT_SCHEMA_V6.into();
+        value["tag_normalization_version"] = mneme_core::TAG_NORMALIZATION_VERSION.into();
+        value.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for StoreExportEnvelopeV6 {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: String,
+            tag_normalization_version: String,
+            store: serde_json::Value,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.schema != STORE_EXPORT_SCHEMA_V6
+            || wire.tag_normalization_version != mneme_core::TAG_NORMALIZATION_VERSION
+        {
+            return Err(serde::de::Error::custom(
+                "unsupported snapshot schema or tag normalization version",
+            ));
+        }
+        let legacy = serde_json::json!({"schema": STORE_EXPORT_SCHEMA_V5, "store": wire.store});
+        let predecessor: StoreExportEnvelopeV5 =
+            serde_json::from_value(legacy).map_err(serde::de::Error::custom)?;
+        let store = predecessor.into_store().map_err(serde::de::Error::custom)?;
+        validate_canonical_export_tags(&store).map_err(serde::de::Error::custom)?;
+        Ok(Self { store })
     }
 }
 
@@ -3066,6 +3173,7 @@ impl GraphStore for MemStore {
                 ))),
             };
         }
+        validate_current_node_tags(node)?;
         let sample = (stable_tag_sample_hash(id), id);
         if g.vectors.contains_key(&id)
             || g.touchstones.contains_key(&id)
@@ -3152,6 +3260,7 @@ impl GraphStore for MemStore {
     }
 
     async fn put_node(&self, node: &Node) -> Result<()> {
+        validate_current_node_tags(node)?;
         mem_episodes::require_semantic_node(node)?;
         node.validate()
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
@@ -5397,13 +5506,13 @@ mod tests {
     }
 
     #[test]
-    fn json_v5_envelope_fences_flat_reader_and_requires_identity() {
+    fn json_v6_envelope_fences_flat_reader_and_requires_identity() {
         let store = MemStore::new(2);
         let path = std::env::temp_dir().join(format!("mneme-v2-envelope-{}.json", Ulid::new()));
         store.save(&path).unwrap();
         let encoded: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(encoded["schema"], STORE_EXPORT_SCHEMA_V5);
+        assert_eq!(encoded["schema"], STORE_EXPORT_SCHEMA_V6);
         assert!(encoded.get("dim").is_none());
         assert!(encoded["store"].get("db_id").is_some());
         assert!(serde_json::from_value::<LegacyStoreExportV1>(encoded.clone()).is_err());
@@ -6266,6 +6375,57 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn explicit_snapshot_tag_migration_retains_exact_predecessor() {
+        use crate::tag_format_migration::*;
+        let mut export = MemStore::new(2).export();
+        export.nodes.push(tagged_test_node(
+            NodeId(Ulid::new()),
+            &["Old_Tag"],
+            NodeStatus::Active,
+        ));
+        let root = std::env::temp_dir().join(format!("mneme-snapshot-tag-migrate-{}", Ulid::new()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("predecessor.json");
+        let successor = root.join("successor.json");
+        let exact = serde_json::to_vec(&StoreExportEnvelopeV5::new(export)).unwrap();
+        std::fs::write(&source, &exact).unwrap();
+        let mut decoded = MemStore::load_touchstones_v5(&source).unwrap();
+        let options = TagFormatMigrationOptions::default();
+        let plan = plan_tag_format_export(&decoded, &options).unwrap();
+        let db_id = decoded.db_id;
+        normalize_tag_format_export(&mut decoded, &options, db_id, &plan.plan_sha256).unwrap();
+        MemStore::from_export(decoded)
+            .unwrap()
+            .save(&successor)
+            .unwrap();
+        let loaded = MemStore::load(&successor).unwrap();
+        assert_eq!(
+            loaded.export().nodes[0].tags().collect::<Vec<_>>(),
+            vec!["old-tag"]
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), exact);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_raw_node_writer_rejects_noncanonical_tags_without_mutation() {
+        let store = MemStore::new(2);
+        let node = tagged_test_node(NodeId(Ulid::new()), &["Old_Tag"], NodeStatus::Active);
+        assert!(matches!(
+            store.put_node(&node).await,
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(store.export().nodes.is_empty());
+        assert!(
+            serde_json::to_value(StoreExportEnvelopeV6::new(StoreExport {
+                nodes: vec![node],
+                ..store.export()
+            }))
+            .is_err()
+        );
+    }
+
     fn tagged_test_node(id: NodeId, tags: &[&str], status: NodeStatus) -> Node {
         Node::try_new(
             id,
@@ -6436,7 +6596,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mneme-tag-load-{}.json", Ulid::new()));
         std::fs::write(
             &path,
-            serde_json::to_vec(&StoreExportEnvelopeV5::new(export)).unwrap(),
+            serde_json::to_vec(&StoreExportEnvelopeV6::new(export)).unwrap(),
         )
         .unwrap();
         let loaded = MemStore::load(&path).unwrap();
@@ -7409,7 +7569,7 @@ mod tests {
         std::fs::write(
             &path,
             serde_json::to_vec(
-                &serde_json::json!({"schema": STORE_EXPORT_SCHEMA_V5, "store": export}),
+                &serde_json::json!({"schema": STORE_EXPORT_SCHEMA_V6, "tag_normalization_version": mneme_core::TAG_NORMALIZATION_VERSION, "store": export}),
             )
             .unwrap(),
         )
@@ -8263,7 +8423,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mneme-remote-overfull-{}.json", Ulid::new()));
         std::fs::write(
             &path,
-            serde_json::to_vec(&StoreExportEnvelopeV5::new(malformed)).unwrap(),
+            serde_json::to_vec(&StoreExportEnvelopeV6::new(malformed)).unwrap(),
         )
         .unwrap();
         assert!(matches!(
@@ -8626,7 +8786,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mneme-overfull-{}.json", Ulid::new()));
         std::fs::write(
             &path,
-            serde_json::to_vec(&StoreExportEnvelopeV5::new(malformed)).unwrap(),
+            serde_json::to_vec(&StoreExportEnvelopeV6::new(malformed)).unwrap(),
         )
         .unwrap();
         assert!(matches!(
@@ -10599,5 +10759,58 @@ mod summary_edit_atomic_tests {
                 mneme_core::managed::MAX_MANAGED_STORAGE_INTEGER
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tag_snapshot_fence_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_successor_fences_predecessor_and_requires_policy_marker() {
+        let store = MemStore::new(2).export();
+        let value = serde_json::to_value(StoreExportEnvelopeV6::new(store)).unwrap();
+        assert_eq!(value["schema"], STORE_EXPORT_SCHEMA_V6);
+        assert_eq!(
+            value["tag_normalization_version"],
+            mneme_core::TAG_NORMALIZATION_VERSION
+        );
+        // The frozen predecessor parser does not accept the new writer format.
+        assert!(serde_json::from_value::<StoreExportEnvelopeV5>(value.clone()).is_err());
+        assert!(serde_json::from_value::<StoreExportEnvelopeV6>(value.clone()).is_ok());
+        for marker in [None, Some("unknown-policy")] {
+            let mut bad = value.clone();
+            match marker {
+                None => {
+                    bad.as_object_mut()
+                        .unwrap()
+                        .remove("tag_normalization_version");
+                }
+                Some(marker) => bad["tag_normalization_version"] = marker.into(),
+            }
+            assert!(serde_json::from_value::<StoreExportEnvelopeV6>(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn snapshot_predecessor_is_explicit_exact_and_ordinary_load_does_not_rewrite() {
+        let export = MemStore::new(2).export();
+        let predecessor = serde_json::to_vec(&StoreExportEnvelopeV5::new(export.clone())).unwrap();
+        let path = std::env::temp_dir().join(format!("mneme-v5-tag-fence-{}.json", Ulid::new()));
+        std::fs::write(&path, &predecessor).unwrap();
+        assert!(
+            MemStore::load(&path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("explicit tag normalization migration")
+        );
+        let decoded = MemStore::load_touchstones_v5(&path).unwrap();
+        assert_eq!(
+            decoded.canonical_value().unwrap(),
+            export.canonical_value().unwrap()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), predecessor);
+        std::fs::remove_file(path).unwrap();
     }
 }

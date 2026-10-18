@@ -816,7 +816,7 @@ async fn contextual_editions_roundtrip_replay_and_headers_without_inheriting_con
     let path = std::env::temp_dir().join(format!("mneme-context-roundtrip-{}.json", Ulid::new()));
     store.save(&path).unwrap();
     let wire: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(wire["schema"], STORE_EXPORT_SCHEMA_V5);
+    assert_eq!(wire["schema"], STORE_EXPORT_SCHEMA_V6);
     let loaded = MemStore::load(&path).unwrap();
     assert_eq!(loaded.export().canonical_value().unwrap(), before);
     assert!(matches!(

@@ -5,8 +5,6 @@
 //! the native MCP payload rather than pretending those are the unbounded local
 //! CLI results (notably `core`, `get`, and `neighbors`).
 
-use std::collections::HashSet;
-
 use serde_json::{Value, json};
 
 use crate::{
@@ -49,13 +47,7 @@ fn tags(tags: &[String]) -> Result<(), AnyErr> {
     if tags.len() > 32 {
         return Err("remote accepts at most 32 tags".into());
     }
-    let mut unique = HashSet::new();
-    for tag in tags {
-        mneme_core::validate_tag(tag)?;
-        if !unique.insert(tag) {
-            return Err(format!("duplicate tag {tag:?}").into());
-        }
-    }
+    mneme_core::normalize_tags(tags)?;
     Ok(())
 }
 
@@ -118,7 +110,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
     let mut edit_body = None;
     let mut edit_summary = None;
     let (tool, arguments) = match command {
-        Command::Config(_) | Command::Client(_) => {
+        Command::Config(_) | Command::Client(_) | Command::TagFormatMigration(_) => {
             return Err("client is a standalone local process, not a remote CLI operation".into());
         }
         Command::Stores(_) => {
@@ -148,6 +140,9 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
             let mut request =
                 query_input(&a.text, a.k, a.depth, a.max_nodes, a.min_relevance, &a.tags)?;
             request["archived"] = json!(a.archived);
+            if let Some(limit) = a.summary_max_bytes {
+                request["summary_max_bytes"] = json!(limit);
+            }
             ("query", request)
         }
         Command::RecallContext(a) => {
@@ -563,6 +558,19 @@ pub(crate) fn render(command: &Command, result: &Value, json_output: bool) -> Re
                             s(hit, "status"),
                             s(hit, "summary")
                         );
+                        if hit["summary_truncated"] == true {
+                            println!(
+                                "    [summary truncated; use remote get for the canonical summary]"
+                            );
+                        }
+                        if let Some(created) = hit.get("created") {
+                            let timestamp = created
+                                .to_string()
+                                .parse::<u128>()
+                                .map(mneme_present::format_timestamp_millis)
+                                .unwrap_or_else(|_| created.to_string());
+                            println!("    created: {timestamp} (recorded, not verified)");
+                        }
                     }
                 }
             }
@@ -875,6 +883,47 @@ mod tests {
         let mut argv = vec!["mnemed"];
         argv.extend_from_slice(args);
         crate::Cli::try_parse_from(argv).unwrap().command
+    }
+
+    #[test]
+    fn fresh_query_tags_accept_normalizable_spellings_without_touching_source_proofs() {
+        let request = prepare(
+            &command(&[
+                "query",
+                "hello",
+                "--tag",
+                " Smoke / Fixture ",
+                "--tag",
+                "smoke-fixture",
+            ]),
+            "project",
+        )
+        .unwrap();
+        // This is a read filter: keep submitted text until the shared engine
+        // normalizes it; admission must not impose historical-node spelling.
+        assert_eq!(
+            request.arguments["tags"],
+            json!([" Smoke / Fixture ", "smoke-fixture"])
+        );
+        assert!(prepare(&command(&["query", "hello", "--tag", "C++"]), "project").is_err());
+    }
+
+    #[test]
+    fn query_summary_bound_is_forwarded_without_changing_remote_defaults() {
+        let default = prepare(&command(&["query", "hello"]), "project").unwrap();
+        assert!(default.arguments.get("summary_max_bytes").is_none());
+        for bytes in ["1", "320", "16384"] {
+            let request = prepare(
+                &command(&["query", "hello", "--summary-max-bytes", bytes]),
+                "project",
+            )
+            .unwrap();
+            assert_eq!(
+                request.arguments["summary_max_bytes"],
+                bytes.parse::<u64>().unwrap()
+            );
+            assert_eq!(request.tool, "query");
+        }
     }
 
     #[test]

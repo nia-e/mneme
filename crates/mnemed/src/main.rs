@@ -14,10 +14,10 @@
 //!
 //! The default build uses the persistent Cozo/SQLite backend with native HNSW and
 //! fastembed. A `--no-default-features` build uses the JSON-snapshot reference
-//! store and deterministic lexical embedder; `migrate` converts a current v5
-//! JSON snapshot to TouchstonesV1 SQLite.
+//! store and deterministic lexical embedder; `migrate` converts a current v6
+//! normalized-tag JSON snapshot to normalized TouchstonesV1 SQLite.
 
-use std::collections::HashSet;
+use mneme_app::query::SummaryMaxBytes;
 use std::io::Write;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
@@ -75,6 +75,7 @@ mod cli_retag;
 mod cli_save;
 mod cli_single_graph_upgrade;
 mod cli_sources;
+mod cli_tag_format_migration;
 mod cli_tui;
 mod native_artifact;
 mod remote_commands;
@@ -207,6 +208,8 @@ enum Command {
     Tui(cli_tui::TuiArgs),
     /// List known configured sources without connecting or opening databases.
     Stores(cli_sources::StoresArgs),
+    /// Plan/apply an explicit offline lexical tag-format migration; never routes to a live owner.
+    TagFormatMigration(cli_tag_format_migration::TagFormatMigrationArgs),
     /// Ask the existing remote owner to create a library snapshot.
     Snapshot {
         #[command(subcommand)]
@@ -339,7 +342,7 @@ enum Command {
     Forget { id: String },
     /// Migrate a JSON snapshot to the persistent backend.
     ///
-    /// Migrate a current v5 JSON snapshot (at `--db`) to a TouchstonesV1
+    /// Migrate a current v6 normalized-tag JSON snapshot (at `--db`) to TouchstonesV1
     /// SQLite store at the same path. The old JSON is retained as
     /// `<db>.snapshot.bak`; older JSON needs explicit `single-graph-upgrade`
     /// targets first (single-graph-v1, concern-v1, then episode-context-v2, then touchstones-v1).
@@ -753,6 +756,9 @@ mod cli_remote_tests {
 #[derive(Args)]
 struct QueryArgs {
     text: String,
+    /// Maximum UTF-8 bytes per summary (1..=16384; default full). Presentation only.
+    #[arg(long = "summary-max-bytes")]
+    summary_max_bytes: Option<SummaryMaxBytes>,
     /// How many ANN hits seed the spread (1..=64).
     #[arg(long)]
     k: Option<usize>,
@@ -923,6 +929,22 @@ async fn main() -> Result<(), AnyErr> {
         .await;
     }
 
+    if let Command::TagFormatMigration(args) = &cli.command {
+        cli_tag_format_migration::require_no_ambient_selectors(
+            cli.db.as_deref(),
+            cli.user,
+            cli.connection.remote.is_some()
+                || cli.connection.remote_db.is_some()
+                || cli.connection.remote_config.is_some()
+                || cli.connection.remote_mcp_port.is_some()
+                || cli.connection.remote_token_env.is_some(),
+            cli.memory_config.is_some(),
+            cli.store.is_some(),
+            cli.profile.is_some(),
+        )?;
+        return cli_tag_format_migration::run(args, json).await;
+    }
+
     if let Command::Stores(args) = &cli.command {
         if args.config.is_none() && cli.connection.remote.is_none() && cli.db.is_none() {
             if let Some(snapshot) =
@@ -1059,6 +1081,13 @@ async fn main() -> Result<(), AnyErr> {
                 return Err("remote concern requires a server advertising the checked concern contract; no fallback attempted".into());
             }
         }
+        if request.tool == "query"
+            && request.arguments.get("summary_max_bytes").is_some()
+            && !SummaryMaxBytes::advertised(client.tool_catalog())
+        {
+            client.close().await;
+            return Err("remote query summary_max_bytes is unavailable: update the owner build to advertise the summary bound, or omit --summary-max-bytes; no fallback attempted".into());
+        }
         if request.requires_capture_links && !client.supports_capture_links() {
             client.close().await;
             return Err("remote capture links are unavailable: the server does not advertise a compatible `links` schema; use a server that supports atomic capture links, or omit links".into());
@@ -1131,7 +1160,7 @@ async fn main() -> Result<(), AnyErr> {
     }
 
     match cli.command {
-        Command::Config(_) | Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) => {
+        Command::Config(_) | Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) | Command::TagFormatMigration(_) => {
             unreachable!("library handled before connection/store admission")
         }
         Command::Snapshot { .. } => Err("snapshot create requires an existing MCP owner; omit --db and configure the owner, or select --remote URL".into()),
@@ -1307,6 +1336,20 @@ async fn main() -> Result<(), AnyErr> {
             cli_single_graph_upgrade::run_single_graph(&db, &args, json).await
         }
         cmd => {
+            // Reject explicit malformed retrieval input before path resolution,
+            // parent creation, lease acquisition, or store/inference admission.
+            // These defaults only complete pure validation; dispatch still
+            // resolves omitted options against the opened runtime config.
+            let validation_defaults = Config::default();
+            match &cmd {
+                Command::Query(args) => {
+                    validate_cli_query(args, validation_defaults.budget, validation_defaults.ann_k)?;
+                }
+                Command::RecallContext(args) => {
+                    validate_cli_recall_context(args, validation_defaults.budget, validation_defaults.ann_k)?;
+                }
+                _ => {}
+            }
             if let Command::List(args) = &cmd {
                 args.prepare()?; // strict admission before path resolution
             }
@@ -1380,7 +1423,7 @@ async fn run_migrate(db: &Path, lease: Arc<mneme_store_path::StoreLease>) -> Res
     }
 
     let mem = MemStore::load(db).map_err(|error| format!(
-        "migrate requires current v5 JSON: {error}; v4 JSON needs `mnemed --db <SOURCE> single-graph-upgrade --backend json --target-generation touchstones-v1 --output <ABSENT_ABSOLUTE_PATH>` first; v3 needs episode-context-v2 before that, v2 needs concern-v1, and flat v1 starts with single-graph-v1"
+        "migrate requires current v6 normalized-tag JSON: {error}; exact legacy v5 needs the reviewed `tag-format-migration plan/apply --backend json` workflow with expected database identity and a distinct absent output first (see docs/tag-normalization.md); v4 JSON needs the historical touchstones-v1 target before that, v3 needs episode-context-v2, v2 needs concern-v1, and flat v1 starts with single-graph-v1; source was not converted"
     ))?;
     let expected = mem.export();
     let legacy_embeddings = mem.embedding_fingerprint()?.is_none() && mem.has_embedding_data()?;
@@ -2373,7 +2416,11 @@ async fn dispatch(
     cmd: Command,
 ) -> Result<bool, AnyErr> {
     match cmd {
-        Command::Library(_) | Command::Tui(_) | Command::Stores(_) | Command::Snapshot { .. } => {
+        Command::Library(_)
+        | Command::Tui(_)
+        | Command::Stores(_)
+        | Command::Snapshot { .. }
+        | Command::TagFormatMigration(_) => {
             unreachable!("handled before local store admission")
         }
         Command::Config(_) | Command::Init(_) | Command::Client(_) => {
@@ -2564,6 +2611,10 @@ async fn cmd_get(mem: &Memory, db_id: Ulid, json: bool, a: GetArgs) -> Result<bo
                 serde_json::to_string_pretty(record)?
             );
             println!(
+                "\nhistorical reference dates (UTC display, not snapshot fields):\n{}",
+                serde_json::to_string_pretty(&projection["touchstone_references_utc"])?
+            );
+            println!(
                 "\ncurrent resolution (not body equality):\n{}",
                 serde_json::to_string_pretty(&projection["touchstone_current"])?
             );
@@ -2748,7 +2799,14 @@ async fn cmd_query(mem: &Memory, json: bool, a: QueryArgs) -> Result<bool, AnyEr
     let (batch, body_limit) = retrieve_cli_query(mem, &a).await?;
 
     if json {
-        let envelope = cli_query_envelope(mem, batch, a.bodies, body_limit).await?;
+        let envelope = cli_query_envelope(
+            mem,
+            batch,
+            a.bodies,
+            body_limit,
+            a.summary_max_bytes.unwrap_or(SummaryMaxBytes::FULL),
+        )
+        .await?;
         print_json(&serde_json::to_value(envelope)?);
         // Retrieval only plans context. It records no exposure or topology
         // change, so snapshot backends must not checkpoint an O(store) no-op.
@@ -2771,6 +2829,7 @@ async fn cmd_query(mem: &Memory, json: bool, a: QueryArgs) -> Result<bool, AnyEr
                 hit,
                 a.bodies,
                 body_limit,
+                a.summary_max_bytes.unwrap_or(SummaryMaxBytes::FULL),
                 &mut body_remaining,
             )
             .await?;
@@ -2804,12 +2863,23 @@ async fn cli_query_envelope(
     batch: RetrievalBatch,
     bodies: bool,
     body_limit: usize,
+    summary_limit: SummaryMaxBytes,
 ) -> Result<QueryEnvelope, AnyErr> {
     let retrieval = presentation_retrieval_metadata(&batch)?;
     let mut body_remaining = MAX_CLI_QUERY_BODY_BYTES_TOTAL;
     let mut primary = Vec::with_capacity(batch.primary.len());
     for hit in batch.primary {
-        primary.push(cli_query_hit(mem, hit, bodies, body_limit, &mut body_remaining).await?);
+        primary.push(
+            cli_query_hit(
+                mem,
+                hit,
+                bodies,
+                body_limit,
+                summary_limit,
+                &mut body_remaining,
+            )
+            .await?,
+        );
     }
     Ok(QueryEnvelope::new(retrieval, primary)?)
 }
@@ -2835,6 +2905,7 @@ async fn cli_query_hit(
     hit: RetrievalHit,
     bodies: bool,
     body_limit: usize,
+    summary_limit: SummaryMaxBytes,
     body_remaining: &mut usize,
 ) -> Result<QueryHit, AnyErr> {
     let body = if !bodies {
@@ -2853,13 +2924,15 @@ async fn cli_query_hit(
             body.next_offset,
         )?
     };
+    let (summary, summary_truncated) = summary_limit.prefix(hit.node.summary());
     Ok(QueryHit::new(
         hit.node.id(),
+        hit.node.created(),
         hit.lane_rank,
         query_rank_evidence(hit.evidence),
         query_node_status(hit.node.status()),
-        hit.node.summary(),
-        false,
+        summary,
+        summary_truncated,
         body,
     ))
 }
@@ -2913,11 +2986,13 @@ async fn print_human_query_hit(
     hit: &RetrievalHit,
     bodies: bool,
     body_limit: usize,
+    summary_limit: SummaryMaxBytes,
     body_remaining: &mut usize,
 ) -> Result<(), AnyErr> {
     let lane = match lane {
         RetrievalLane::Primary => "primary",
     };
+    let (summary, summary_truncated) = summary_limit.prefix(hit.node.summary());
     println!(
         "{:>2}. [{lane}#{}; {}] {} ({}) {}",
         ordinal,
@@ -2925,7 +3000,17 @@ async fn print_human_query_hit(
         human_rank_evidence(hit.evidence),
         hit.node.id().0,
         status_str(hit.node.status()),
-        hit.node.summary()
+        summary
+    );
+    if summary_truncated {
+        println!(
+            "    [summary truncated; use `mnemed get {}` for the canonical summary]",
+            hit.node.id().0
+        );
+    }
+    println!(
+        "    created: {} (recorded, not verified)",
+        mneme_present::format_timestamp_millis(hit.node.created())
     );
     if bodies {
         if *body_remaining == 0 {
@@ -3095,14 +3180,7 @@ fn validate_cli_query_work(
         )
         .into());
     }
-    let mut unique = HashSet::with_capacity(tags.len());
     for (index, tag) in tags.iter().enumerate() {
-        if tag.is_empty() || tag.trim() != tag || tag.chars().any(char::is_control) {
-            return Err(format!(
-                "--tag value {index} must be nonblank, trimmed, and contain no controls"
-            )
-            .into());
-        }
         if tag.len() > MAX_CLI_QUERY_TAG_BYTES {
             return Err(format!(
                 "--tag value {index} is {} UTF-8 bytes; maximum is {MAX_CLI_QUERY_TAG_BYTES}",
@@ -3110,10 +3188,8 @@ fn validate_cli_query_work(
             )
             .into());
         }
-        if !unique.insert(tag) {
-            return Err(format!("duplicate --tag value {tag:?}").into());
-        }
     }
+    mneme_core::normalize_tags(tags).map_err(|error| error.to_string())?;
     Ok((
         Budget {
             max_nodes,
@@ -3174,9 +3250,16 @@ mod query_purity_tests {
         let mut body_remaining = MAX_CLI_QUERY_BODY_BYTES_TOTAL;
         for hit in batch.primary {
             primary.push(
-                cli_query_hit(&mem, hit, false, 1, &mut body_remaining)
-                    .await
-                    .unwrap(),
+                cli_query_hit(
+                    &mem,
+                    hit,
+                    false,
+                    1,
+                    SummaryMaxBytes::FULL,
+                    &mut body_remaining,
+                )
+                .await
+                .unwrap(),
             );
         }
         let envelope = QueryEnvelope::new(retrieval, primary).unwrap();
@@ -3190,6 +3273,7 @@ mod query_purity_tests {
             &mem,
             true,
             QueryArgs {
+                summary_max_bytes: None,
                 text: "pure query".into(),
                 k: Some(1),
                 depth: Some(0),
@@ -3381,6 +3465,18 @@ async fn cmd_feedback(mem: &Memory, json: bool, a: FeedbackArgs) -> Result<bool,
     Ok(true)
 }
 
+fn core_node_json(node: &Node, body: Option<String>) -> Value {
+    // This surface previously had no numeric timestamp field. Add calendar
+    // display without newly trying to serialize the whole u128 domain as JSON.
+    json!({
+        "id": node.id().0.to_string(),
+        "summary": node.summary(),
+        "created_utc": mneme_present::format_timestamp_millis(node.created()),
+        "tags": node.tags().collect::<Vec<_>>(),
+        "body": body,
+    })
+}
+
 async fn cmd_core(mem: &Memory, json: bool) -> Result<bool, AnyErr> {
     let nodes = mem.core(ColdPath::acquire()).await?;
     if json {
@@ -3391,12 +3487,7 @@ async fn cmd_core(mem: &Memory, json: bool) -> Result<bool, AnyErr> {
                 .await
                 .ok()
                 .map(|b| String::from_utf8_lossy(&b).into_owned());
-            arr.push(json!({
-                "id": n.id().0.to_string(),
-                "summary": n.summary(),
-                "tags": n.tags().collect::<Vec<_>>(),
-                "body": body,
-            }));
+            arr.push(core_node_json(n, body));
         }
         print_json(&json!(arr));
     } else if nodes.is_empty() {
@@ -3404,6 +3495,10 @@ async fn cmd_core(mem: &Memory, json: bool) -> Result<bool, AnyErr> {
     } else {
         for n in &nodes {
             println!("# {}", n.summary());
+            println!(
+                "created: {} (recorded, not verified)",
+                mneme_present::format_timestamp_millis(n.created())
+            );
             if let Ok(body) = mem.resolve_body(n).await {
                 println!("{}", String::from_utf8_lossy(&body));
             }
@@ -3476,7 +3571,7 @@ fn node_json(n: &Node) -> Value {
         NodeStatus::Active => "active",
         NodeStatus::Archived => "archived",
     };
-    json!({
+    let mut value = json!({
         "id": n.id().0.to_string(),
         "content_fingerprint": mneme_core::ports::routing_content_fingerprint(n),
         "content_fingerprint_codec": mneme_core::ports::ROUTING_CONTENT_FINGERPRINT_CODEC,
@@ -3496,13 +3591,24 @@ fn node_json(n: &Node) -> Value {
         "origin_commit": n.origin_commit(),
         "provenance": provenance_json(n.provenance()),
         "memory_kind": n.memory_kind(),
-    })
+    });
+    value
+        .as_object_mut()
+        .expect("node presentation object")
+        .extend(
+            serde_json::to_value(mneme_present::NodeTimePresentation::new(n))
+                .expect("typed calendar dates serialize")
+                .as_object()
+                .expect("calendar dates object")
+                .clone(),
+        );
+    value
 }
 
 fn provenance_json(p: &Provenance) -> Value {
     match p {
         Provenance::Web { url, fetched } => {
-            json!({ "type": "web", "url": url.as_str(), "fetched": *fetched as u64 })
+            json!({ "type": "web", "url": url.as_str(), "fetched": *fetched as u64, "fetched_utc":mneme_present::format_timestamp_millis(*fetched) })
         }
         Provenance::Conversation { session, turn } => {
             json!({ "type": "conversation", "session": session.to_string(), "turn": turn })
@@ -3529,11 +3635,23 @@ fn provenance_json(p: &Provenance) -> Value {
 fn print_node_text(n: &Node) {
     println!("id          {}", n.id().0);
     println!("summary     {}", n.summary());
+    println!(
+        "created     {} (recorded, not verified)",
+        mneme_present::format_timestamp_millis(n.created())
+    );
     if !n.is_semantic() {
         println!(
             "memory-kind {}",
             serde_json::to_string(n.memory_kind()).expect("memory kind serializes")
         );
+    }
+    if let Some(episode) = mneme_present::NodeTimePresentation::new(n).episode {
+        println!(
+            "occurred    {}",
+            serde_json::to_string(&episode.occurred_utc).expect("typed occurrence serializes")
+        );
+        println!("recorded    {}", episode.recorded_at_utc);
+        println!("edition     {}", episode.edition_recorded_at_utc);
     }
     match n.status() {
         NodeStatus::Active => println!("status      active"),
@@ -3562,12 +3680,14 @@ fn print_node_text(n: &Node) {
         n.origin_commit()
             .map_or_else(|| "(none)".to_owned(), |commit| commit.to_string())
     );
-    let last_exposed = n
-        .last_exposed()
-        .map_or_else(|| "never".to_string(), |timestamp| timestamp.to_string());
-    let last_grounded_use = n
-        .last_grounded_use()
-        .map_or_else(|| "never".to_string(), |timestamp| timestamp.to_string());
+    let last_exposed = n.last_exposed().map_or_else(
+        || "never".to_string(),
+        mneme_present::format_timestamp_millis,
+    );
+    let last_grounded_use = n.last_grounded_use().map_or_else(
+        || "never".to_string(),
+        mneme_present::format_timestamp_millis,
+    );
     println!("exposures   {} (last {last_exposed})", n.exposure_count());
     println!(
         "grounded    {} (last {last_grounded_use})",
@@ -3578,6 +3698,30 @@ fn print_node_text(n: &Node) {
 #[cfg(test)]
 mod telemetry_render_tests {
     use super::*;
+
+    #[test]
+    fn core_creation_display_accepts_the_full_domain_timestamp_without_a_new_raw_field() {
+        let node = Node::try_new(
+            NodeId(Ulid::new()),
+            "old core note",
+            BodyRef::new("inline://core").unwrap(),
+            ["core"],
+            Provenance::derived_empty(),
+            0.5,
+            0.5,
+            NodeStatus::Active,
+            u128::MAX,
+        )
+        .unwrap();
+        let shown = core_node_json(&node, Some("body".into()));
+        assert_eq!(
+            shown["created_utc"],
+            format!("out of calendar range ({} Unix epoch ms)", u128::MAX)
+        );
+        assert!(shown.get("created").is_none());
+        assert_eq!(shown["body"], "body");
+        assert_eq!(node.created(), u128::MAX);
+    }
 
     fn node() -> Node {
         Node::try_new(
@@ -3635,6 +3779,22 @@ mod telemetry_render_tests {
     }
 
     #[test]
+    fn node_calendar_companions_preserve_raw_millis_and_explicit_range_failure() {
+        let mut wire = serde_json::to_value(node()).unwrap();
+        for created in [1_600_000_000_123_u64, u64::MAX] {
+            wire["created"] = json!(created);
+            let node: Node = serde_json::from_value(wire.clone()).unwrap();
+            let value = node_json(&node);
+            assert_eq!(value["created"], created);
+            assert_eq!(
+                value["created_utc"],
+                mneme_present::format_timestamp_millis(created.into())
+            );
+            assert_eq!(serde_json::to_value(&node).unwrap(), wire);
+        }
+    }
+
+    #[test]
     fn node_json_preserves_full_origin_commit_or_explicit_null() {
         for commit in [
             None,
@@ -3667,6 +3827,7 @@ async fn edges_json(
             "trials": n.edge.trials(),
             "interference": n.edge.interference(),
             "last_reinforced": n.edge.last_reinforced() as u64,
+            "last_reinforced_utc": mneme_present::format_timestamp_millis(n.edge.last_reinforced()),
         });
         if let Some(span) = n.edge.anchor {
             obj["anchor"] = json!({ "start": span.start, "end": span.end });

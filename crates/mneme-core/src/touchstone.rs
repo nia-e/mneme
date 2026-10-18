@@ -550,6 +550,8 @@ pub fn validate_touchstone_catalog(
 #[serde(deny_unknown_fields)]
 pub struct TouchstoneHeader {
     pub id: NodeId,
+    /// Canonical owner creation time, not annotation or reference verification.
+    pub created: Timestamp,
     pub summary: NodeSummary,
     pub subject: TouchstoneSubject,
     pub reference_count: usize,
@@ -562,6 +564,7 @@ impl TouchstoneHeader {
         }
         Ok(Self {
             id: node.id(),
+            created: node.created(),
             summary: NodeSummary::new(node.summary()).map_err(|e| invalid(e.to_string()))?,
             subject: record.subject.clone(),
             reference_count: record.references.len(),
@@ -1333,6 +1336,22 @@ mod tests {
             .map(|t| SummarySnapshot::from_node(db, t).unwrap())
             .collect::<Vec<_>>();
         assert!(TouchstoneRecord::new(owner().id(), &input(&large), large).is_err());
+    }
+
+    #[test]
+    fn header_keeps_canonical_creation_not_observation_time() {
+        let mut owner = owner();
+        let snapshots = vec![SummarySnapshot::from_node(Ulid(1), &target(2)).unwrap()];
+        let record = TouchstoneRecord::new(owner.id(), &input(&snapshots), snapshots).unwrap();
+        let created = owner.created();
+        owner.record_exposure(90);
+        owner.record_grounded_use(99);
+        let header = TouchstoneHeader::from_node(&owner, &record).unwrap();
+        assert_eq!(header.created, created);
+        assert_eq!(
+            serde_json::to_value(header).unwrap()["created"],
+            json!(created)
+        );
     }
 
     #[test]

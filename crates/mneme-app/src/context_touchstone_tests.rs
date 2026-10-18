@@ -36,6 +36,7 @@ fn record(owner: u128, snapshots: Vec<SummarySnapshot>) -> TouchstoneRecord {
 }
 fn header(record: &TouchstoneRecord) -> TouchstoneHeader {
     TouchstoneHeader {
+        created: 1234,
         id: record.owner(),
         summary: NodeSummary::new("A deliberately authored annotation").unwrap(),
         subject: record.subject().clone(),
@@ -129,6 +130,7 @@ async fn forward_material_and_reverse_annotations_do_not_recurse() {
     .await
     .unwrap();
     assert_eq!(reverse.incoming.len(), 1);
+    assert_eq!(reverse.incoming[0].created(), 1234);
     assert!(reverse.views[&id(10)].navigation_only());
     assert_eq!(reverse.views[&id(10)].references.len(), 1);
     assert_eq!(reverse.views[&id(10)].references[0].id, id(1));

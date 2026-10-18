@@ -98,12 +98,19 @@ fn genuine_pre013_v2_fixture_is_recognizable_but_refuses_current_admission() {
     let before = source_bytes(&path);
     let lease = Arc::new(StoreLease::acquire(&path).unwrap());
     let preflight = CozoStore::require_existing_current(&path, &lease).unwrap_err();
+    let message = preflight.to_string();
+    assert!(message.contains("generation_not_established"), "{message}");
+    assert!(message.contains("expected touchstones-v1"), "{message}");
     assert!(
-        preflight
-            .to_string()
-            .contains("touchstones-v1 generation required")
+        message.contains("no supported predecessor was positively identified"),
+        "{message}"
     );
-    assert!(CozoStore::open_existing_persistent(&path, DIM, lease).is_err());
+    assert!(!message.contains("--target-generation"), "{message}");
+    let normal = match CozoStore::open_existing_persistent(&path, DIM, lease) {
+        Ok(_) => panic!("old physical fixture must refuse current admission"),
+        Err(error) => error,
+    };
+    assert_eq!(normal.to_string(), message);
     assert_eq!(
         source_bytes(&path),
         before,

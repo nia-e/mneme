@@ -267,7 +267,7 @@ async fn touchstone_json_successor_roundtrip_and_frozen_predecessor() {
     store.save(&path).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(value["schema"], STORE_EXPORT_SCHEMA_V5);
+    assert_eq!(value["schema"], STORE_EXPORT_SCHEMA_V6);
     assert!(serde_json::from_slice::<StoreExportEnvelopeV4>(&bytes).is_err());
     let reopened = MemStore::load(&path).unwrap();
     assert_eq!(

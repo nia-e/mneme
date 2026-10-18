@@ -141,9 +141,9 @@ mod tests {
     }
     async fn vocabulary_contract(store: &dyn GraphStore) {
         for (tags, status) in [
-            (vec!["People", "People/ExactHandle"], NodeStatus::Active),
-            (vec!["People", "People/archive"], NodeStatus::Archived),
-            (vec!["people"], NodeStatus::Active),
+            (vec!["people", "people-exact-handle"], NodeStatus::Active),
+            (vec!["people", "people-archive"], NodeStatus::Archived),
+            (vec!["person"], NodeStatus::Active),
         ] {
             store
                 .put_node(&tagged(NodeId(Ulid::new()), &tags, status))
@@ -151,22 +151,22 @@ mod tests {
                 .unwrap();
         }
         let mut request = TagVocabularyRequest {
-            prefix: "People".into(),
+            prefix: "people".into(),
             status: TagVocabularyStatus::All,
             after: None,
             limit: 1,
         };
         let first = store.tag_vocabulary_page(&request).await.unwrap();
-        assert_eq!(first.items[0].name, "People");
+        assert_eq!(first.items[0].name, "people");
         assert_eq!(first.items[0].count, TagVocabularyCount::Exact { value: 2 });
         assert_eq!(first.items[0].examples.len(), 2);
-        assert_eq!(first.next.as_deref(), Some("People"));
+        assert_eq!(first.next.as_deref(), Some("people"));
         request.after = first.next;
         let second = store.tag_vocabulary_page(&request).await.unwrap();
-        assert_eq!(second.items[0].name, "People/ExactHandle");
+        assert_eq!(second.items[0].name, "people-archive");
         request.after = second.next;
         let third = store.tag_vocabulary_page(&request).await.unwrap();
-        assert_eq!(third.items[0].name, "People/archive");
+        assert_eq!(third.items[0].name, "people-exact-handle");
         assert!(third.next.is_none());
         request.after = None;
         request.status = TagVocabularyStatus::Archived;
@@ -178,7 +178,7 @@ mod tests {
                 .iter()
                 .map(|i| i.name.as_str())
                 .collect::<Vec<_>>(),
-            ["People", "People/archive"]
+            ["people", "people-archive"]
         );
         assert!(
             archived
@@ -457,14 +457,14 @@ mod tests {
             store
                 .put_node(&tagged(
                     NodeId(Ulid::new()),
-                    &[&format!("scan/{i:03}")],
+                    &[&format!("scan-{i:03}")],
                     NodeStatus::Active,
                 ))
                 .await
                 .unwrap();
         }
         let mut request = TagVocabularyRequest {
-            prefix: "scan/".into(),
+            prefix: "scan-".into(),
             status: TagVocabularyStatus::Archived,
             after: None,
             limit: 64,

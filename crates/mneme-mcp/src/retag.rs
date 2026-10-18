@@ -36,11 +36,14 @@ pub(crate) fn tool_schema(profile: CapabilityProfile) -> Value {
     schema["properties"]["expected_db_id"] = crate::expected_db_id_prop();
     schema["required"] = json!(["db", "expected_db_id", "id", "expected_tags", "tags"]);
     if profile != CapabilityProfile::Operator {
-        for field in ["expected_tags", "tags"] {
-            schema["properties"][field]["items"]["not"] = json!({"const":"core"});
-        }
+        // Curators can edit ordinary tags on core notes, but cannot change
+        // membership. Native complete-tag CAS verifies the claimed prior set.
+        schema["if"] = json!({"properties":{"expected_tags":{"contains":{"const":"core"}}}});
+        schema["then"] = json!({"properties":{"tags":{"contains":crate::core_tag_input_schema()}}});
+        schema["else"] =
+            json!({"properties":{"tags":{"not":{"contains":crate::core_tag_input_schema()}}}});
     }
-    json!({"name":"retag","description":"Replace a semantic node's complete tag set only if its current tags equal expected_tags. Optional expected_content_fingerprint (from get) and guard_nodes check target and semantic guide content in the same write snapshot; guard_nodes requires the target fingerprint. Fingerprints bind content pointers, not mutable external body bytes. Requires curator, explicit db and expected_db_id; operator if either tag set contains core. Empty sets are valid. Preserves authored content and other node state. Stale guards refuse; inspect before forming new intent. No automatic retry, content edit, or revision-history promise.","inputSchema":schema})
+    json!({"name":"retag","description":"Replace a semantic node's complete tag set only if its current tags equal expected_tags. Optional expected_content_fingerprint (from get) and guard_nodes check target and semantic guide content in the same write snapshot; guard_nodes requires the target fingerprint. Fingerprints bind content pointers, not mutable external body bytes. Requires curator, explicit db and expected_db_id; operator only when core membership changes. Existing core notes may retain core while other tags change. Empty sets are valid. Preserves authored content and other node state. Stale guards refuse; inspect before forming new intent. No automatic retry, content edit, or revision-history promise.","inputSchema":schema})
 }
 #[cfg(test)]
 mod tests {
@@ -65,13 +68,27 @@ mod tests {
                 .find(|tool| tool["name"] == "retag")
                 .map(|_| tool_input_schema(&schemas, "retag"));
             let _held = server.cold_work.admit("held lane").unwrap();
-            for (core, guards) in [(false, false), (true, false), (false, true), (true, true)] {
-                let mut arguments = raw(core);
+            for (expected_core, replacement_core, guards) in [
+                (false, false, false),
+                (false, true, false),
+                (true, false, false),
+                (true, true, false),
+                (false, false, true),
+                (false, true, true),
+                (true, false, true),
+                (true, true, true),
+            ] {
+                let mut arguments = raw(expected_core);
+                arguments["tags"] = if replacement_core {
+                    json!(["core", "closed"])
+                } else {
+                    json!(["closed"])
+                };
                 if guards {
                     arguments["expected_content_fingerprint"] = json!("a".repeat(64));
                     arguments["guard_nodes"] = json!([{"id":ulid::Ulid::from(3).to_string(),"content_fingerprint":"b".repeat(64)}]);
                 }
-                let class = if core {
+                let class = if expected_core != replacement_core {
                     CapabilityClass::Operator
                 } else {
                     CapabilityClass::Curator
@@ -100,7 +117,7 @@ mod tests {
             assert!(ValidatedToolArguments::parse("retag", &r).is_err());
         }
         let mut r = raw(false);
-        r["tags"] = json!(["dup", "dup"]);
+        r["tags"] = json!(["bad+tag"]);
         assert!(ValidatedToolArguments::parse("retag", &r).is_err());
         r = raw(false);
         r["extra"] = json!(1);
@@ -179,6 +196,73 @@ async fn retag_native_cas_preserves_content_identity_and_refuses_stale_guard() {
     unchanged["expected_tags"] = reply["tags"].clone();
     let reply = call(unchanged).await.unwrap();
     assert_eq!(reply["changed"], false);
+    // New core membership still needs operator, while an existing core note is
+    // editable by the fixture's curator. Claimed prior membership is not trusted.
+    let id = original.id().0.to_string();
+    let request = |expected: Value, tags: Value| json!({"db":"project","expected_db_id":db_id.to_string(),"id":id,"expected_tags":expected,"tags":tags});
+    let promotion = request(json!(["closed", "possibility"]), json!(["core", "closed"]));
+    assert!(
+        call(promotion.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("capability profile")
+    );
+    call_tool_authorized(
+        &server.registry,
+        &server.sessions,
+        &server.cold_work,
+        CapabilityPolicy::operator(),
+        "retag",
+        &promotion,
+    )
+    .await
+    .unwrap();
+    let core_edit = request(json!(["core", "closed"]), json!(["core", "fact"]));
+    assert_eq!(call(core_edit).await.unwrap()["changed"], true);
+    let lie = request(json!(["fact"]), json!(["closed"]));
+    assert!(
+        call(lie).await.is_err(),
+        "omitting actual core must fail complete-tag CAS"
+    );
+    let demotion = request(json!(["core", "fact"]), json!(["fact"]));
+    assert!(
+        call(demotion.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("capability profile")
+    );
+    call_tool_authorized(
+        &server.registry,
+        &server.sessions,
+        &server.cold_work,
+        CapabilityPolicy::operator(),
+        "retag",
+        &demotion,
+    )
+    .await
+    .unwrap();
+    let lie = request(json!(["core", "fact"]), json!(["core", "closed"]));
+    assert!(
+        call(lie).await.is_err(),
+        "inventing prior core must fail complete-tag CAS"
+    );
+    let read = server
+        .registry
+        .checkout("project")
+        .unwrap()
+        .mem
+        .get_node(original.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        read.tag_set(),
+        &mneme_core::BoundedTagSet::try_from_iter(["fact"]).unwrap()
+    );
+    assert_eq!(read.summary(), original.summary());
+    assert_eq!(read.body(), original.body());
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -604,12 +604,18 @@ impl CozoStore {
             return Ok(());
         }
         let vectors: HashMap<_, _> = export.vectors.iter().map(|(id, v)| (*id, v)).collect();
+        let historical_tags = self.read_meta(crate::tag_projection::META_KEY)?.as_deref()
+            == Some(crate::tag_projection::LEGACY_META_VALUE);
         let tx = self.db.multi_transaction(true);
         let result = (|| {
             ensure_episode_generation(&tx)?;
             let mut heads: BTreeMap<EpisodeId, &Node> = BTreeMap::new();
             for node in nodes {
-                let canonical = encode_canonical_node(node)?;
+                let canonical = if historical_tags {
+                    encode_historical_canonical_node(node)?
+                } else {
+                    encode_canonical_node(node)?
+                };
                 let vector = vectors
                     .get(&node.id())
                     .ok_or_else(|| Error::InvalidInput("episode import vector missing".into()))?;

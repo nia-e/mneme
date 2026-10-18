@@ -413,6 +413,9 @@ pub(crate) struct CurrentOpenPermitV1 {
 }
 
 impl CurrentOpenPermitV1 {
+    pub(crate) fn requires_normalized_tags(&self) -> bool {
+        self.evidence.classifier_policy_fingerprint == normalized_tags_open_classifier_fingerprint()
+    }
     pub(crate) const fn diagnostic_fence(&self) -> &ManagedSqliteClosedCatalogFenceV1 {
         self.evidence.diagnostic_fence()
     }
@@ -470,7 +473,8 @@ pub(crate) struct ExistingOpenAdmissionReceiptV1 {
 
 impl ExistingOpenAdmissionReceiptV1 {
     pub(crate) fn uses_current_classifier_policy(&self) -> bool {
-        self.classifier_policy_fingerprint == OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1
+        self.classifier_policy_fingerprint == normalized_tags_open_classifier_fingerprint()
+            || self.classifier_policy_fingerprint == OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1
             || self.classifier_policy_fingerprint
                 == CAPTURE_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1
             || self.classifier_policy_fingerprint
@@ -484,6 +488,14 @@ impl ExistingOpenAdmissionReceiptV1 {
             || self.classifier_policy_fingerprint
                 == TOUCHSTONES_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1
     }
+}
+
+fn normalized_tags_open_classifier_fingerprint() -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"mneme.normalized-tags.open-admission.v1\0");
+    hash.update(TOUCHSTONES_OPEN_ADMISSION_CLASSIFIER_POLICY_FINGERPRINT_V1);
+    hash.update(crate::tag_projection::META_VALUE.as_bytes());
+    hash.finalize().into()
 }
 
 /// Single-use bridge from raw current-generation recognition to the vendor's
@@ -1087,6 +1099,35 @@ pub(crate) fn recognize_touchstones_open_source_v1(
     )
 }
 
+/// Exact successor lexical policy, using the unchanged TouchstonesV1 physical
+/// catalog. Historical recognizers above remain byte-for-byte policy choices.
+pub(crate) fn recognize_normalized_tags_open_source_v1(
+    source: ExistingSqliteSnapshotSource,
+) -> Result<OpenAdmissionV1, AdmissionNotEstablished> {
+    let alternatives = [
+        EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER,
+        TOUCHSTONES_V1_CATALOG_GENERATION_MARKER,
+    ];
+    let fence = source
+        .into_closed_catalog_fence_v1(ManagedCatalogFencePolicy::TouchstonesV1, |planner| {
+            plan_open_assertions_with_tag_policy(
+                planner,
+                alternatives,
+                CatalogContract::TouchstonesV1,
+                crate::tag_projection::META_VALUE,
+            )
+        })
+        .map_err(|_| AdmissionNotEstablished)?;
+    classify_closed_open_fence_with_tag_policy(
+        fence,
+        alternatives,
+        normalized_tags_open_classifier_fingerprint(),
+        Some(CatalogSealGenerationV1::TouchstonesV1),
+        CatalogContract::TouchstonesV1,
+        crate::tag_projection::META_VALUE,
+    )
+}
+
 const _: fn(ExistingSqliteSnapshotSource) -> Result<OpenAdmissionV1, AdmissionNotEstablished> =
     recognize_open_source_v1;
 
@@ -1107,6 +1148,20 @@ fn plan_open_assertions_for(
     planner: &mut ManagedSqliteCatalogAssertionPlannerV1<'_>,
     alternatives: [&'static str; 2],
     catalog: CatalogContract,
+) -> Result<(), cozo::Error> {
+    plan_open_assertions_with_tag_policy(
+        planner,
+        alternatives,
+        catalog,
+        crate::tag_projection::LEGACY_META_VALUE,
+    )
+}
+
+fn plan_open_assertions_with_tag_policy(
+    planner: &mut ManagedSqliteCatalogAssertionPlannerV1<'_>,
+    alternatives: [&'static str; 2],
+    catalog: CatalogContract,
+    tag_policy: &'static str,
 ) -> Result<(), cozo::Error> {
     let candidate = match catalog {
         CatalogContract::Predecessor => validate_primary_index_visible_catalog(planner.catalog()),
@@ -1151,11 +1206,7 @@ fn plan_open_assertions_for(
         canonical_contract_for(alternatives).0,
         canonical_contract_for(alternatives).1,
     )?;
-    planner.require_string_pair(
-        meta_id,
-        crate::tag_projection::META_KEY,
-        crate::tag_projection::META_VALUE,
-    )?;
+    planner.require_string_pair(meta_id, crate::tag_projection::META_KEY, tag_policy)?;
     Ok(())
 }
 
@@ -1244,6 +1295,24 @@ fn classify_closed_open_fence_for(
     exact_generation: Option<CatalogSealGenerationV1>,
     catalog: CatalogContract,
 ) -> Result<OpenAdmissionV1, AdmissionNotEstablished> {
+    classify_closed_open_fence_with_tag_policy(
+        fence,
+        alternatives,
+        policy_fingerprint,
+        exact_generation,
+        catalog,
+        crate::tag_projection::LEGACY_META_VALUE,
+    )
+}
+
+fn classify_closed_open_fence_with_tag_policy(
+    fence: ManagedSqliteClosedCatalogFenceV1,
+    alternatives: [&'static str; 2],
+    policy_fingerprint: [u8; 32],
+    exact_generation: Option<CatalogSealGenerationV1>,
+    catalog: CatalogContract,
+    tag_policy: &'static str,
+) -> Result<OpenAdmissionV1, AdmissionNotEstablished> {
     let policy = vendor_policy_for(catalog);
     let facts = rederive_closed_verifier_catalog_facts_for(fence.catalog(), catalog)
         .map_err(|_| AdmissionNotEstablished)?;
@@ -1280,7 +1349,7 @@ fn classify_closed_open_fence_for(
         || !outcomes[5].matches_string_pair(
             facts.ids.meta,
             crate::tag_projection::META_KEY,
-            crate::tag_projection::META_VALUE,
+            tag_policy,
         )
     {
         return Err(AdmissionNotEstablished);
@@ -1295,8 +1364,12 @@ fn classify_closed_open_fence_for(
         .filter(|selected| *selected <= 1)
         .ok_or(AdmissionNotEstablished)?;
 
-    let expected_transcript =
-        catalog_fence_assertion_transcript_commitment_for(facts.ids, selected_index, alternatives);
+    let expected_transcript = catalog_fence_assertion_transcript_with_tag_policy(
+        facts.ids,
+        selected_index,
+        alternatives,
+        tag_policy,
+    );
     if assertions.transcript_commitment() != &expected_transcript {
         return Err(AdmissionNotEstablished);
     }
@@ -1460,6 +1533,30 @@ pub(crate) fn close_touchstones_source_bound_seal_v1(
     )
 }
 
+pub(crate) fn close_normalized_tags_source_bound_seal_v1(
+    reader: ManagedSqliteSnapshotReader,
+) -> Result<SourceBoundSealV1, cozo::Error> {
+    let alternatives = [
+        EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER,
+        TOUCHSTONES_V1_CATALOG_GENERATION_MARKER,
+    ];
+    let audit = reader.close_with_relation_assertions_v1(|planner| {
+        plan_source_bound_assertions_with_tag_policy(
+            planner,
+            alternatives,
+            CatalogContract::TouchstonesV1,
+            crate::tag_projection::META_VALUE,
+        )
+    })?;
+    classify_closed_audit_with_tag_policy(
+        audit,
+        alternatives,
+        Some(CatalogSealGenerationV1::TouchstonesV1),
+        CatalogContract::TouchstonesV1,
+        crate::tag_projection::META_VALUE,
+    )
+}
+
 // This admission boundary intentionally lands before its production caller. A typed anonymous
 // const keeps only this staged entry compile-reachable, so dead-code lints still
 // cover unrelated additions in this module.
@@ -1483,6 +1580,20 @@ fn plan_source_bound_assertions_for(
     planner: &mut ManagedSqliteRelationAssertionPlannerV1<'_>,
     alternatives: [&'static str; 2],
     catalog: CatalogContract,
+) -> Result<(), cozo::Error> {
+    plan_source_bound_assertions_with_tag_policy(
+        planner,
+        alternatives,
+        catalog,
+        crate::tag_projection::LEGACY_META_VALUE,
+    )
+}
+
+fn plan_source_bound_assertions_with_tag_policy(
+    planner: &mut ManagedSqliteRelationAssertionPlannerV1<'_>,
+    alternatives: [&'static str; 2],
+    catalog: CatalogContract,
+    tag_policy: &'static str,
 ) -> Result<(), cozo::Error> {
     // Keep plan construction visibly separate from the post-close verifier.
     // In particular, these trusted-name lookups and expectations are not
@@ -1531,11 +1642,7 @@ fn plan_source_bound_assertions_for(
         canonical_contract_for(alternatives).0,
         canonical_contract_for(alternatives).1,
     )?;
-    planner.require_string_pair(
-        meta_id,
-        crate::tag_projection::META_KEY,
-        crate::tag_projection::META_VALUE,
-    )?;
+    planner.require_string_pair(meta_id, crate::tag_projection::META_KEY, tag_policy)?;
     Ok(())
 }
 
@@ -1560,6 +1667,22 @@ fn classify_closed_audit_for(
     alternatives: [&'static str; 2],
     exact_generation: Option<CatalogSealGenerationV1>,
     catalog: CatalogContract,
+) -> Result<SourceBoundSealV1, cozo::Error> {
+    classify_closed_audit_with_tag_policy(
+        audit,
+        alternatives,
+        exact_generation,
+        catalog,
+        crate::tag_projection::LEGACY_META_VALUE,
+    )
+}
+
+fn classify_closed_audit_with_tag_policy(
+    audit: ManagedSqliteClosedAuditV1,
+    alternatives: [&'static str; 2],
+    exact_generation: Option<CatalogSealGenerationV1>,
+    catalog: CatalogContract,
+    tag_policy: &'static str,
 ) -> Result<SourceBoundSealV1, cozo::Error> {
     let policy = vendor_policy_for(catalog);
     let facts = rederive_closed_verifier_catalog_facts_for(audit.catalog(), catalog)?;
@@ -1608,7 +1731,7 @@ fn classify_closed_audit_for(
         || !outcomes[5].matches_string_pair(
             facts.ids.meta,
             crate::tag_projection::META_KEY,
-            crate::tag_projection::META_VALUE,
+            tag_policy,
         )
     {
         return Err(seal_error(
@@ -1631,8 +1754,12 @@ fn classify_closed_audit_for(
         ));
     }
 
-    let expected_transcript =
-        generic_assertion_transcript_commitment_for(facts.ids, selected_index, alternatives);
+    let expected_transcript = generic_assertion_transcript_with_tag_policy(
+        facts.ids,
+        selected_index,
+        alternatives,
+        tag_policy,
+    );
     if assertions.transcript_commitment() != &expected_transcript {
         return Err(seal_error(
             "closed audit generic assertion transcript did not match the independently rebuilt conventional transcript",
@@ -1674,7 +1801,13 @@ fn classify_closed_audit_for(
         generation,
         codec_classification: facts.codec_classification,
         vector_dimension: facts.vector_dimension,
-        policy_fingerprint: if catalog == CatalogContract::TouchstonesV1 {
+        policy_fingerprint: if tag_policy == crate::tag_projection::META_VALUE {
+            let mut hash = Sha256::new();
+            hash.update(b"mneme.normalized-tags.source-bound-classifier.v1\0");
+            hash.update(TOUCHSTONES_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1);
+            hash.update(tag_policy.as_bytes());
+            hash.finalize().into()
+        } else if catalog == CatalogContract::TouchstonesV1 {
             TOUCHSTONES_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V1
         } else if catalog == CatalogContract::EpisodeContextV2 {
             EPISODE_CONTEXT_SOURCE_BOUND_CLASSIFIER_POLICY_FINGERPRINT_V2
@@ -1742,10 +1875,25 @@ fn generic_assertion_transcript_commitment_v1(
     )
 }
 
+#[cfg(test)]
 fn generic_assertion_transcript_commitment_for(
     ids: SealRelationIdsV1,
     selected_index: u8,
     alternatives: [&str; 2],
+) -> [u8; 32] {
+    generic_assertion_transcript_with_tag_policy(
+        ids,
+        selected_index,
+        alternatives,
+        crate::tag_projection::LEGACY_META_VALUE,
+    )
+}
+
+fn generic_assertion_transcript_with_tag_policy(
+    ids: SealRelationIdsV1,
+    selected_index: u8,
+    alternatives: [&str; 2],
+    tag_policy: &str,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(MANAGED_ASSERTION_TRANSCRIPT_DOMAIN_V1);
@@ -1779,17 +1927,18 @@ fn generic_assertion_transcript_commitment_for(
         &mut hasher,
         ids.meta,
         crate::tag_projection::META_KEY,
-        crate::tag_projection::META_VALUE,
+        tag_policy,
     );
     hasher.update([0xff]);
     hasher.update(6_u64.to_be_bytes());
     hasher.finalize().into()
 }
 
-fn catalog_fence_assertion_transcript_commitment_for(
+fn catalog_fence_assertion_transcript_with_tag_policy(
     ids: SealRelationIdsV1,
     selected_index: u8,
     alternatives: [&str; 2],
+    tag_policy: &str,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(MANAGED_CATALOG_FENCE_ASSERTION_TRANSCRIPT_DOMAIN_V1);
@@ -1823,7 +1972,7 @@ fn catalog_fence_assertion_transcript_commitment_for(
         &mut hasher,
         ids.meta,
         crate::tag_projection::META_KEY,
-        crate::tag_projection::META_VALUE,
+        tag_policy,
     );
     hasher.update([0xff]);
     hasher.update(6_u64.to_be_bytes());
@@ -2516,7 +2665,7 @@ mod tests {
                 vec![1],
                 ids.meta.to_be_bytes().to_vec(),
                 crate::tag_projection::META_KEY.as_bytes().to_vec(),
-                crate::tag_projection::META_VALUE.as_bytes().to_vec(),
+                crate::tag_projection::LEGACY_META_VALUE.as_bytes().to_vec(),
             ],
         ]
     }
@@ -2702,7 +2851,7 @@ mod tests {
                 b"verify".to_vec(),
                 VERIFY_META_RELATION.as_bytes().to_vec(),
                 crate::tag_projection::META_KEY.as_bytes().to_vec(),
-                crate::tag_projection::META_VALUE.as_bytes().to_vec(),
+                crate::tag_projection::LEGACY_META_VALUE.as_bytes().to_vec(),
             ],
             vec![
                 b"selection".to_vec(),
@@ -2828,7 +2977,7 @@ mod tests {
                 PLAN_META_RELATION.as_bytes().to_vec(),
                 VERIFY_META_RELATION.as_bytes().to_vec(),
                 crate::tag_projection::META_KEY.as_bytes().to_vec(),
-                crate::tag_projection::META_VALUE.as_bytes().to_vec(),
+                crate::tag_projection::LEGACY_META_VALUE.as_bytes().to_vec(),
             ],
             vec![
                 b"old+positional-v0".to_vec(),
@@ -3302,7 +3451,7 @@ mod tests {
                         5 => planner.require_string_pair(
                             meta,
                             crate::tag_projection::META_KEY,
-                            crate::tag_projection::META_VALUE,
+                            crate::tag_projection::LEGACY_META_VALUE,
                         )?,
                         6 => planner.require_exact_row_count(extra_empty, 0)?,
                         _ => {
@@ -3481,7 +3630,7 @@ mod tests {
                         5 => planner.require_string_pair(
                             meta,
                             crate::tag_projection::META_KEY,
-                            crate::tag_projection::META_VALUE,
+                            crate::tag_projection::LEGACY_META_VALUE,
                         )?,
                         6 => planner.require_exact_row_count(extra, extra_count)?,
                         _ => return Err(cozo::Error::msg("invalid test assertion ordinal")),

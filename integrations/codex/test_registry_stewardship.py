@@ -95,6 +95,20 @@ class RegistryStewardshipTests(unittest.TestCase):
         return stewardship.step(self.config, "session", self.runtime, lambda key: True,
             lambda key, result: self.accounts.append((key, result)) or True)
 
+    def test_core_cleanup_projection_is_owner_scoped_not_a_forged_grant(self):
+        self.entries[0]["maintenance"]["core_cleanup"] = False
+        self.write_registry()
+        self.config = self.select()
+        self.assertIs(self.config["core_cleanup"], False)
+        selected = registry_runtime.selection(self.config)
+        other = registry_runtime.config_for_store(self.config, selected.named("personal"))
+        self.assertNotIn("core_cleanup", other)
+        self.config["core_cleanup"] = True
+        self.assertFalse(self.step())
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.runtime.calls, 0)
+        self.assertFalse(self.journal.exists())
+
     def test_maintenance_does_not_require_record_permission(self):
         self.assertFalse(registry_runtime.selection(self.config).named("research").record.enabled)
         self.assertTrue(stewardship.enabled(self.config))

@@ -20,6 +20,7 @@ import time
 from typing import Any
 import host_files
 import host_process
+import capture_source
 from rollout_primitives import read_regular
 from reader_contract import plan as reader_plan, prepare as reader_prepare
 from librarian_policy import resolve, LibrarianBudget, IDLE_SECONDS
@@ -60,7 +61,7 @@ def _identity(event: dict[str, Any], prompt: bool = False) -> tuple[str, str] | 
 
 
 def _directory(config: dict[str, Any]) -> Path:
-    return Path(config["state_dir"]) / "reader"
+    return capture_source.directory(config, "reader")
 
 
 def _paths(config: dict[str, Any], session_id: str) -> tuple[Path, Path]:
@@ -68,8 +69,8 @@ def _paths(config: dict[str, Any], session_id: str) -> tuple[Path, Path]:
     return base.with_suffix(".json"), base.with_suffix(".lock")
 
 
-def _new() -> dict[str, Any]:
-    return {"schema": SCHEMA, "generation": secrets.token_hex(16), "epoch": 0,
+def _new(config=None) -> dict[str, Any]:
+    return {"schema": SCHEMA if config is None else capture_source.schema(config, SCHEMA, "reader"), "generation": secrets.token_hex(16), "epoch": 0,
             "context_generation": 0, "active": None, "pending": None,
             "inflight": None, "reservation": None, "ready": None, "fence": "",
             "prior": "", "emitted": [], "attempts": 0, "input_tokens": 0,
@@ -79,8 +80,9 @@ def _new() -> dict[str, Any]:
             "touched": time.time()}
 
 
-def _valid(data: Any) -> bool:
-    return (isinstance(data, dict) and data.get("schema") == SCHEMA
+def _valid(data: Any, config=None) -> bool:
+    expected = SCHEMA if config is None else capture_source.schema(config, SCHEMA, "reader")
+    return (isinstance(data, dict) and data.get("schema") == expected
             and isinstance(data.get("generation"), str) and len(data["generation"]) == 32
             and isinstance(data.get("epoch"), int) and data["epoch"] >= 0
             and isinstance(data.get("context_generation"), int) and data["context_generation"] >= 0
@@ -209,7 +211,7 @@ def _looks_replayed(config: dict[str, Any], session_id: str, turn: str, digest: 
         if len(raw) > MAX_STATE:
             return False
         data = json.loads(raw)
-        active = (data.get("active") if _valid(data) and
+        active = (data.get("active") if _valid(data, config) and
                   data.get("config_pin") == _config_current(config) else None)
         return isinstance(active, dict) and active.get("turn") == turn and active.get("request") == digest
     except (OSError, ValueError, UnicodeError, TypeError):
@@ -249,10 +251,10 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
                 if len(raw) > MAX_STATE:
                     return False, None
                 data = json.loads(raw)
-                if not _valid(data):
+                if not _valid(data, config):
                     return False, None
             elif create:
-                data = _new()
+                data = _new(config)
             else:
                 return False, None
             rebound = not allow_stale and data.get("config_pin") != pin
@@ -313,7 +315,7 @@ def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> 
         cue = ("Recent task: " + data["prior"] + "\n" if data["prior"] else "") + "Current task: " + _short(prompt, MAX_PROMPT)
         data["active"] = {"turn": turn, "request": digest, "epoch": data["epoch"],
                           "cue": cue, "closed": False}
-        if not substantive or not prompt.strip() or config.get("schema") == "mneme.codex-hooks.config.v13" and config.get("recall_mode") != "automatic":
+        if capture_source.source_host(config) != "codex" or not substantive or not prompt.strip() or config.get("schema") == "mneme.codex-hooks.config.v13" and config.get("recall_mode") != "automatic":
             return "skipped", True
         data["prior"] = _fragment(prompt)
         if data["unknown_usage"] or data["attempts"] >= resolve(config).attempts or data["input_tokens"] >= resolve(config).input_tokens or data["output_tokens"] >= resolve(config).output_tokens:
@@ -470,7 +472,7 @@ def close_turn(config: dict[str, Any], session_id: str, turn_id: str) -> None:
 def end_session(config: dict[str, Any], session_id: str) -> None:
     if not isinstance(session_id, str) or not ID.fullmatch(session_id):
         return
-    if config.get("recording_mode") == "automatic":
+    if config.get("recording_mode") == "automatic" and capture_source.source_host(config) == "codex":
         import recording_jobs
         recording_jobs.close_turn(config, session_id, ended=True)
     if not _invalidate(config, session_id):
@@ -516,7 +518,10 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
     """Async hook: wait briefly for sync notice, then launch at most one worker."""
     recording = config.get("recording_mode") == "automatic"
     maintenance = config.get("_background_maintenance") is True
-    closing = (recording or maintenance or pending_only) and event.get("hook_event_name") in ("Stop", "SessionEnd")
+    capture_resume = (capture_source.source_host(config) == "claude_code"
+                      and event.get("hook_event_name") == "SessionStart" and event.get("source") == "resume")
+    closing = ((recording or maintenance or pending_only)
+               and (event.get("hook_event_name") in ("Stop", "SessionEnd") or capture_resume))
     identity = ((event["session_id"], event.get("turn_id"))
                 if closing and isinstance(event.get("session_id"), str) and ID.fullmatch(event["session_id"])
                 else _identity(event, prompt=True))
@@ -529,7 +534,9 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
         recording_work = False
         if recording and not pending_only:
             import recording_jobs
-            recording_work = recording_jobs.has_work(config, session)
+            recording_work = (recording_jobs.has_work(config, session, ready_only=True)
+                              if capture_source.source_host(config) == "claude_code"
+                              else recording_jobs.has_work(config, session))
         def launch(data):
             active = data["active"]
             pending = data["pending"]
@@ -545,6 +552,8 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
                 return "no_config", False
             try:
                 command = [sys.executable, str(Path(__file__).resolve()), "--serve", "--config", str(config_path), "--session-id", session]
+                if capture_source.source_host(config) != "codex":
+                    command.extend(["--source-host", capture_source.source_host(config)])
                 if config.get("memory_scope") in ("misc", "registry") and "workspace_binding" in config:
                     binding = json.dumps(config["workspace_binding"], ensure_ascii=False, separators=(",", ":"))
                     if len(binding.encode()) > MAX_WORKSPACE_BINDING:
@@ -569,7 +578,9 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
 
 def _slot(config: dict[str, Any]):
     """Cross-session cap; held file locks release on crash, not by PID guess."""
-    directory = _directory(config)
+    # Host-specific ledgers, one aggregate process envelope per explicit state.
+    # Keep the original Codex slot paths; Claude shares only these lock files.
+    directory = Path(config["state_dir"]) / "reader"
     host_files.ensure_state_directory(directory)
     for number in range(MAX_WORKERS):
         path = directory / f"slot-{number}.lock"
@@ -1130,8 +1141,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
             _state(config, session_id, capacity, create=False)
             return
         if runtime_factory is None:
-            from reader_runtime import ReaderRuntime
-            runtime_factory = ReaderRuntime
+            from assessment import runtime as runtime_factory
         last_activity = time.monotonic()
         generation = None
         runtime_context = None
@@ -1166,6 +1176,10 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     _count(data, "failed")
                     return None, True
                 pending = data["pending"]
+                if capture_source.source_host(config) != "codex":
+                    changed = pending is not None
+                    data["pending"] = None
+                    return None, changed
                 if pending is None:
                     return None, False
                 active = data["active"]
@@ -1204,7 +1218,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                         if job == "end" and recording_jobs.has_work(config, session_id):
                             time.sleep(.05)
                             continue
-                if time.monotonic() >= next_stewardship and ("frozen_selection" in config or config.get("tag_stewardship") is True):
+                if capture_source.source_host(config) == "codex" and time.monotonic() >= next_stewardship and ("frozen_selection" in config or config.get("tag_stewardship") is True):
                     import stewardship
                     next_stewardship = time.monotonic() + resolve(config).native_seconds
                     maintenance_fence = _stewardship_snapshot(config, session_id)
@@ -1457,10 +1471,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--workspace-binding")
     parser.add_argument("--selection-cwd", type=Path)
+    parser.add_argument("--source-host", choices=capture_source.HOSTS, default="codex")
     args = parser.parse_args(argv)
     if not args.serve:
         return 2
-    from hooks import _config
+    if args.source_host == "claude_code":
+        from claude_config import load_config as _config
+    else:
+        from hooks import _config
     try:
         binding = None
         if args.workspace_binding is not None:
@@ -1476,6 +1494,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             kwargs["cwd"] = args.selection_cwd
         config = _config(args.config, **kwargs)
+        if capture_source.source_host(config) != args.source_host:
+            return 2
         if args.workspace_binding is not None and config.get("memory_scope") not in ("misc", "registry"):
             return 2
         if args.selection_cwd is not None and "frozen_selection" not in config:

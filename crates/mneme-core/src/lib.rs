@@ -21,8 +21,13 @@ pub mod ports;
 pub mod retag;
 pub mod touchstone;
 pub use touchstone::*;
+pub mod tag_normalization;
 pub mod tag_vocabulary;
 pub mod tagged;
+pub use tag_normalization::{
+    SubmittedTagSet, TAG_NORMALIZATION_VERSION, TagNormalizationError, is_normalized_tag,
+    normalize_tag, normalize_tags,
+};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};

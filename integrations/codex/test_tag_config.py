@@ -19,6 +19,13 @@ class TagConfigTests(unittest.TestCase):
     def test_existing_absence_stays_disabled(self):
         self.assertEqual(tag_config.validate({"recording_mode": "automatic"}), (False, None))
 
+    def test_optional_core_cleanup_flag_is_strict_and_default_adds_no_bytes(self):
+        self.assertEqual(tag_config.validate({"core_cleanup": False}), (False, None))
+        self.assertNotIn("core_cleanup", tag_config.prepared_fields("automatic"))
+        for value in (None, 0, "false"):
+            with self.assertRaises(ValueError):
+                tag_config.validate({"core_cleanup": value})
+
     def test_prepare_defaults_and_explicit_off(self):
         self.assertTrue(tag_config.prepared_fields("automatic")["tag_stewardship"])
         self.assertFalse(tag_config.prepared_fields("off")["tag_stewardship"])

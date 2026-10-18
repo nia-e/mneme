@@ -21,8 +21,8 @@ use ulid::Ulid;
 
 use crate::storage_contract::conventional_unmanaged::admission::{
     CatalogCodecClassification, CatalogSealGenerationV1, close_concern_source_bound_seal_v1,
-    close_episode_context_source_bound_seal_v2, close_single_graph_source_bound_seal_v1,
-    close_touchstones_source_bound_seal_v1,
+    close_episode_context_source_bound_seal_v2, close_normalized_tags_source_bound_seal_v1,
+    close_single_graph_source_bound_seal_v1, close_touchstones_source_bound_seal_v1,
 };
 
 use super::{BackendActivity, CozoStore, TaggedReadAdmission};
@@ -299,6 +299,26 @@ fn published_postflight(
 }
 
 impl CozoStore {
+    /// Frozen historical upgrade target, not current writable admission. It
+    /// preserves source tags and the old policy/recovery ABI, publishes only an
+    /// absent destination, closes every handle, and requires a later explicit
+    /// reviewed tag-format migration. No legacy graph writer escapes.
+    pub async fn materialize_legacy_touchstones(
+        target: &Path,
+        operation_id: Ulid,
+        source: &crate::MemStore,
+    ) -> FreshCurrentMaterializationResultV1<()> {
+        materialize_fresh_generation_with_tag_policy(
+            target,
+            operation_id,
+            source,
+            CatalogContract::TouchstonesV1,
+            crate::tag_projection::LEGACY_META_VALUE,
+            |_| {},
+            |_, _| Ok(()),
+        )
+        .await
+    }
     pub async fn materialize_single_graph(
         target: &Path,
         operation_id: Ulid,
@@ -438,6 +458,36 @@ where
     BeforePublish: FnOnce(&Path),
     WhileCurrent: FnOnce(&Path, &CozoStore) -> Result<()>,
 {
+    let tag_policy = if generation == CatalogContract::TouchstonesV1 {
+        crate::tag_projection::META_VALUE
+    } else {
+        crate::tag_projection::LEGACY_META_VALUE
+    };
+    materialize_fresh_generation_with_tag_policy(
+        target,
+        operation_id,
+        source,
+        generation,
+        tag_policy,
+        before_publish,
+        while_current,
+    )
+    .await
+}
+
+async fn materialize_fresh_generation_with_tag_policy<BeforePublish, WhileCurrent>(
+    target: &Path,
+    operation_id: Ulid,
+    source: &crate::MemStore,
+    generation: CatalogContract,
+    tag_policy: &'static str,
+    before_publish: BeforePublish,
+    while_current: WhileCurrent,
+) -> FreshCurrentMaterializationResultV1<()>
+where
+    BeforePublish: FnOnce(&Path),
+    WhileCurrent: FnOnce(&Path, &CozoStore) -> Result<()>,
+{
     if target.as_os_str().is_empty() || !target.is_absolute() {
         return Err(not_published(
             "fresh_current_preflight",
@@ -480,7 +530,12 @@ where
     })?;
     let stable_source = crate::MemStore::from_export(expected.clone())
         .map_err(|error| not_published("fresh_current_preflight_exact_export", error))?;
-    let policy_binding = fresh_generation_policy_binding(expected.dim, expected.db_id, generation);
+    let policy_binding = fresh_generation_policy_binding_for_tags(
+        expected.dim,
+        expected.db_id,
+        generation,
+        tag_policy,
+    );
 
     let lease = StoreLease::acquire(target)
         .map_err(|error| not_published("fresh_current_lease_acquire", error))?;
@@ -508,7 +563,15 @@ where
             super::creation::stage_concern_schema(&database, expected.dim, database_id)
         }
         CatalogContract::TouchstonesV1 => {
-            super::creation::stage_touchstones_schema(&database, expected.dim, database_id)
+            if tag_policy == crate::tag_projection::LEGACY_META_VALUE {
+                super::creation::stage_legacy_touchstones_schema(
+                    &database,
+                    expected.dim,
+                    database_id,
+                )
+            } else {
+                super::creation::stage_touchstones_schema(&database, expected.dim, database_id)
+            }
         }
         CatalogContract::EpisodeContextV2 => {
             super::creation::stage_episode_context_schema(&database, expected.dim, database_id)
@@ -554,8 +617,13 @@ where
         .map_err(|error| not_published("fresh_current_checkpoint_not_published", error))?;
     drop(staged_store);
 
-    require_raw_closed_generation_for(stage.database_path(), expected.dim, generation)
-        .map_err(|error| not_published("fresh_current_raw_closed_not_published", error))?;
+    require_raw_closed_generation_with_tags(
+        stage.database_path(),
+        expected.dim,
+        generation,
+        tag_policy,
+    )
+    .map_err(|error| not_published("fresh_current_raw_closed_not_published", error))?;
     before_publish(target);
 
     let prepared = stage
@@ -573,7 +641,13 @@ where
         CatalogContract::EpisodeContextV2 => {
             CozoStore::open_published_episode_context(Arc::clone(&published))
         }
-        CatalogContract::TouchstonesV1 => CozoStore::open_published_current(Arc::clone(&published)),
+        CatalogContract::TouchstonesV1 => {
+            if tag_policy == crate::tag_projection::LEGACY_META_VALUE {
+                CozoStore::open_published_legacy_touchstones(Arc::clone(&published))
+            } else {
+                CozoStore::open_published_current(Arc::clone(&published))
+            }
+        }
         _ => Err(Error::InvalidInput("unsupported fresh generation".into())),
     } {
         Ok(current) => current,
@@ -672,15 +746,41 @@ fn fresh_current_policy_binding(dimension: usize, database_id: Ulid) -> [u8; 32]
     fresh_generation_policy_binding(dimension, database_id, CatalogContract::TouchstonesV1)
 }
 
+#[cfg(test)]
 fn fresh_generation_policy_binding(
     dimension: usize,
     database_id: Ulid,
     generation: CatalogContract,
 ) -> [u8; 32] {
+    fresh_generation_policy_binding_for_tags(
+        dimension,
+        database_id,
+        generation,
+        if generation == CatalogContract::TouchstonesV1 {
+            crate::tag_projection::META_VALUE
+        } else {
+            crate::tag_projection::LEGACY_META_VALUE
+        },
+    )
+}
+
+fn fresh_generation_policy_binding_for_tags(
+    dimension: usize,
+    database_id: Ulid,
+    generation: CatalogContract,
+    tag_policy: &str,
+) -> [u8; 32] {
     let mut hash = Sha256::new();
     if generation == CatalogContract::TouchstonesV1 {
-        hash.update(b"mneme.cozo.touchstones-materialization.policy-binding.v1\0");
+        if tag_policy == crate::tag_projection::LEGACY_META_VALUE {
+            hash.update(b"mneme.cozo.touchstones-materialization.policy-binding.v1\0");
+        } else {
+            hash.update(b"mneme.cozo.normalized-tags-materialization.policy-binding.v1\0");
+        }
         hash.update(TOUCHSTONES_V1_CATALOG_GENERATION_MARKER.as_bytes());
+        if tag_policy != crate::tag_projection::LEGACY_META_VALUE {
+            hash.update(tag_policy.as_bytes());
+        }
     } else if generation == CatalogContract::EpisodeContextV2 {
         hash.update(b"mneme.cozo.episode-context-materialization.policy-binding.v2\0");
         hash.update(EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER.as_bytes());
@@ -710,10 +810,29 @@ fn require_raw_closed_generation(path: &Path, expected_dimension: usize) -> Resu
     require_raw_closed_generation_for(path, expected_dimension, CatalogContract::TouchstonesV1)
 }
 
+#[cfg(test)]
 fn require_raw_closed_generation_for(
     path: &Path,
     expected_dimension: usize,
     generation: CatalogContract,
+) -> Result<()> {
+    require_raw_closed_generation_with_tags(
+        path,
+        expected_dimension,
+        generation,
+        if generation == CatalogContract::TouchstonesV1 {
+            crate::tag_projection::META_VALUE
+        } else {
+            crate::tag_projection::LEGACY_META_VALUE
+        },
+    )
+}
+
+fn require_raw_closed_generation_with_tags(
+    path: &Path,
+    expected_dimension: usize,
+    generation: CatalogContract,
+    tag_policy: &str,
 ) -> Result<()> {
     let reader_policy = if generation == CatalogContract::TouchstonesV1 {
         cozo::ManagedSnapshotPolicy::TouchstonesV1
@@ -729,7 +848,13 @@ fn require_raw_closed_generation_for(
         CatalogContract::SingleGraphV1 => close_single_graph_source_bound_seal_v1(reader),
         CatalogContract::ConcernV1 => close_concern_source_bound_seal_v1(reader),
         CatalogContract::EpisodeContextV2 => close_episode_context_source_bound_seal_v2(reader),
-        CatalogContract::TouchstonesV1 => close_touchstones_source_bound_seal_v1(reader),
+        CatalogContract::TouchstonesV1 => {
+            if tag_policy == crate::tag_projection::LEGACY_META_VALUE {
+                close_touchstones_source_bound_seal_v1(reader)
+            } else {
+                close_normalized_tags_source_bound_seal_v1(reader)
+            }
+        }
         _ => return Err(Error::InvalidInput("unsupported fresh generation".into())),
     })
     .map_err(|error| contextual("fresh_current_raw_classification_not_published", error))?;
@@ -980,8 +1105,22 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            binding_hex, "c0f877a2875cb22324fd75a835495d743c4d8dfb4d77436e558587867b378a36",
-            "fresh-current recovery binding bytes are a versioned ABI"
+            binding_hex, "6707f0557afe7a2999defff111005edf52c38b8bf89cf8e9d3b73552bf7518c9",
+            "normalized-tag fresh recovery binding bytes are a distinct versioned ABI"
+        );
+        let frozen_touchstones = fresh_generation_policy_binding_for_tags(
+            4,
+            database_id,
+            CatalogContract::TouchstonesV1,
+            crate::tag_projection::LEGACY_META_VALUE,
+        );
+        assert_eq!(
+            frozen_touchstones
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "c0f877a2875cb22324fd75a835495d743c4d8dfb4d77436e558587867b378a36",
+            "retained legacy touchstones recovery ABI stays frozen; normalized publication does not resume its stages"
         );
         let historical_context =
             fresh_generation_policy_binding(4, database_id, CatalogContract::EpisodeContextV2);
@@ -1016,6 +1155,97 @@ mod tests {
             binding,
             fresh_current_policy_binding(4, Ulid::from(0x1235_u128))
         );
+    }
+
+    #[tokio::test]
+    async fn frozen_touchstones_target_keeps_legacy_tags_for_explicit_lexical_migration() {
+        let fixture = Fixture::new();
+        let mut export = crate::MemStore::new(4).export();
+        let mut historical = node(42, "historical spelling is not new intent");
+        historical
+            .replace_tags(mneme_core::BoundedTagSet::try_from_iter(["Old_Tag", "C++"]).unwrap());
+        export.nodes.push(historical.clone());
+        export
+            .vectors
+            .push((historical.id(), vec![1.0, 0.0, 0.0, 0.0]));
+        let source = crate::MemStore::from_export(export.clone()).unwrap();
+        CozoStore::materialize_legacy_touchstones(&fixture.target, Ulid::new(), &source)
+            .await
+            .unwrap();
+        let lease = StoreLease::acquire(&fixture.target).unwrap();
+        assert!(CozoStore::open_existing_current(&fixture.target, lease).is_err());
+        let lease = StoreLease::acquire(&fixture.target).unwrap();
+        let mut migration =
+            crate::SqliteTagFormatMigration::open_legacy(&fixture.target, export.db_id, lease)
+                .unwrap();
+        let options = crate::tag_format_migration::TagFormatMigrationOptions {
+            aliases: std::collections::BTreeMap::from([("C++".into(), "cpp".into())]),
+        };
+        let plan = migration.plan(&options).unwrap();
+        assert!(plan.ready);
+        assert_eq!(plan.nodes_changed, 1);
+        migration.apply(&options, &plan.plan_sha256).unwrap();
+        migration.checkpoint().unwrap();
+        let lease = StoreLease::acquire(&fixture.target).unwrap();
+        let current = CozoStore::open_existing_current(&fixture.target, lease).unwrap();
+        let actual = current.get_node(historical.id()).await.unwrap().unwrap();
+        assert_eq!(actual.tags().collect::<Vec<_>>(), ["cpp", "old-tag"]);
+        let mut restored = actual;
+        restored.replace_tags(historical.tag_set().clone());
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(historical).unwrap()
+        );
+        current.prepare_for_file_move().unwrap();
+    }
+
+    #[tokio::test]
+    async fn normalized_publication_refuses_retained_legacy_stage_without_rewriting_it() {
+        let fixture = Fixture::new();
+        let source = crate::MemStore::new(4);
+        let operation = Ulid::new();
+        let binding = fresh_generation_policy_binding_for_tags(
+            4,
+            source.db_id(),
+            CatalogContract::TouchstonesV1,
+            crate::tag_projection::LEGACY_META_VALUE,
+        );
+        let lease = StoreLease::acquire(&fixture.target).unwrap();
+        let stage = lease
+            .begin_fresh_store_v1(
+                &fixture.target,
+                FreshStoreStageSpecV1 {
+                    operation_id: operation,
+                    policy_binding: binding,
+                },
+            )
+            .unwrap();
+        let stage_root = stage.database_path().parent().unwrap().to_path_buf();
+        fs::write(
+            stage.database_path(),
+            b"retained historical interrupted payload",
+        )
+        .unwrap();
+        let inventory = |root: &Path| {
+            fs::read_dir(root)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), fs::read(entry.path()).unwrap())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = inventory(&stage_root);
+        drop(stage);
+        let error = CozoStore::materialize_fresh_current(&fixture.target, operation, &source)
+            .await
+            .expect_err("new policy must not adopt an old operation directory");
+        assert_eq!(
+            error.target_publication_state(),
+            FreshCurrentTargetPublicationStateV1::NotPublished
+        );
+        assert!(!fixture.target.exists());
+        assert_eq!(inventory(&stage_root), before);
     }
 
     #[tokio::test]

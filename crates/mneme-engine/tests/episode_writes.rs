@@ -91,6 +91,133 @@ fn reason() -> EpisodeRevisionReason {
     EpisodeRevisionReason::new("Correct the chronology after inspecting the build log").unwrap()
 }
 
+#[derive(Default)]
+struct PublicationCountingBodies {
+    inner: InlineStore,
+    puts: AtomicUsize,
+    deletes: AtomicUsize,
+}
+#[async_trait]
+impl BodyStore for PublicationCountingBodies {
+    fn scheme(&self) -> &'static str {
+        "inline"
+    }
+    async fn get(&self, body: &BodyRef) -> PortResult<Vec<u8>> {
+        self.inner.get(body).await
+    }
+    async fn get_range(
+        &self,
+        body: &BodyRef,
+        offset: u64,
+        max_bytes: usize,
+    ) -> PortResult<BodyChunk> {
+        self.inner.get_range(body, offset, max_bytes).await
+    }
+    async fn put(&self, bytes: &[u8]) -> PortResult<BodyRef> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        self.inner.put(bytes).await
+    }
+    async fn delete(&self, body: &BodyRef) -> PortResult<()> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        self.inner.delete(body).await
+    }
+}
+
+#[tokio::test]
+async fn legacy_episode_tag_receipts_replay_before_new_materialization_policy() {
+    use mneme_core::episode::{EpisodeCommit, EpisodeFacet, EpisodeStore, EpisodeWriteExpectation};
+    use mneme_core::{BodyOwnership, Node, NodeStatus, Provenance};
+
+    for (old_tag, repaired_tag) in [("C++", "cpp"), ("Core", "historical-core")] {
+        let store = Arc::new(MemStore::new(DEFAULT_DIM));
+        let bodies = Arc::new(PublicationCountingBodies::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mem = memory(
+            store.clone(),
+            bodies.clone(),
+            Arc::new(TestClock::default()),
+            calls.clone(),
+        );
+        let tags = [old_tag];
+        let raw = |key| {
+            let mut write = request(key, b"original episode body");
+            write.tags = &tags;
+            write
+        };
+        let source = raw("old-edition").validated_source().unwrap();
+        let body = bodies.put(b"original episode body").await.unwrap();
+        let id = source.node_id();
+        // Simulate a retained original receipt after explicit canonical tag repair.
+        // Core cannot be an episode tag: historical Core therefore needs an
+        // explicit ordinary spelling, not an automatic alias to protected core.
+        let node = Node::try_new(
+            id,
+            raw("old-edition").summary,
+            body,
+            [repaired_tag],
+            Provenance::External { source },
+            0.5,
+            0.5,
+            NodeStatus::Active,
+            0,
+        )
+        .unwrap()
+        .with_body_ownership(BodyOwnership::Managed)
+        .with_episode(
+            EpisodeFacet::initial(
+                id,
+                raw("old-edition").occurrence,
+                raw("old-edition").thread,
+                EpisodeTime::new(0).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        store
+            .commit_episode(EpisodeCommit {
+                node: &node,
+                embedding: &vec![1.0; DEFAULT_DIM],
+                links: &[],
+                expectation: EpisodeWriteExpectation::NewRoot,
+            })
+            .await
+            .unwrap();
+        let before = (
+            calls.load(Ordering::SeqCst),
+            bodies.puts.load(Ordering::SeqCst),
+            bodies.deletes.load(Ordering::SeqCst),
+        );
+        let replay = mem.append_episode(raw("old-edition")).await.unwrap();
+        assert!(replay.replayed, "{old_tag}");
+        assert_eq!(replay.identity.edition_id, id);
+        assert_eq!(
+            store
+                .get_node(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .tags()
+                .collect::<Vec<_>>(),
+            [repaired_tag]
+        );
+        let error = mem.append_episode(raw("fresh-edition")).await.unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "{old_tag}: {error}"
+        );
+        assert_eq!(
+            (
+                calls.load(Ordering::SeqCst),
+                bodies.puts.load(Ordering::SeqCst),
+                bodies.deletes.load(Ordering::SeqCst)
+            ),
+            before
+        );
+        let fresh_id = raw("fresh-edition").validated_source().unwrap().node_id();
+        assert!(store.get_node(fresh_id).await.unwrap().is_none());
+    }
+}
+
 #[tokio::test]
 async fn retry_after_revision_returns_immutable_original_and_original_clock_anchor() {
     const FIRST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

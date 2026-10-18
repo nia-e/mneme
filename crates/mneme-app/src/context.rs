@@ -319,7 +319,12 @@ pub async fn prepare_context_window(
             if let Some(path) = hit.graph_path {
                 graph_paths.insert(hit.node.id(), path);
             }
-            let mut card = PrimaryInputCard::new(hit.node.id(), hit.lane_rank, hit.node.summary())?;
+            let mut card = PrimaryInputCard::new(
+                hit.node.id(),
+                hit.node.created(),
+                hit.lane_rank,
+                hit.node.summary(),
+            )?;
             if let Some(view) = touchstones.views.get(&hit.node.id()) {
                 card = card.with_touchstone(view.clone());
             }
@@ -1120,6 +1125,7 @@ async fn compose_touchstones(
                         if let Some(&index) = incoming_indices.get(&owner) {
                             output.incoming[index] = PrimaryInputCard::new(
                                 owner,
+                                header.created,
                                 NonZeroU16::new(1).unwrap(),
                                 header.summary.as_str(),
                             )?
@@ -1129,6 +1135,7 @@ async fn compose_touchstones(
                             output.incoming.push(
                                 PrimaryInputCard::new(
                                     owner,
+                                    header.created,
                                     NonZeroU16::new(1).unwrap(),
                                     header.summary.as_str(),
                                 )?

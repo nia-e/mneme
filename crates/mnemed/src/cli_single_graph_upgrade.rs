@@ -64,6 +64,38 @@ pub(crate) async fn run_single_graph(
     .await
 }
 
+/// Keep both offline capabilities alive until the caller renders acknowledgement.
+pub(crate) struct JsonTagFormatReceipt {
+    value: serde_json::Value,
+    _source_lease: std::sync::Arc<mneme_store_path::StoreLease>,
+    _target_lease: Option<std::sync::Arc<mneme_store_path::StoreLease>>,
+}
+impl std::ops::Deref for JsonTagFormatReceipt {
+    type Target = serde_json::Value;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl std::fmt::Debug for JsonTagFormatReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+pub(crate) fn tag_format_failure_report(error: &AnyErr) -> Option<&serde_json::Value> {
+    persistent::tag_failure_report(error)
+}
+
+pub(crate) async fn run_tag_format_json(
+    source: &Path,
+    output: Option<&Path>,
+    expected_db_id: ulid::Ulid,
+    options: &mneme_cozo::tag_format_migration::TagFormatMigrationOptions,
+    expected_plan: Option<&str>,
+) -> Result<JsonTagFormatReceipt, AnyErr> {
+    persistent::tag_format_json(source, output, expected_db_id, options, expected_plan).await
+}
+
 mod persistent {
     use std::collections::BTreeSet;
     use std::fmt;
@@ -94,6 +126,7 @@ mod persistent {
         report: Value,
         source: AnyErr,
         _source_lease: Option<Arc<StoreLease>>,
+        _target_lease: Option<Arc<StoreLease>>,
     }
     impl fmt::Display for UpgradeFailure {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -122,10 +155,13 @@ mod persistent {
         phase: &'static str,
         db_id: Option<Ulid>,
         source_lease: Option<Arc<StoreLease>>,
+        target_lease: Option<Arc<StoreLease>>,
         bodies_created: bool,
         target_published: bool,
         backend: PredecessorBackend,
         target_generation: TargetGeneration,
+        tag_export: Option<mneme_cozo::StoreExport>,
+        tag_plan: Option<Value>,
     }
     impl Progress {
         fn report(&self, status: &str) -> Value {
@@ -173,10 +209,13 @@ mod persistent {
             phase: "preflight",
             db_id: None,
             source_lease: None,
+            target_lease: None,
             bodies_created: false,
             target_published: false,
             backend,
             target_generation,
+            tag_export: None,
+            tag_plan: None,
         };
         match upgrade(&mut progress, backend).await {
             Ok(report) => {
@@ -248,6 +287,118 @@ mod persistent {
                     report,
                     source,
                     _source_lease: progress.source_lease,
+                    _target_lease: progress.target_lease,
+                }))
+            }
+        }
+    }
+
+    pub(super) fn tag_failure_report(error: &AnyErr) -> Option<&Value> {
+        error
+            .downcast_ref::<UpgradeFailure>()
+            .map(|failure| &failure.report)
+    }
+
+    pub(super) async fn tag_format_json(
+        source: &Path,
+        output: Option<&Path>,
+        expected_db_id: Ulid,
+        options: &mneme_cozo::tag_format_migration::TagFormatMigrationOptions,
+        expected_plan: Option<&str>,
+    ) -> Result<JsonTagFormatReceipt, AnyErr> {
+        use mneme_cozo::tag_format_migration::{
+            normalize_tag_format_export, plan_tag_format_export,
+        };
+        if !source.is_absolute() {
+            return Err("JSON migration source must be absolute".into());
+        }
+        let source = mneme_store_path::resolve_configured_store_path(source)?;
+        let lease = Arc::new(StoreLease::acquire(&source)?);
+        let source_digest = file_digest(&source)?;
+        let mut export = MemStore::load_touchstones_v5(&source)?;
+        if export.db_id != expected_db_id {
+            return Err("JSON migration database identity mismatch".into());
+        }
+        let plan = plan_tag_format_export(&export, options)?;
+        require_unchanged_source(&source, source_digest, &lease)?;
+        if expected_plan.is_none() {
+            if output.is_some() {
+                return Err("JSON plan does not publish an output".into());
+            }
+            return Ok(JsonTagFormatReceipt {
+                value: json!({"schema":"mneme.tag-format-migration.v1", "action":"plan", "source":source,
+                "db_id":expected_db_id.to_string(), "source_sha256":digest_hex(source_digest), "plan":plan,
+                "applied":false, "activation":"distinct absent successor; source retained; explicit quiesce/rebind required"}),
+                _source_lease: lease,
+                _target_lease: None,
+            });
+        }
+        let output = output.ok_or("JSON apply requires a distinct absent --output path")?;
+        let (source, target) = preflight_paths(&source, output)?;
+        // An absent name can still have an already-admitted owner. File absence
+        // is not writer exclusion; retain the target lease through acknowledgement.
+        let target_lease = Arc::new(StoreLease::acquire(&target)?);
+        let (source, target) = preflight_paths(&source, &target)?;
+        target_lease.require_guards(&target)?;
+        normalize_tag_format_export(&mut export, options, expected_db_id, expected_plan.unwrap())?;
+        // Exact source requests, learned state and volatile records remain in
+        // the raw export. MemStore is only a validation/body-inventory view.
+        let mut progress = Progress {
+            source,
+            target,
+            operation_id: Ulid::new(),
+            phase: "source_export",
+            db_id: Some(expected_db_id),
+            source_lease: Some(lease.clone()),
+            target_lease: Some(target_lease),
+            bodies_created: false,
+            target_published: false,
+            backend: PredecessorBackend::Json,
+            target_generation: TargetGeneration::TouchstonesV1,
+            tag_export: Some(export.clone()),
+            tag_plan: Some(serde_json::to_value(&plan)?),
+        };
+        let result = finish_export(
+            &mut progress,
+            PredecessorBackend::Json,
+            export,
+            Some(source_digest),
+            &lease,
+        )
+        .await;
+        match result {
+            Ok(mut report) => {
+                report["schema"] = json!("mneme.tag-format-migration.v1");
+                report["action"] = json!("apply");
+                report["applied"] = json!(true);
+                report["plan"] = json!(plan);
+                report["generation"] = json!("canonical-tags-v1");
+                report["activation"] = json!(
+                    "not activated; source retained; quiesce old snapshot writers and deliberately rebind owner to successor; never replace source path"
+                );
+                Ok(JsonTagFormatReceipt {
+                    value: report,
+                    _source_lease: lease,
+                    _target_lease: progress.target_lease,
+                })
+            }
+            Err(error) => {
+                let mut report = progress.report("failed");
+                report["schema"] = json!("mneme.tag-format-migration.v1");
+                report["publication_state"] = json!(if progress.target_published {
+                    "Published"
+                } else {
+                    "Unpublished"
+                });
+                report["target_generation"] = json!("canonical-tags-v1");
+                report["activation"] = json!(
+                    "failed result must not be activated; preserve residue and use a new absent output after inspection"
+                );
+                Err(Box::new(UpgradeFailure {
+                    report,
+                    source: error,
+                    _source_lease: progress.source_lease,
+                    _target_lease: progress.target_lease,
                 }))
             }
         }
@@ -267,6 +418,16 @@ mod persistent {
         progress.phase = "source_admission";
         let lease = Arc::new(StoreLease::acquire(&progress.source)?);
         progress.source_lease = Some(lease.clone());
+        if matches!(backend, PredecessorBackend::Json) {
+            // An absent JSON name can still belong to an admitted snapshot
+            // writer. SQLite materialization owns its own destination lease.
+            let target_lease = Arc::new(StoreLease::acquire(&progress.target)?);
+            let (source, target) = preflight_paths(&progress.source, &progress.target)?;
+            target_lease.require_guards(&target)?;
+            progress.source = source;
+            progress.target = target;
+            progress.target_lease = Some(target_lease);
+        }
         if matches!(backend, PredecessorBackend::Sqlite) {
             reject_sidecars(&progress.source)?;
         }
@@ -312,6 +473,16 @@ mod persistent {
         if let Some(digest) = source_digest {
             require_unchanged_source(&progress.source, digest, &lease)?;
         }
+        finish_export(progress, backend, expected, source_digest, &lease).await
+    }
+
+    async fn finish_export(
+        progress: &mut Progress,
+        backend: PredecessorBackend,
+        expected: mneme_cozo::StoreExport,
+        source_digest: Option<[u8; 32]>,
+        lease: &Arc<StoreLease>,
+    ) -> Result<Value, AnyErr> {
         progress.db_id = Some(expected.db_id);
         let non_fs_body_refs = expected
             .nodes
@@ -323,10 +494,17 @@ mod persistent {
         let node_count = expected.nodes.len();
         let edge_count = expected.edges.len();
         let vector_count = expected.vectors.len();
-        let feedback_proofs_reset = expected.feedback_retries.len();
+        let feedback_proofs_reset = if progress.tag_export.is_some() {
+            0
+        } else {
+            expected.feedback_retries.len()
+        };
         let snapshot = MemStore::from_export(expected)?;
         lease.require_guards(&progress.source)?;
 
+        if let Some(target_lease) = &progress.target_lease {
+            target_lease.require_guards(&progress.target)?;
+        }
         progress.phase = "body_preflight";
         let body_root = progress.source.with_extension("bodies");
         if !body_names.is_empty() {
@@ -360,7 +538,7 @@ mod persistent {
                 name,
             )?);
         }
-        let manifest = json!({
+        let mut manifest = json!({
             "schema": "mneme.single-graph-upgrade.bodies.v1",
             "target_generation": progress.target_generation.as_str(),
             "source": progress.source, "output": progress.target,
@@ -368,6 +546,15 @@ mod persistent {
             "db_id": progress.db_id.map(|id| id.to_string()),
             "files": records,
         });
+        if let Some(plan) = &progress.tag_plan {
+            manifest["schema"] = json!("mneme.tag-format-migration.bodies.v1");
+            manifest["target_generation"] = json!("canonical-tags-v1");
+            manifest["source_sha256"] = json!(source_digest.map(digest_hex));
+            manifest["tag_plan"] = plan.clone();
+            manifest["historical_source_proofs"] = json!("preserved_exactly");
+            manifest["activation"] =
+                json!("not activated; source retained; quiesce and rebind to distinct successor");
+        }
         #[cfg(test)]
         body_checkpoint("before_manifest_create")?;
         let mut manifest_file = create_private_file(&target_root.join(MANIFEST))?;
@@ -443,7 +630,7 @@ mod persistent {
                         .await?
                     }
                     TargetGeneration::TouchstonesV1 => {
-                        CozoStore::materialize_fresh_current(
+                        CozoStore::materialize_legacy_touchstones(
                             &progress.target,
                             progress.operation_id,
                             &snapshot,
@@ -462,6 +649,9 @@ mod persistent {
                 &lease,
             )?),
         };
+        if let Some(target_lease) = &progress.target_lease {
+            target_lease.require_guards(&progress.target)?;
+        }
         progress.target_published = true;
         progress.phase = "complete";
         let mut report = progress.report("upgraded_copy");
@@ -557,28 +747,55 @@ mod persistent {
         let stage_dir = parent.join(format!(".single-graph-upgrade-{}", progress.operation_id));
         create_private_dir(&stage_dir)?;
         let staged = stage_dir.join("database.json");
-        match progress.target_generation {
-            TargetGeneration::SingleGraphV1 => snapshot.save_single_graph_v2(&staged)?,
-            TargetGeneration::ConcernV1 => snapshot.save_concern_v3(&staged)?,
-            TargetGeneration::EpisodeContextV2 => snapshot.save_episode_context_v4(&staged)?,
-            TargetGeneration::TouchstonesV1 => snapshot.save(&staged)?,
+        if let Some(export) = &progress.tag_export {
+            let bytes =
+                serde_json::to_vec_pretty(&mneme_cozo::StoreExportEnvelopeV6::new(export.clone()))?;
+            #[cfg(test)]
+            body_checkpoint("before_tag_json_stage_create")?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            #[cfg(test)]
+            body_checkpoint("after_tag_json_stage_create")?;
+            #[cfg(test)]
+            body_checkpoint("before_tag_json_stage_write")?;
+            file.write_all(&bytes)?;
+            #[cfg(test)]
+            body_checkpoint("after_tag_json_stage_write")?;
+            #[cfg(test)]
+            body_checkpoint("before_tag_json_stage_sync")?;
+            file.sync_all()?;
+            #[cfg(test)]
+            body_checkpoint("after_tag_json_stage_sync")?;
+        } else {
+            match progress.target_generation {
+                TargetGeneration::SingleGraphV1 => snapshot.save_single_graph_v2(&staged)?,
+                TargetGeneration::ConcernV1 => snapshot.save_concern_v3(&staged)?,
+                TargetGeneration::EpisodeContextV2 => snapshot.save_episode_context_v4(&staged)?,
+                TargetGeneration::TouchstonesV1 => snapshot.save_touchstones_v5(&staged)?,
+            }
         }
-        let staged_loaded = load_target_json(&staged, progress.target_generation)?;
-        let expected = snapshot.export().canonical_value()?;
-        if staged_loaded.export().canonical_value()? != expected {
+        let expected = match &progress.tag_export {
+            Some(export) => export.clone().canonical_value()?,
+            None => snapshot.export().canonical_value()?,
+        };
+        if json_target_value(&staged, progress)? != expected {
             return Err("staged JSON graph failed full export readback".into());
         }
         let staged_digest = file_digest(&staged)?;
         File::open(&stage_dir)?.sync_all()?;
         require_unchanged_source(&progress.source, source_digest, lease)?;
         require_absent(&progress.target)?;
+        if let Some(target_lease) = &progress.target_lease {
+            target_lease.require_guards(&progress.target)?;
+        }
         fs::hard_link(&staged, &progress.target)?;
         progress.target_published = true;
         #[cfg(test)]
         body_checkpoint("after_json_publish")?;
         File::open(parent)?.sync_all()?;
-        let current = load_target_json(&progress.target, progress.target_generation)?;
-        if current.export().canonical_value()? != expected
+        if json_target_value(&progress.target, progress)? != expected
             || published_file_digest(&progress.target)? != staged_digest
         {
             return Err("published JSON graph failed full export/digest readback".into());
@@ -589,12 +806,26 @@ mod persistent {
         Ok(digest_hex(staged_digest))
     }
 
+    fn json_target_value(path: &Path, progress: &Progress) -> Result<Value, AnyErr> {
+        if progress.tag_export.is_some() {
+            let bytes = fs::read(path)?;
+            let envelope: mneme_cozo::StoreExportEnvelopeV6 = serde_json::from_slice(&bytes)?;
+            Ok(envelope.into_store()?.canonical_value()?)
+        } else {
+            Ok(load_target_json(path, progress.target_generation)?
+                .export()
+                .canonical_value()?)
+        }
+    }
+
     fn load_target_json(path: &Path, generation: TargetGeneration) -> Result<MemStore, AnyErr> {
         Ok(match generation {
             TargetGeneration::SingleGraphV1 => MemStore::load_single_graph_v2(path)?,
             TargetGeneration::ConcernV1 => MemStore::load_concern_v3(path)?,
             TargetGeneration::EpisodeContextV2 => MemStore::load_episode_context_v4(path)?,
-            TargetGeneration::TouchstonesV1 => MemStore::load(path)?,
+            TargetGeneration::TouchstonesV1 => {
+                MemStore::from_export(MemStore::load_touchstones_v5(path)?)?
+            }
         })
     }
 
@@ -828,6 +1059,234 @@ mod persistent {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[tokio::test]
+        async fn historical_touchstones_json_target_keeps_legacy_tags_exact() {
+            use mneme_core::{BodyRef, Node, NodeId, NodeStatus, Provenance};
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("mneme-json-v4-v5-{}", Ulid::new()));
+            fs::create_dir(&root).unwrap();
+            let source = root.join("v4.json");
+            let target = root.join("v5.json");
+            let mut export = MemStore::new(4).export();
+            export.nodes.push(
+                Node::try_new(
+                    NodeId(Ulid::new()),
+                    "legacy tag",
+                    BodyRef::new("inline://legacy").unwrap(),
+                    ["Old_Tag"],
+                    Provenance::derived_empty(),
+                    0.5,
+                    0.6,
+                    NodeStatus::Active,
+                    1,
+                )
+                .unwrap(),
+            );
+            let before =
+                serde_json::to_vec(&mneme_cozo::StoreExportEnvelopeV4::new(export)).unwrap();
+            fs::write(&source, &before).unwrap();
+            let mut progress = Progress {
+                source: source.clone(),
+                target: target.clone(),
+                operation_id: Ulid::new(),
+                phase: "preflight",
+                db_id: None,
+                source_lease: None,
+                target_lease: None,
+                bodies_created: false,
+                target_published: false,
+                backend: PredecessorBackend::Json,
+                target_generation: TargetGeneration::TouchstonesV1,
+                tag_export: None,
+                tag_plan: None,
+            };
+            let held_target = StoreLease::acquire(&target).unwrap();
+            assert!(
+                upgrade(&mut progress, PredecessorBackend::Json)
+                    .await
+                    .is_err()
+            );
+            assert!(!target.exists());
+            assert!(!target.with_extension("bodies").exists());
+            assert_eq!(fs::read(&source).unwrap(), before);
+            drop(held_target);
+            progress.source_lease = None;
+            upgrade(&mut progress, PredecessorBackend::Json)
+                .await
+                .unwrap();
+            let decoded = MemStore::load_touchstones_v5(&target).unwrap();
+            assert_eq!(decoded.nodes[0].tags().collect::<Vec<_>>(), vec!["Old_Tag"]);
+            assert!(MemStore::load(&target).is_err());
+            assert_eq!(fs::read(&source).unwrap(), before);
+            drop(progress);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[tokio::test]
+        async fn json_tag_migration_preserves_bodies_exact_source_and_no_clobber() {
+            use mneme_core::{BodyRef, Node, NodeId, NodeStatus, Provenance};
+            use mneme_cozo::tag_format_migration::TagFormatMigrationOptions;
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("mneme-json-tag-{}", Ulid::new()));
+            fs::create_dir(&root).unwrap();
+            let source = root.join("source.json");
+            let output = root.join("target.json");
+            let mut export = MemStore::new(4).export();
+            let node = Node::try_new(
+                NodeId(Ulid::new()),
+                "legacy tag",
+                BodyRef::new("fs://body").unwrap(),
+                ["Old_Tag"],
+                Provenance::derived_empty(),
+                0.5,
+                0.6,
+                NodeStatus::Active,
+                1,
+            )
+            .unwrap();
+            export.nodes.push(node);
+            export
+                .feedback_retries
+                .push(mneme_cozo::FeedbackRetryRecord {
+                    key: "historical-diagnostic-token".into(),
+                    fingerprint: "a".repeat(64),
+                    epoch: Ulid::new().to_string(),
+                    sequence: 7,
+                });
+            let exact_retries = export.feedback_retries.clone();
+
+            let bytes = serde_json::to_vec(&mneme_cozo::StoreExportEnvelopeV5::new(export.clone()))
+                .unwrap();
+            fs::write(&source, &bytes).unwrap();
+            create_private_dir(&source.with_extension("bodies")).unwrap();
+            fs::write(source.with_extension("bodies").join("body"), b"exact body").unwrap();
+            let options = TagFormatMigrationOptions::default();
+            let plan = tag_format_json(&source, None, export.db_id, &options, None)
+                .await
+                .unwrap();
+            assert!(!output.exists());
+            assert!(!output.with_extension("bodies").exists());
+            let digest_owned = plan["plan"]["plan_sha256"].as_str().unwrap().to_owned();
+            drop(plan);
+            let digest = digest_owned.as_str();
+            assert!(
+                tag_format_json(&source, Some(&output), Ulid::new(), &options, Some(digest))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                tag_format_json(
+                    &source,
+                    Some(&output),
+                    export.db_id,
+                    &options,
+                    Some(&"0".repeat(64))
+                )
+                .await
+                .is_err()
+            );
+            assert!(!output.with_extension("bodies").exists());
+            let held_target = root.join("already-admitted.json");
+            let held_lease = StoreLease::acquire(&held_target).unwrap();
+            assert!(
+                tag_format_json(
+                    &source,
+                    Some(&held_target),
+                    export.db_id,
+                    &options,
+                    Some(digest)
+                )
+                .await
+                .is_err()
+            );
+            assert!(!held_target.exists());
+            assert!(!held_target.with_extension("bodies").exists());
+            drop(held_lease);
+            for (index, point) in [
+                "before_tag_json_stage_create",
+                "after_tag_json_stage_create",
+                "before_tag_json_stage_write",
+                "after_tag_json_stage_write",
+                "before_tag_json_stage_sync",
+                "after_tag_json_stage_sync",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let cut = root.join(format!("stage-cut-{index}.json"));
+                BODY_FAILURE.with(|slot| slot.set(Some(point)));
+                let error =
+                    tag_format_json(&source, Some(&cut), export.db_id, &options, Some(digest))
+                        .await
+                        .unwrap_err();
+                BODY_FAILURE.with(|slot| slot.set(None));
+                let failure = error.downcast_ref::<UpgradeFailure>().unwrap();
+                assert_eq!(failure.report["publication_state"], "Unpublished");
+                assert!(!cut.exists());
+                assert_eq!(fs::read(&source).unwrap(), bytes);
+                assert!(cut.with_extension("bodies").join(MANIFEST).exists());
+                drop(error);
+            }
+            let report =
+                tag_format_json(&source, Some(&output), export.db_id, &options, Some(digest))
+                    .await
+                    .unwrap();
+            assert_eq!(report["volatile_feedback_proofs_reset"], 0);
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            assert_eq!(
+                fs::read(output.with_extension("bodies").join("body")).unwrap(),
+                b"exact body"
+            );
+            let target: mneme_cozo::StoreExportEnvelopeV6 =
+                serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+            let target = target.into_store().unwrap();
+            assert_eq!(target.feedback_retries, exact_retries);
+
+            assert_eq!(target.nodes[0].tags().collect::<Vec<_>>(), vec!["old-tag"]);
+            let manifest: Value = serde_json::from_slice(
+                &fs::read(output.with_extension("bodies").join(MANIFEST)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest["tag_plan"]["plan_sha256"], digest);
+            assert!(StoreLease::acquire(&output).is_err());
+            assert!(StoreLease::acquire(&source).is_err());
+            drop(report);
+            drop(StoreLease::acquire(&output).unwrap());
+            let published = fs::read(&output).unwrap();
+            assert!(
+                tag_format_json(&source, Some(&output), export.db_id, &options, Some(digest))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(fs::read(&output).unwrap(), published);
+            let cut_output = root.join("cut.json");
+            BODY_FAILURE.with(|slot| slot.set(Some("after_json_publish")));
+            let error = tag_format_json(
+                &source,
+                Some(&cut_output),
+                export.db_id,
+                &options,
+                Some(digest),
+            )
+            .await
+            .unwrap_err();
+            BODY_FAILURE.with(|slot| slot.set(None));
+            let failure = error.downcast_ref::<UpgradeFailure>().unwrap();
+            assert_eq!(failure.report["publication_state"], "Published");
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            assert!(cut_output.exists());
+            assert_eq!(
+                fs::read(cut_output.with_extension("bodies").join("body")).unwrap(),
+                b"exact body"
+            );
+            drop(error);
+            fs::remove_dir_all(root).unwrap();
+        }
 
         async fn populated_predecessor() -> MemStore {
             use mneme_core::ports::{EmbeddingMetadataStore, GraphStore, VectorIndex};
@@ -1092,10 +1551,13 @@ mod persistent {
                     phase: "preflight",
                     db_id: None,
                     source_lease: None,
+                    target_lease: None,
                     bodies_created: false,
                     target_published: false,
                     backend: PredecessorBackend::Json,
                     target_generation,
+                    tag_export: None,
+                    tag_plan: None,
                 };
                 let report = upgrade(&mut success, PredecessorBackend::Json)
                     .await
@@ -1272,10 +1734,13 @@ mod persistent {
                 phase: "preflight",
                 db_id: None,
                 source_lease: None,
+                target_lease: None,
                 bodies_created: false,
                 target_published: false,
                 backend: PredecessorBackend::Json,
                 target_generation: TargetGeneration::ConcernV1,
+                tag_export: None,
+                tag_plan: None,
             };
             let report = upgrade(&mut progress, PredecessorBackend::Json)
                 .await
@@ -1372,10 +1837,13 @@ mod persistent {
                 phase: "preflight",
                 db_id: None,
                 source_lease: None,
+                target_lease: None,
                 bodies_created: false,
                 target_published: false,
                 backend: PredecessorBackend::Sqlite,
                 target_generation: TargetGeneration::ConcernV1,
+                tag_export: None,
+                tag_plan: None,
             };
             let report = upgrade(&mut progress, PredecessorBackend::Sqlite)
                 .await
@@ -1452,10 +1920,13 @@ mod persistent {
                 phase: "preflight",
                 db_id: None,
                 source_lease: None,
+                target_lease: None,
                 bodies_created: false,
                 target_published: false,
                 backend: PredecessorBackend::Json,
                 target_generation: TargetGeneration::SingleGraphV1,
+                tag_export: None,
+                tag_plan: None,
             };
             assert!(
                 tokio::runtime::Builder::new_current_thread()

@@ -27,7 +27,8 @@ use ulid::Ulid;
 use crate::storage_contract::conventional_unmanaged::admission::{
     CurrentOpenPermitV1, ExistingOpenAdmissionReceiptV1, OpenAdmissionV1,
     recognize_concern_open_source_v1, recognize_episode_context_open_source_v2,
-    recognize_single_graph_open_source_v1, recognize_touchstones_open_source_v1,
+    recognize_normalized_tags_open_source_v1, recognize_single_graph_open_source_v1,
+    recognize_touchstones_open_source_v1,
 };
 use crate::storage_contract::conventional_unmanaged::spec::{
     CONCERN_V1_CATALOG_GENERATION_MARKER, CatalogContract,
@@ -100,12 +101,13 @@ pub(super) struct PersistentStoreAuthority {
     guards: PersistentStoreGuards,
     admission: PersistentStoreAdmission,
     feedback_epoch: Mutex<Option<String>>,
+    tag_policy: &'static str,
 }
 
 enum PersistentStoreAdmission {
-    /// Transitional compatibility for the exact old conventional generation.
-    /// The raw classifier positively recognized it before the legacy
-    /// constructor ran; unknown/torn sources never reach this state.
+    /// The normal absent-path admission created the current schema while
+    /// retaining the supplied filesystem authority. Existing sources cannot
+    /// obtain this variant by falling back after failed classification.
     FreshCreated,
     Current(ExistingOpenAdmissionReceiptV1),
 }
@@ -171,6 +173,78 @@ fn assert_send_sync<T: Send + Sync>() {}
 const _: fn() = assert_send_sync::<PersistentStoreAuthority>;
 
 impl super::CozoStore {
+    /// Revalidate an already-admitted live current owner before guarded work.
+    ///
+    /// Unlike [`Self::require_existing_current`], this checks the live handle,
+    /// retained admission/lease and exact current catalog/metadata. Its own
+    /// ordinary SQLite WAL/journal is not an unestablished offline source.
+    /// This cannot admit an unopened path, an unleased raw handle or a legacy
+    /// migration handle, and never repairs or changes the store.
+    pub fn require_admitted_current(&self) -> Result<()> {
+        let authority = self
+            .persistent_authority
+            .as_ref()
+            .ok_or_else(|| validation_error("retained persistent admission authority"))?;
+        authority.require_live_guards("before live current-generation verification")?;
+        let validation = (|| {
+            if !matches!(authority.admission, PersistentStoreAdmission::FreshCreated)
+                && !authority.has_current_admission_receipt()
+            {
+                return Err(validation_error("retained current admission receipt"));
+            }
+            if authority.tag_policy != crate::tag_projection::META_VALUE {
+                return Err(validation_error("normalized admission policy"));
+            }
+            require_meta(
+                self,
+                VECTOR_PROJECTION_META_KEY,
+                TOUCHSTONES_V1_CATALOG_GENERATION_MARKER,
+                "live current generation marker",
+            )?;
+            let db_id = validate_admitted_runtime_metadata(self, authority)?;
+            if db_id != self.db_id {
+                return Err(validation_error("retained live database identity"));
+            }
+            Ok(())
+        })();
+        combine_with_authority(
+            validation,
+            authority.require_live_guards("after live current-generation verification"),
+        )
+    }
+
+    /// Narrow internal source admission for the explicit lexical-format tool.
+    /// The returned writer never leaves that tool's private facade. Ordinary
+    /// opens do not retry this recognizer after current admission fails.
+    pub(super) fn open_legacy_tag_migration_source(
+        path: &Path,
+        lease: Arc<StoreLease>,
+    ) -> Result<Self> {
+        let guards = PersistentStoreGuards::Existing(lease);
+        let admitted = classify_legacy_touchstones(path, &guards)?;
+        match admitted {
+            OpenAdmissionV1::Current(current) => {
+                Self::open_admitted_current(path.to_path_buf(), guards, current)
+            }
+            _ => Err(current_open_error(
+                "exact legacy-tag TouchstonesV1 source required for tag-format migration",
+            )),
+        }
+    }
+
+    pub(super) fn open_published_legacy_touchstones(
+        published: Arc<PublishedFreshStoreV1>,
+    ) -> Result<Self> {
+        let path = published.path().to_path_buf();
+        let guards = PersistentStoreGuards::Published(published);
+        let OpenAdmissionV1::Current(current) = classify_legacy_touchstones(&path, &guards)? else {
+            return Err(current_open_error(
+                "exact frozen legacy-tag TouchstonesV1 publication required",
+            ));
+        };
+        Self::open_admitted_current(path, guards, current)
+    }
+
     /// Read-only positive capture-generation preflight before any body read or
     /// embedder construction. An acquired matching lease is required; this
     /// never creates or upgrades a database.
@@ -178,18 +252,14 @@ impl super::CozoStore {
         lease
             .require_guards(path)
             .map_err(|e| authority_failure("before single-graph preflight", e))?;
-        let source = ExistingSqliteSnapshotSource::open(path).map_err(|_| {
-            current_open_error("touchstones-v1 generation required; use single-graph-upgrade --target-generation touchstones-v1 --backend sqlite --output <ABSENT_PATH>")
-        })?;
-        let result = recognize_touchstones_open_source_v1(source).map_err(|_| {
-            current_open_error("touchstones-v1 generation required; use single-graph-upgrade --target-generation touchstones-v1 --backend sqlite --output <ABSENT_PATH>")
-        })?;
+        let result = classify_raw_existing_for(path, CatalogContract::TouchstonesV1)?;
         lease
             .require_guards(path)
             .map_err(|e| authority_failure("after single-graph preflight", e))?;
         match result {
             OpenAdmissionV1::Current(_) => Ok(()),
-            _ => Err(current_open_error("touchstones-v1 generation required")),
+            _ => Err(AdmissionFailure::ExactGenerationNotEstablished
+                .into_error(CatalogContract::TouchstonesV1)),
         }
     }
     /// Open or create the persistent conventional store used by a normal
@@ -380,6 +450,11 @@ impl super::CozoStore {
         guards: PersistentStoreGuards,
         current: CurrentOpenPermitV1,
     ) -> Result<Self> {
+        let tag_policy = if current.requires_normalized_tags() {
+            crate::tag_projection::META_VALUE
+        } else {
+            crate::tag_projection::LEGACY_META_VALUE
+        };
         let admission = current
             .into_existing_open_admission_v1(&path)
             .map_err(|_| {
@@ -400,6 +475,7 @@ impl super::CozoStore {
             guards,
             admission: PersistentStoreAdmission::Current(admission_receipt),
             feedback_epoch: Mutex::new(None),
+            tag_policy,
         });
         if !authority.has_current_admission_receipt() {
             return Err(current_open_error(
@@ -464,6 +540,7 @@ impl super::CozoStore {
             guards,
             admission: PersistentStoreAdmission::FreshCreated,
             feedback_epoch: Mutex::new(None),
+            tag_policy: crate::tag_projection::META_VALUE,
         }));
         Ok(store)
     }
@@ -495,33 +572,79 @@ fn classify_existing(path: &Path, guards: &PersistentStoreGuards) -> Result<Open
     classify_existing_for(path, guards, CatalogContract::TouchstonesV1)
 }
 
+fn classify_legacy_touchstones(
+    path: &Path,
+    guards: &PersistentStoreGuards,
+) -> Result<OpenAdmissionV1> {
+    require_preopen_guards(guards, path, "before explicit legacy tag admission")?;
+    let source = ExistingSqliteSnapshotSource::open(path).map_err(|_| {
+        AdmissionFailure::CleanSourceNotEstablished.into_error(CatalogContract::TouchstonesV1)
+    })?;
+    combine_with_authority(
+        recognize_touchstones_open_source_v1(source).map_err(|_| {
+            AdmissionFailure::ExactGenerationNotEstablished
+                .into_error(CatalogContract::TouchstonesV1)
+        }),
+        require_preopen_guards(guards, path, "after explicit legacy tag admission"),
+    )
+}
+
 fn classify_existing_for(
     path: &Path,
     guards: &PersistentStoreGuards,
     generation: CatalogContract,
 ) -> Result<OpenAdmissionV1> {
     require_preopen_guards(guards, path, "before raw admission fence")?;
-    let raw_admission = ExistingSqliteSnapshotSource::open(path)
-        .map_err(|_| {
-            current_open_error(
-                "existing_store_admission_failed: clean existing SQLite source was not established",
-            )
-        })
-        .and_then(|source| {
-            (match generation {
-                CatalogContract::SingleGraphV1 => recognize_single_graph_open_source_v1(source),
-                CatalogContract::ConcernV1 => recognize_concern_open_source_v1(source),
-                CatalogContract::EpisodeContextV2 => recognize_episode_context_open_source_v2(source),
-                CatalogContract::TouchstonesV1 => recognize_touchstones_open_source_v1(source),
-                _ => return Err(current_open_error("unsupported publication generation")),
-            }).map_err(|_| current_open_error(
-                "episode_context_upgrade_required_or_invalid: exact current admission failed; ConcernV1 predecessors require single-graph-upgrade --target-generation episode-context-v2 --backend sqlite --output <ABSENT_PATH>; earlier predecessors require the named historical targets first",
-            ))
-        });
+    let raw_admission = classify_raw_existing_for(path, generation);
     combine_with_authority(
         raw_admission,
         require_preopen_guards(guards, path, "after raw admission fence"),
     )
+}
+
+/// These categories describe only which proof was not established. The raw
+/// recognizer intentionally erases its cause: failure is not positive evidence
+/// of a supported predecessor and cannot justify a particular migration.
+enum AdmissionFailure {
+    CleanSourceNotEstablished,
+    ExactGenerationNotEstablished,
+}
+
+impl AdmissionFailure {
+    fn into_error(self, generation: CatalogContract) -> Error {
+        let expected = match generation {
+            CatalogContract::Predecessor => "predecessor",
+            CatalogContract::EpisodeV1 => "episode-v1",
+            CatalogContract::SingleGraphV1 => "single-graph-v1",
+            CatalogContract::ConcernV1 => "concern-v1",
+            CatalogContract::EpisodeContextV2 => "episode-context-v2",
+            CatalogContract::TouchstonesV1 => "touchstones-v1",
+        };
+        let reason = match self {
+            Self::CleanSourceNotEstablished => {
+                "source_not_established: clean existing SQLite source was not established; source may be unavailable, unsafe, dirty, or unknown"
+            }
+            Self::ExactGenerationNotEstablished => {
+                "generation_not_established: exact generation admission was not established; no supported predecessor was positively identified; source may be old, torn, or unknown"
+            }
+        };
+        Error::Backend(format!(
+            "existing_store_admission_failed: {reason}; expected {expected}; preserve the database/body pair and matching runtime, verify the source generation before choosing recovery; see docs/episodic-memory.md#existing-persistent-stores; no automatic repair or fallback was attempted"
+        ))
+    }
+}
+
+fn classify_raw_existing_for(path: &Path, generation: CatalogContract) -> Result<OpenAdmissionV1> {
+    let source = ExistingSqliteSnapshotSource::open(path)
+        .map_err(|_| AdmissionFailure::CleanSourceNotEstablished.into_error(generation))?;
+    (match generation {
+        CatalogContract::SingleGraphV1 => recognize_single_graph_open_source_v1(source),
+        CatalogContract::ConcernV1 => recognize_concern_open_source_v1(source),
+        CatalogContract::EpisodeContextV2 => recognize_episode_context_open_source_v2(source),
+        CatalogContract::TouchstonesV1 => recognize_normalized_tags_open_source_v1(source),
+        _ => return Err(current_open_error("unsupported publication generation")),
+    })
+    .map_err(|_| AdmissionFailure::ExactGenerationNotEstablished.into_error(generation))
 }
 
 fn authority_failure(stage: &'static str, error: std::io::Error) -> Error {
@@ -555,6 +678,13 @@ fn validate_current_runtime(
         return Err(validation_error("classifier receipt"));
     }
 
+    validate_admitted_runtime_metadata(store, authority)
+}
+
+fn validate_admitted_runtime_metadata(
+    store: &super::CozoStore,
+    authority: &PersistentStoreAuthority,
+) -> Result<Ulid> {
     validate_visible_catalog(store)?;
     require_meta(store, "dim", &store.dim.to_string(), "vector dimension")?;
     require_meta(
@@ -609,7 +739,7 @@ fn validate_current_runtime(
     require_meta(
         store,
         crate::tag_projection::META_KEY,
-        crate::tag_projection::META_VALUE,
+        authority.tag_policy,
         "tag projection marker",
     )?;
 

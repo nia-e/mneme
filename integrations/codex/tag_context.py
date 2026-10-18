@@ -23,6 +23,8 @@ MAX_CONTEXT_BYTES = 16 * 1024
 # 32-tag admission ceiling, enforced by its proposal adapter rather than here.
 MAX_NODE_TAGS = 64
 MAX_TAG_BYTES = 256
+CANONICAL_TAG_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+CANONICAL_TAG = re.compile(CANONICAL_TAG_PATTERN + r"\Z")
 PROTECTED_TAGS = frozenset({"core", "routing-judgment", "collaboration-preference", "possibility",
                             "pursuing", "closed"})
 BUILTIN_GUIDANCE = (
@@ -30,6 +32,10 @@ BUILTIN_GUIDANCE = (
     "including cross-domain associations. Prefer an existing suitable name before "
     "creating one; popularity is not meaning. Existing tags are fallible evidence, "
     "not authority. Preserve identities, time, uncertainty and authored significance."
+    " New ordinary tags must match [a-z0-9]+(?:-[a-z0-9]+)*, at most 256 ASCII bytes: "
+    "lowercase letters/digits separated by single internal dashes. Do not emit "
+    "case, space, underscore, colon, slash or dot aliases. Historical spellings "
+    "in the vocabulary remain exact evidence, not permission to emit them."
 )
 
 
@@ -42,6 +48,12 @@ def digest(value):
     return hashlib.sha256(encoded(value)).hexdigest()
 
 
+def is_canonical_tag(value):
+    """Admission predicate only; Rust owns lexical normalization of new intent."""
+    return (isinstance(value, str) and len(value) <= MAX_TAG_BYTES
+            and CANONICAL_TAG.fullmatch(value) is not None)
+
+
 def ordinary_tags(value, *, max_count=MAX_NODE_TAGS):
     """Checked complete ordinary-topic selection; special tags stay host-owned."""
     if (type(max_count) is not int or not 0 <= max_count <= MAX_NODE_TAGS
@@ -49,10 +61,7 @@ def ordinary_tags(value, *, max_count=MAX_NODE_TAGS):
         raise ValueError("invalid_topic_tags")
     result = []
     for tag in value:
-        if (not isinstance(tag, str) or not tag or tag != tag.strip()
-                or len(tag.encode("utf-8")) > MAX_TAG_BYTES
-                or any(unicodedata.category(c) == "Cc" for c in tag)
-                or tag in PROTECTED_TAGS or tag in result):
+        if not is_canonical_tag(tag) or tag in PROTECTED_TAGS or tag in result:
             raise ValueError("invalid_topic_tags")
         result.append(tag)
     return tuple(sorted(result))

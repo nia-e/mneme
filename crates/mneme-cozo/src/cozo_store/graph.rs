@@ -1895,7 +1895,14 @@ impl CozoStore {
             ));
         }
         let id = node.id().0.to_string();
-        let data = encode_canonical_node(node)?;
+        let data = if allow_touchstone_insert
+            && self.read_meta(crate::tag_projection::META_KEY)?.as_deref()
+                == Some(crate::tag_projection::LEGACY_META_VALUE)
+        {
+            encode_historical_canonical_node(node)?
+        } else {
+            encode_canonical_node(node)?
+        };
 
         let mut p = BTreeMap::new();
         p.insert("id".into(), dv_str(&id));
@@ -2125,12 +2132,18 @@ mod summary_edit_tests {
                 .upsert(node.id(), &[1.0, 0.0, 0.0, 0.0])
                 .await
                 .unwrap();
-            (
+            let state = (
                 SummarySnapshot::from_node(store.db_id(), &node)
                     .unwrap()
                     .digest(),
                 projections(&store, node.id()),
-            )
+            );
+            // Normal reopen requires a clean offline source. A transaction's
+            // acknowledgement can precede its detached worker's final drop;
+            // checkpoint under the existing exclusive backend guard rather
+            // than racing that teardown or relaxing source admission.
+            store.prepare_for_file_move().unwrap();
+            state
         };
         for step in 1..=3 {
             {
@@ -2152,10 +2165,12 @@ mod summary_edit_tests {
                         .await
                         .is_err()
                 );
+                store.prepare_for_file_move().unwrap();
             }
             let store =
                 super::super::tests::reopen_current_test_store(std::path::Path::new(path)).unwrap();
             assert_eq!(projections(&store, node.id()), original);
+            store.prepare_for_file_move().unwrap();
         }
         let committed = {
             let store =
@@ -2164,7 +2179,9 @@ mod summary_edit_tests {
                 .compare_replace_node_summary(node.id(), &digest, &summary, &[0.0, 1.0, 0.0, 0.0])
                 .await
                 .unwrap();
-            projections(&store, node.id())
+            let committed = projections(&store, node.id());
+            store.prepare_for_file_move().unwrap();
+            committed
         };
         {
             let store =
@@ -2174,6 +2191,7 @@ mod summary_edit_tests {
                 store.get_node(node.id()).await.unwrap().unwrap().summary(),
                 "newsummary"
             );
+            store.prepare_for_file_move().unwrap();
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

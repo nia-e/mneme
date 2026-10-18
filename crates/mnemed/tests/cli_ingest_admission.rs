@@ -89,12 +89,12 @@ fn invalid_fields_and_unreadable_or_oversized_body_leave_no_store_residue() {
             "node summary is",
         ),
         (
-            strings(&["--summary", "ok", "--tag", "same", "--tag", "same"]),
-            "duplicate tag",
+            strings(&["--summary", "ok", "--tag", "C++"]),
+            "unsupported character",
         ),
         (
-            strings(&["--summary", "ok", "--tag", " untrimmed"]),
-            "leading or trailing whitespace",
+            strings(&["--summary", "ok", "--tag", "/"]),
+            "no letters or digits",
         ),
         (
             strings(&["--summary", "ok", "--stability", "NaN"]),

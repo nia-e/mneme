@@ -16,6 +16,10 @@ pub const SELECTION_SCHEMA: &str = "mneme.config-selection.v1";
 pub const MAX_CONFIG_BYTES: usize = 65536;
 pub const MAX_STORES: usize = 64;
 pub const MAX_LIBRARIES: usize = 32;
+// Explicit worktree membership needs more entries than store identity inventory.
+// Keep both the metadata-work ceiling and the independent path-byte envelope.
+pub const MAX_PATHS_PER_LIST: usize = 256;
+pub const MAX_PATH_LIST_BYTES: usize = 16_384;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -32,6 +36,9 @@ fn profiles() -> Vec<String> {
 }
 fn yes() -> bool {
     true
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 fn default_rule() -> String {
     "project-or-misc".into()
@@ -127,6 +134,9 @@ pub struct Activation {
     pub workspace: WorkspaceKind,
     #[serde(default)]
     pub roots: Vec<PathBuf>,
+    /// Explicit scope across nested projects, not discovered project membership.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtree_roots: Vec<PathBuf>,
     #[serde(default = "profiles")]
     pub profiles: Vec<String>,
     #[serde(default)]
@@ -138,9 +148,15 @@ impl Default for Activation {
             enabled: true,
             workspace: WorkspaceKind::Project,
             roots: vec![],
+            subtree_roots: vec![],
             profiles: profiles(),
             excluded_roots: vec![],
         }
+    }
+}
+impl Activation {
+    pub(crate) fn has_positive_roots(&self) -> bool {
+        !self.roots.is_empty() || !self.subtree_roots.is_empty()
     }
 }
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +208,10 @@ pub struct StoreBackground {
     pub record: bool,
     #[serde(default = "yes")]
     pub maintenance: bool,
+    /// Allow trusted, meaning-preserving cleanup on core notes. This never
+    /// grants background core creation, membership changes, or semantic edits.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub core_cleanup: bool,
 }
 impl Default for StoreBackground {
     fn default() -> Self {
@@ -199,9 +219,23 @@ impl Default for StoreBackground {
             recall: true,
             record: true,
             maintenance: true,
+            core_cleanup: true,
         }
     }
 }
+fn deserialize_required_tags<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    let tags = Vec::<String>::deserialize(deserializer)?;
+    if tags.len() > 32 || tags.iter().any(|tag| tag.is_empty() || tag.len() > 128) {
+        return Err(serde::de::Error::custom(
+            "capture required_tags exceeds raw bounds",
+        ));
+    }
+    let tags = mneme_core::normalize_tags(tags).map_err(serde::de::Error::custom)?;
+    Ok(tags.iter().map(str::to_owned).collect())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePolicy {
@@ -212,7 +246,7 @@ pub struct CapturePolicy {
     pub kinds: Vec<CaptureKind>,
     #[serde(default = "evidence_kinds")]
     pub evidence_kinds: Vec<EvidenceKind>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_required_tags")]
     pub required_tags: Vec<String>,
     #[serde(default = "yes")]
     pub allow_associations: bool,
@@ -338,6 +372,9 @@ pub struct Applicability {
 pub struct OperationScope {
     #[serde(default)]
     pub roots: Vec<PathBuf>,
+    /// Unlike roots, this grant also includes nested projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtree_roots: Vec<PathBuf>,
     #[serde(default)]
     pub excluded_roots: Vec<PathBuf>,
 }
@@ -403,7 +440,9 @@ impl Config {
         }
         self.background.enabled &= overlay.background.enabled;
         for store in overlay.stores.values_mut() {
-            if store.active.workspace == WorkspaceKind::Project && store.active.roots.is_empty() {
+            if store.active.workspace == WorkspaceKind::Project
+                && !store.active.has_positive_roots()
+            {
                 store.active.roots.push(root.to_owned());
             }
         }
@@ -503,8 +542,8 @@ impl Config {
                     return Err(error("owner path evidence must be owner-side absolute"));
                 }
             }
-            validate_paths(&store.active.roots)?;
-            validate_paths(&store.active.excluded_roots)?;
+            validate_path_lists(&[&store.active.roots, &store.active.subtree_roots])?;
+            validate_path_lists(&[&store.active.excluded_roots])?;
             validate_profiles(&store.active.profiles)?;
             for scope in [
                 &store.applicability.core,
@@ -513,8 +552,8 @@ impl Config {
                 &store.applicability.record,
                 &store.applicability.maintenance,
             ] {
-                validate_paths(&scope.roots)?;
-                validate_paths(&scope.excluded_roots)?;
+                validate_path_lists(&[&scope.roots, &scope.subtree_roots])?;
+                validate_path_lists(&[&scope.excluded_roots])?;
             }
             if let Some(selector) = &store.guidance.tag_guide {
                 validate_id(&selector.id)?;
@@ -552,7 +591,7 @@ impl Config {
                 if matches!(
                     tag.as_str(),
                     "core" | "routing-judgment" | "possibility" | "pursuing" | "closed"
-                ) || tag.chars().any(char::is_whitespace)
+                ) || !mneme_core::is_normalized_tag(tag)
                     || !required.insert(tag)
                 {
                     return Err(error(
@@ -705,9 +744,19 @@ pub(crate) fn validate_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn validate_paths(paths: &[PathBuf]) -> Result<()> {
-    if paths.len() > 64 || paths.iter().map(|p| p.as_os_str().len()).sum::<usize>() > 16384 {
-        return Err(error("path list exceeds bound"));
+// Ordinary and subtree roots are one positive scope, with one shared budget and
+// duplicate check. Exclusions have their own budget and may repeat positive roots.
+fn validate_path_lists(lists: &[&[PathBuf]]) -> Result<()> {
+    if lists.iter().map(|paths| paths.len()).sum::<usize>() > MAX_PATHS_PER_LIST {
+        return Err(error(&format!(
+            "path list exceeds {MAX_PATHS_PER_LIST} entries; reduce roots/excluded_roots entries (roots and subtree_roots share one bound)"
+        )));
+    }
+    let paths = lists.iter().flat_map(|paths| paths.iter());
+    if paths.clone().map(|p| p.as_os_str().len()).sum::<usize>() > MAX_PATH_LIST_BYTES {
+        return Err(error(&format!(
+            "path list exceeds {MAX_PATH_LIST_BYTES} total path bytes; shorten paths or reduce roots/excluded_roots entries (roots and subtree_roots share one bound)"
+        )));
     }
     let mut seen = BTreeSet::new();
     for path in paths {

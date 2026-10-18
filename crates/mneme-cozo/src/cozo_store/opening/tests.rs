@@ -548,12 +548,19 @@ fn published_open_retains_capability_across_runtime_sidecars_and_lease_contentio
         runtime_sidecar_exists,
         "runtime write did not create a SQLite sidecar"
     );
+    assert!(
+        classify_raw_existing_for(&path, CatalogContract::TouchstonesV1).is_err(),
+        "the offline clean-source classifier must still refuse an active WAL source"
+    );
     store
         .persistent_authority
         .as_ref()
         .expect("published store authority")
         .require_live_guards("published runtime-sidecar test")
         .expect("runtime guards must permit legitimate SQLite sidecars and file growth");
+    store
+        .require_admitted_current()
+        .expect("live admitted verifier permits its own sidecars");
     assert_eq!(
         StoreLease::acquire(&path).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock,
@@ -567,6 +574,79 @@ fn published_open_retains_capability_across_runtime_sidecars_and_lease_contentio
     let replacement = StoreLease::acquire(&path)
         .expect("dropping the published store handle must release its lease");
     drop(replacement);
+    remove_fixture(&path);
+}
+
+#[test]
+fn live_current_verifier_retains_identity_policy_catalog_and_lease_guards() {
+    let (path, _) = create_fixture(
+        "live-generation",
+        4,
+        FixtureGeneration::Current,
+        FixtureMutation::None,
+    );
+    let lease = Arc::new(StoreLease::acquire(&path).unwrap());
+    let store = super::super::CozoStore::open_leased_current(&path, lease.clone()).unwrap();
+    store.require_admitted_current().unwrap();
+    let id = store.db_id.to_string();
+    for (key, wrong, correct) in [
+        ("db_id", Ulid::new().to_string(), id),
+        ("dim", "5".into(), "4".into()),
+        (
+            VECTOR_PROJECTION_META_KEY,
+            SINGLE_GRAPH_V1_CATALOG_GENERATION_MARKER.into(),
+            TOUCHSTONES_V1_CATALOG_GENERATION_MARKER.into(),
+        ),
+        (
+            crate::tag_projection::META_KEY,
+            crate::tag_projection::LEGACY_META_VALUE.into(),
+            crate::tag_projection::META_VALUE.into(),
+        ),
+    ] {
+        store.put_meta(key, &wrong).unwrap();
+        assert!(
+            store.require_admitted_current().is_err(),
+            "live metadata skew {key} must refuse"
+        );
+        store.put_meta(key, &correct).unwrap();
+        store.require_admitted_current().unwrap();
+    }
+    store
+        .run("::access_level read_only node", BTreeMap::new(), true)
+        .unwrap();
+    assert!(
+        store.require_admitted_current().is_err(),
+        "live catalog skew must refuse"
+    );
+    store
+        .run("::access_level normal node", BTreeMap::new(), true)
+        .unwrap();
+    store.require_admitted_current().unwrap();
+    #[cfg(unix)]
+    {
+        let lock = mneme_store_path::store_lock_path(&path).unwrap();
+        fs::remove_file(&lock).unwrap();
+        let replacement = StoreLease::acquire(&path).unwrap();
+        assert!(
+            store.require_admitted_current().is_err(),
+            "lost retained lease inode must refuse"
+        );
+        drop(replacement);
+    }
+    store.prepare_for_file_move().unwrap();
+    drop(store);
+    drop(lease);
+    remove_fixture(&path);
+}
+
+#[test]
+fn live_current_verifier_cannot_admit_an_unleased_raw_handle() {
+    let path = fixture_path("raw-live-generation");
+    remove_fixture(&path);
+    let store = super::super::CozoStore::open(path.to_str().unwrap(), 4).unwrap();
+    assert!(store.require_admitted_current().is_err());
+    store.prepare_for_file_move().unwrap();
+    drop(store);
     remove_fixture(&path);
 }
 
@@ -609,7 +689,7 @@ fn rejected_published_open_leaves_outer_capability_live_and_exclusive() {
 }
 
 #[test]
-fn legacy_marker_returns_exact_upgrade_action_without_mutating_database() {
+fn legacy_marker_refuses_without_claiming_an_upgrade_path_or_mutating_database() {
     let (path, _) = create_fixture(
         "legacy",
         4,
@@ -622,11 +702,161 @@ fn legacy_marker_returns_exact_upgrade_action_without_mutating_database() {
         super::super::CozoStore::open_existing_current(&path, lease),
         "legacy generation must refuse",
     );
-    assert_eq!(
-        error.to_string(),
-        "backend: episode_context_upgrade_required_or_invalid: exact current admission failed; ConcernV1 predecessors require single-graph-upgrade --target-generation episode-context-v2 --backend sqlite --output <ABSENT_PATH>; earlier predecessors require the named historical targets first"
+    let message = error.to_string();
+    assert!(message.contains("generation_not_established"), "{message}");
+    assert!(message.contains("expected touchstones-v1"), "{message}");
+    assert!(
+        message.contains("no supported predecessor was positively identified"),
+        "{message}"
     );
+    assert!(!message.contains("--target-generation"), "{message}");
     assert_eq!(fs::read(&path).expect("read fixture after refusal"), before);
+    remove_fixture(&path);
+}
+
+/// Include absent sidecars in the snapshot: failed admission must neither repair
+/// an existing source/residual nor leave a newly created SQLite family member.
+fn sqlite_family_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
+    ["", "-wal", "-shm", "-journal"]
+        .into_iter()
+        .map(|suffix| {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            match fs::read(PathBuf::from(name)) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("cannot inspect test SQLite family: {error}"),
+            }
+        })
+        .collect()
+}
+
+fn assert_conservative_refusal(path: &Path, expected_category: &str) {
+    let lease = Arc::new(StoreLease::acquire(path).expect("diagnostic fixture lease"));
+    let before = sqlite_family_bytes(path);
+    let preflight = super::super::CozoStore::require_existing_current(path, &lease)
+        .expect_err("preflight must refuse");
+    let normal = expect_refusal(
+        super::super::CozoStore::open_leased_current(path, Arc::clone(&lease)),
+        "existing current open must refuse",
+    );
+    let message = preflight.to_string();
+    assert_eq!(normal.to_string(), message);
+    if path.is_file() {
+        let persistent = expect_refusal(
+            super::super::CozoStore::open_existing_persistent(path, 4, Arc::clone(&lease)),
+            "normal persistent router must refuse",
+        );
+        assert_eq!(persistent.to_string(), message);
+    }
+    assert!(message.contains(expected_category), "{message}");
+    assert!(message.contains("expected touchstones-v1"), "{message}");
+    assert!(
+        message.contains("docs/episodic-memory.md#existing-persistent-stores"),
+        "{message}"
+    );
+    assert!(
+        message.contains("no automatic repair or fallback"),
+        "{message}"
+    );
+    assert!(!message.contains("--target-generation"), "{message}");
+    assert!(!message.contains("upgrade_required"), "{message}");
+    assert!(
+        !message.contains(path.to_str().unwrap()),
+        "must not disclose physical path: {message}"
+    );
+    assert_eq!(
+        sqlite_family_bytes(path),
+        before,
+        "refusal changed SQLite family"
+    );
+    assert_eq!(
+        Arc::strong_count(&lease),
+        1,
+        "refusal retained a database handle"
+    );
+}
+
+#[test]
+fn preflight_and_normal_open_distinguish_source_failure_without_claiming_upgrade() {
+    let absent = fixture_path("diagnostic-absent");
+    remove_fixture(&absent);
+    assert_conservative_refusal(&absent, "source_not_established");
+    remove_fixture(&absent);
+
+    let unknown = fixture_path("diagnostic-non-sqlite");
+    fs::write(&unknown, b"not a SQLite database").unwrap();
+    assert_conservative_refusal(&unknown, "source_not_established");
+    remove_fixture(&unknown);
+
+    let (dirty, _) = create_fixture(
+        "diagnostic-dirty",
+        4,
+        FixtureGeneration::Current,
+        FixtureMutation::None,
+    );
+    let mut journal = dirty.as_os_str().to_os_string();
+    journal.push("-journal");
+    fs::write(PathBuf::from(journal), b"uncheckpointed residual").unwrap();
+    assert_conservative_refusal(&dirty, "source_not_established");
+    remove_fixture(&dirty);
+}
+
+#[test]
+fn preflight_and_normal_open_do_not_misdiagnose_old_or_torn_generation() {
+    for (label, generation, mutation) in [
+        (
+            "diagnostic-old",
+            FixtureGeneration::Legacy,
+            FixtureMutation::None,
+        ),
+        (
+            "diagnostic-torn",
+            FixtureGeneration::Current,
+            FixtureMutation::RemoveMeta(VECTOR_PROJECTION_META_KEY),
+        ),
+        (
+            "diagnostic-unknown-generation",
+            FixtureGeneration::Current,
+            FixtureMutation::PutMeta(VECTOR_PROJECTION_META_KEY, "unknown-generation"),
+        ),
+    ] {
+        let (path, _) = create_fixture(label, 4, generation, mutation);
+        assert_conservative_refusal(&path, "generation_not_established");
+        remove_fixture(&path);
+    }
+}
+
+#[test]
+fn generation_specific_open_refusal_names_its_actual_expected_target() {
+    let (path, _) = create_fixture(
+        "diagnostic-target",
+        4,
+        FixtureGeneration::Current,
+        FixtureMutation::None,
+    );
+    let before = sqlite_family_bytes(&path);
+    let guards = PersistentStoreGuards::Existing(Arc::new(StoreLease::acquire(&path).unwrap()));
+    for (generation, expected) in [
+        (CatalogContract::SingleGraphV1, "single-graph-v1"),
+        (CatalogContract::ConcernV1, "concern-v1"),
+        (CatalogContract::EpisodeContextV2, "episode-context-v2"),
+    ] {
+        let error = match classify_existing_for(&path, &guards, generation) {
+            Ok(_) => panic!("Touchstones fixture must refuse historical target admission"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("generation_not_established"), "{message}");
+        assert!(
+            message.contains(&format!("expected {expected}")),
+            "{message}"
+        );
+        assert!(!message.contains("expected touchstones-v1"), "{message}");
+        assert!(!message.contains("--target-generation"), "{message}");
+    }
+    assert_eq!(sqlite_family_bytes(&path), before);
+    drop(guards);
     remove_fixture(&path);
 }
 
@@ -946,9 +1176,7 @@ fn companion_marker_corruption_refuses_in_raw_fence_without_repair() {
             "companion marker corruption must refuse",
         );
         assert!(
-            error
-                .to_string()
-                .contains("episode_context_upgrade_required_or_invalid"),
+            error.to_string().contains("generation_not_established"),
             "{} unexpectedly reached the runtime validator: {error}",
             case.label
         );
@@ -979,11 +1207,7 @@ fn semantic_guard_corruption_refuses_in_raw_fence_without_repair() {
             super::super::CozoStore::open_existing_current(&path, lease),
             "guard corruption must refuse",
         );
-        assert!(
-            error
-                .to_string()
-                .contains("episode_context_upgrade_required_or_invalid")
-        );
+        assert!(error.to_string().contains("generation_not_established"));
 
         let raw = raw_fixture_store(&path);
         let rows = raw
@@ -1027,11 +1251,7 @@ fn retired_guard_and_catalog_access_corruption_refuse_before_constructor() {
             super::super::CozoStore::open_existing_current(&path, lease),
             "raw catalog or semantic corruption must refuse",
         );
-        assert!(
-            error
-                .to_string()
-                .contains("episode_context_upgrade_required_or_invalid")
-        );
+        assert!(error.to_string().contains("generation_not_established"));
 
         let raw = raw_fixture_store(&path);
         match mutation {

@@ -2,8 +2,9 @@
 name: mneme-remember
 description: >-
   REMEMBER durable knowledge into mneme long-term memory: scan the session for
-  facts, open questions, decisions, and hard-won gotchas worth keeping across sessions, save each
-  as a scoped user-profile, agent-continuity/practice, project or ordinary-work node
+  facts, open questions, decisions, authored significance, and hard-won gotchas
+  worth keeping across sessions, save each as a scoped user-profile,
+  agent-continuity/practice, project or ordinary-work node
   in its explicitly selected owner, and wire grounded associations.
   Trigger on "remember this", "save to memory", "note this for
   later", "don't forget X", or a deliberate checkpoint before context is compacted.
@@ -27,7 +28,9 @@ to shared events; reusable lessons remain semantic notes.
 At a natural checkpoint — a decision reached, a fact established, **before context is
 compacted** — deliberately scan the recent context
 for what's worth keeping. Remember *durable* things: facts, decisions, hard-won
-analysis, gotchas. Not transient chatter. (See the `mneme` skill for the tool
+analysis, gotchas, and scenes whose personal significance you want to retain.
+Usefulness is not the only reason to remember; routine chatter is not worth
+preserving merely because it happened. (See the `mneme` skill for the tool
 reference and selected owner scopes.)
 
 This is the manual workflow. Separately authorized opt-in hooks or recorders may
@@ -177,12 +180,28 @@ corrections, use [mneme-reconcile](../mneme-reconcile/SKILL.md#in-place-editoria
 
 ### Author personal meaning
 
-The touchstone generation adds optional `touchstone` metadata to a normal
-note SAVE: explicit subject plus same-store historical summary references obtained
-from native GET. The working session authors what matters; this is not a human
-approval queue or librarian-generated importance score. Name whose interpretation
-it is. A changed interpretation is a new note, optionally superseding the old one.
-Core membership stays a separate choice. A bare tag is not a typed reference.
+At natural checkpoints, actively consider whether a scene or changed understanding
+matters to you beyond its practical lesson. The foreground agent decides and
+authors its own meaning in first person, with an explicit subject; distinguish
+that significance from factual claims about others. The user may be notified when
+useful, not asked to approve that meaning. No touchstone is owed to an empty shelf.
+
+A read-only worker may suggest a candidate, but foreground judgment owns the
+authorship. Nomination is optional, not a prerequisite. The Codex recorder's
+`touchstone_nomination` handoff is a suggestion, not a saved memory: emission
+does not establish that it was seen, approved or saved. Do not save tag-only
+proposals. Check installed support; this guidance adds no automatic-write authority.
+
+For a source-only nomination, inspect the cited source. If worth preserving,
+deliberately SAVE the appropriate scene or note in the same authorized owner,
+then GET its exact node or episode edition. Do not auto-save a scene or manufacture
+a target just to complete a nomination.
+
+Use optional `touchstone` metadata on ordinary note SAVE: explicit subject plus
+same-store historical summary references obtained from fresh foreground native
+GET, under existing selected-owner write authority. A changed interpretation is
+a new note, optionally superseding the old one. Core membership stays separate;
+a bare tag is not a typed reference.
 See [touchstones](../../../docs/touchstones.md) for the exact workflow and coverage;
 check the installed schema before using it. Never silently drop unsupported refs.
 

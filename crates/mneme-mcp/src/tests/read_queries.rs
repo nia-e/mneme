@@ -388,6 +388,33 @@ async fn recall_context_handler_preserves_the_packers_exact_bounded_text() {
             .contains("context result")
     );
 
+    // The same canonical creation instant survives both public read surfaces.
+    for card in envelope["primary"].as_array().unwrap() {
+        let hit = query["lanes"]["primary"]["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["id"] == card["id"])
+            .unwrap();
+        let handle = server.registry.slot("fixture").unwrap().checkout().unwrap();
+        let stored = handle
+            .mem
+            .get_node(parse_id(card["id"].as_str().unwrap()).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(card["created"], json!(stored.created()));
+        assert_eq!(hit["created"], card["created"]);
+        assert_eq!(hit["created_utc"], card["created_utc"]);
+        assert_eq!(
+            card["created_utc"],
+            mneme_present::format_timestamp_millis(stored.created())
+        );
+        assert!(card.get("updated").is_none());
+        assert!(card.get("verified_at").is_none());
+    }
+    assert!(envelope["episodes"][0].get("created").is_none());
+
     // Displaying an episode is not exposure or a learning receipt.
     let handle = server.registry.slot("fixture").unwrap().checkout().unwrap();
     for id in &context_ids {
@@ -587,6 +614,63 @@ async fn recall_context_handler_preserves_the_packers_exact_bounded_text() {
     .unwrap();
     assert_eq!(ordinary.as_str().unwrap(), packed);
 
+    let legacy = call_tool(
+        &server.registry,
+        &server.sessions,
+        &server.cold_work,
+        "recall",
+        &json!({"db":"fixture", "text":"context result"}),
+    )
+    .await
+    .unwrap();
+    assert!(!legacy.as_array().unwrap().is_empty());
+    for hit in legacy.as_array().unwrap() {
+        let handle = server.registry.slot("fixture").unwrap().checkout().unwrap();
+        let stored = handle
+            .mem
+            .get_node(parse_id(hit["id"].as_str().unwrap()).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["created"], json!(stored.created()));
+        assert_eq!(
+            hit["created_utc"],
+            mneme_present::format_timestamp_millis(stored.created())
+        );
+        for neighbor in hit["neighbors"].as_array().unwrap() {
+            let stored = handle
+                .mem
+                .get_node(parse_id(neighbor["id"].as_str().unwrap()).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(neighbor["created"], json!(stored.created()));
+            assert_eq!(
+                neighbor["created_utc"],
+                mneme_present::format_timestamp_millis(stored.created())
+            );
+        }
+    }
+    // Expansion deduplicates neighbors against the hit set, so this tiny corpus
+    // has none. Exercise the shared neighbor serializer with a real stored node
+    // rather than changing retrieval policy to force a synthetic ranking outcome.
+    let handle = server.registry.slot("fixture").unwrap().checkout().unwrap();
+    let stored = handle
+        .mem
+        .get_node(parse_id(query_ids[0].as_str().unwrap()).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let neighbor = mcp_recall_neighbor(&mneme_engine::RecalledNeighbor {
+        node: stored.clone(),
+        kind: EdgeKind::Associative,
+        incoming: true,
+        weight: 0.7,
+    });
+    assert_eq!(neighbor["created"], json!(stored.created()));
+    assert_eq!(neighbor["id"], json!(stored.id().0.to_string()));
+    assert_eq!(neighbor["incoming"], true);
+    drop(handle);
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -615,7 +699,7 @@ async fn exact_tagged_query_and_context_share_one_primary_lane() {
         capability: CapabilityPolicy::operator(),
         library: None,
     };
-    let tag = "é".repeat(mneme_core::MAX_TAG_BYTES / "é".len());
+    let tag = "x".repeat(mneme_core::MAX_TAG_BYTES);
     assert_eq!(tag.len(), mneme_core::MAX_TAG_BYTES);
     call_tool(
         &server.registry,
@@ -1015,4 +1099,65 @@ async fn query_and_recall_do_not_expose_or_checkpoint_when_query_output_is_overs
     drop(handle);
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn query_summary_bound_catalog_raw_types_and_checkout_order_agree() {
+    for profile in [
+        CapabilityPolicy::operator(),
+        CapabilityPolicy::new(CapabilityProfile::ReadOnly, false),
+    ] {
+        let tools = tool_schemas(profile);
+        assert!(SummaryMaxBytes::advertised(&tools));
+        let query = tools.iter().find(|tool| tool["name"] == "query").unwrap();
+        let schema = &query["inputSchema"]["properties"]["summary_max_bytes"];
+        for accepted in [1, 320, 16384] {
+            assert!(crate::tests::support::schema_accepts(
+                schema,
+                &json!(accepted)
+            ));
+        }
+        for invalid in [
+            json!(0),
+            json!(16385),
+            json!(u64::MAX),
+            json!(true),
+            json!(1.0),
+            json!("1"),
+            Value::Null,
+        ] {
+            assert!(!crate::tests::support::schema_accepts(schema, &invalid));
+        }
+    }
+    let server = crate::tests::support::empty_server(false);
+    for invalid in [
+        json!(0),
+        json!(16385),
+        json!(u64::MAX),
+        json!(true),
+        json!(1.0),
+        json!("1"),
+        Value::Null,
+    ] {
+        let args = json!({"db":"missing", "text":"q", "summary_max_bytes":invalid});
+        let error = call_tool(
+            &server.registry,
+            &server.sessions,
+            &server.cold_work,
+            "query",
+            &args,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("unknown database"), "{error}");
+        assert!(classify_tool_request("query", &args, None, None).is_err());
+    }
+    assert_eq!(
+        PublicQueryInput::parse(&json!({"text":"q"}), true)
+            .unwrap()
+            .summary_max_bytes,
+        None
+    );
+    assert!(PublicQueryInput::parse(&json!({"text":"q","summary_max_bytes":320}), false).is_err());
 }

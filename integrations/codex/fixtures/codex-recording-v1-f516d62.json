@@ -1,0 +1,68 @@
+{
+  "counts": {
+    "abstained": 0,
+    "admitted": 1,
+    "assessed": 0,
+    "cancelled": 0,
+    "capacity": 0,
+    "deferred": 0,
+    "unresolved": 0,
+    "verified": 0
+  },
+  "ended": false,
+  "fresh": false,
+  "jobs": [
+    {
+      "admission": {
+        "device": 1,
+        "expected_prompt_sha256": "72b8aaf14d453f469b4749add31a503083fc855a013edf0dea471d82cb721b2a",
+        "inode": 2,
+        "path": "/synthetic/codex/sessions/recording-session.jsonl",
+        "session_id": "recording-session",
+        "session_record": {
+          "byte_offset": 0,
+          "line_bytes": 100,
+          "raw_line_sha256": "2fa81913461e04188d1ca5b0da3d3ee672beae6904bd3fe6843737aee8a8554f"
+        },
+        "sessions_root": "/synthetic/codex/sessions",
+        "start_record": {
+          "byte_offset": 100,
+          "line_bytes": 80,
+          "raw_line_sha256": "8eb6d0c84f669a8f6b4c5e02ab2638b6a1bf3d970a5e405f574aae393fb35267"
+        },
+        "turn_id": "turn-1"
+      },
+      "boot_id": "synthetic-boot-witness",
+      "bytes_read": 0,
+      "cancel_token": "",
+      "closed_at": 1000.0,
+      "closed_monotonic": 100.0,
+      "config_sha256": "853b04094960059671fb85a7d2d9eac6d5d567a1be4ecc5bfd026a96cae2ef68",
+      "deadline": 1045.0,
+      "key": "e7b4b7ddeee2a3fdb831f4957edef393cf6dc683eaaedc5b86514f8a4c446ff1",
+      "monotonic_deadline": 145.0,
+      "next_poll": 1000.0,
+      "phase": "observing",
+      "polls": 0,
+      "records_parsed": 0,
+      "turn_id": "turn-1"
+    }
+  ],
+  "pin": {
+    "device": 1,
+    "inode": 2,
+    "path": "/synthetic/codex/sessions/recording-session.jsonl",
+    "session_id": "recording-session",
+    "session_record": {
+      "byte_offset": 0,
+      "line_bytes": 100,
+      "raw_line_sha256": "2fa81913461e04188d1ca5b0da3d3ee672beae6904bd3fe6843737aee8a8554f"
+    },
+    "sessions_root": "/synthetic/codex/sessions"
+  },
+  "receipts": [],
+  "schema": "mneme.codex-recording.state.v1",
+  "session_id": "recording-session",
+  "usage_unknown": false,
+  "watermark": 100
+}

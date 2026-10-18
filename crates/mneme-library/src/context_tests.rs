@@ -3,7 +3,7 @@ use super::*;
 use std::sync::Mutex;
 
 fn semantic(id: &str, rank: usize) -> Value {
-    json!({"id":id,"rank":rank,"summary":{"text":"summary only","complete":true,"source_bytes":12},"content_trust":"untrusted"})
+    json!({"id":id,"created":1234,"rank":rank,"summary":{"text":"summary only","complete":true,"source_bytes":12},"content_trust":"untrusted"})
 }
 fn episode_id(name: &str) -> String {
     // Genuine canonical ULID text without another test-only dependency.
@@ -51,6 +51,110 @@ fn maximum_occurrence_contexts() -> Value {
         MAX_OCCURRENCE_CONTEXTS_JSON_BYTES
     );
     contexts
+}
+
+#[test]
+fn semantic_creation_is_typed_when_present_and_projection_does_not_invent_freshness() {
+    let source = owner_context();
+    let projected = context::project(&source["primary"][0], "p", "d", &json!({}), "primary");
+    assert_eq!(projected["created"], 1234);
+    assert_eq!(projected["created_utc"], "1970-01-01T00:00:01Z");
+    for invalid in [
+        json!(null),
+        json!("1234"),
+        json!(-1),
+        json!(1.5),
+        json!(true),
+    ] {
+        let mut broken = source.clone();
+        broken["primary"][0]["created"] = invalid;
+        assert!(context::validate(&broken, 64).is_err());
+    }
+    let mut missing = source.clone();
+    missing["primary"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("created");
+    context::validate(&missing, 64).unwrap();
+    let old_projection = context::project(&missing["primary"][0], "p", "d", &json!({}), "primary");
+    assert!(old_projection.get("created").is_none());
+    assert!(old_projection.get("created_utc").is_none());
+    let mut historical = source["episodes"][0].clone();
+    historical["occurred"] = json!({"kind":"unknown"});
+    historical["edition_recorded_at"] = json!(40);
+    historical["revision"] = json!(1);
+    historical["episode_id"] = json!(episode_id("root"));
+    let projected = context::project(&historical, "p", "d", &json!({}), "episodic");
+    for key in [
+        "occurred",
+        "recorded_at",
+        "edition_recorded_at",
+        "episode_id",
+        "edition_id",
+        "revision",
+    ] {
+        assert_eq!(projected[key], historical[key]);
+    }
+    assert_eq!(projected["recorded_at_utc"], "1970-01-01T00:00:00Z");
+    assert_eq!(projected["edition_recorded_at_utc"], "1970-01-01T00:00:00Z");
+    assert_eq!(projected["occurred_utc"], json!({"kind":"unknown"}));
+    assert!(projected.get("created").is_none());
+    assert!(projected.get("updated").is_none());
+    assert!(projected.get("verified_at").is_none());
+}
+
+#[test]
+fn owner_utc_companions_must_match_raw_values_but_older_sources_need_not_supply_them() {
+    let mut source = owner_context();
+    source["primary"][0]["created_utc"] = json!("1970-01-01T00:00:01Z");
+    context::validate(&source, 64).unwrap();
+    for wrong in [json!("2099-01-01T00:00:01Z"), json!(null), json!(1234)] {
+        source["primary"][0]["created_utc"] = wrong;
+        assert!(context::validate(&source, 64).is_err());
+    }
+    source["primary"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("created_utc");
+    context::validate(&source, 64).unwrap();
+    source["episodes"][0]["recorded_at_utc"] = json!("2099-01-01T00:00:01Z");
+    assert!(context::validate(&source, 64).is_err());
+}
+
+#[tokio::test]
+async fn old_v7_owner_without_creation_stays_selected_without_inventing_a_date() {
+    let (rt, fake, path) = fixture();
+    let mut source = owner_context();
+    source["primary"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("created");
+    fake.contexts.lock().unwrap().insert("owner".into(), source);
+    let value = rt.recall_context(query()).await.unwrap();
+    assert_eq!(value["primary"][0]["id"], "node-1");
+    assert!(value["primary"][0].get("created").is_none());
+    assert!(
+        !fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(url, _)| url == "replica")
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn library_packet_preserves_exact_semantic_creation_within_final_byte_budget() {
+    let (rt, fake, path) = fixture();
+    let mut source = owner_context();
+    source["primary"][0]["created"] = json!(1_600_000_000_123_u64);
+    fake.contexts.lock().unwrap().insert("owner".into(), source);
+    let value = rt.recall_context(query()).await.unwrap();
+    assert_eq!(value["primary"][0]["created"], 1_600_000_000_123_u64);
+    assert_eq!(value["primary"][0]["created_utc"], "2020-09-13T12:26:40Z");
+    assert!(serde_json::to_vec(&value).unwrap().len() <= MAX_CONTEXT_BYTES);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

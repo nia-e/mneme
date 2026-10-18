@@ -2226,6 +2226,7 @@ name = "mneme-config"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "mneme-core",
  "serde",
  "serde_json",
  "sha2",
@@ -2370,6 +2371,7 @@ dependencies = [
 name = "mneme-present"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "mneme-core",
  "serde",
  "serde_json",
@@ -2407,10 +2409,10 @@ dependencies = [
 name = "mneme-tui"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "crossterm",
  "mneme-config",
  "mneme-mcp-client",
+ "mneme-present",
  "mneme-store-client",
  "ratatui",
  "serde_json",

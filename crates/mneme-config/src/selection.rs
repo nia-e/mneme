@@ -209,9 +209,15 @@ fn path_match(origins: &[PathBuf], roots: &[PathBuf]) -> Result<bool> {
     }
     Ok(false)
 }
-fn positive_match(origins: &[PathBuf], roots: &[PathBuf]) -> Result<bool> {
+fn positive_match(
+    origins: &[PathBuf],
+    roots: &[PathBuf],
+    subtree_roots: &[PathBuf],
+) -> Result<bool> {
     for origin in origins {
-        if !path_match(std::slice::from_ref(origin), roots)? {
+        if !path_match(std::slice::from_ref(origin), roots)?
+            && !path_match(std::slice::from_ref(origin), subtree_roots)?
+        {
             return Ok(false);
         }
     }
@@ -234,13 +240,17 @@ fn project_boundary_admitted(project: &ProjectState, roots: &[PathBuf]) -> Resul
     }
     Ok(true)
 }
-// Positive roots grant work in that project, not every nested project beneath
+// Ordinary roots grant work in that project, not every nested project beneath
 // it. Test each candidate independently: explicitly listing a child root may
 // admit it even when an ancestor candidate is fenced by the child's marker.
+// Subtree roots deliberately include nested projects, but must cover every
+// lexical/canonical origin just like ordinary positive roots. Neither grant can
+// bypass exclusions or the separately parsed privacy/overlay metadata.
 fn positive_boundary_match(
     origins: &[PathBuf],
     project: &ProjectState,
     roots: &[PathBuf],
+    subtree_roots: &[PathBuf],
 ) -> Result<bool> {
     for origin in origins {
         let mut admitted = false;
@@ -252,7 +262,7 @@ fn positive_boundary_match(
                 break;
             }
         }
-        if !admitted {
+        if !admitted && !path_match(std::slice::from_ref(origin), subtree_roots)? {
             return Ok(false);
         }
     }
@@ -263,10 +273,9 @@ fn scope_match(
     project: &ProjectState,
     scope: &OperationScope,
 ) -> Result<bool> {
-    Ok(
-        (scope.roots.is_empty() || positive_boundary_match(origins, project, &scope.roots)?)
-            && !path_match(origins, &scope.excluded_roots)?,
-    )
+    Ok(((scope.roots.is_empty() && scope.subtree_roots.is_empty())
+        || positive_boundary_match(origins, project, &scope.roots, &scope.subtree_roots)?)
+        && !path_match(origins, &scope.excluded_roots)?)
 }
 pub(crate) fn profile_rank(profile: &str) -> u8 {
     match profile {
@@ -302,8 +311,9 @@ pub fn select(config: &Config, context: &SelectionContext) -> Result<SelectionSn
     // intentionally not an input, so a connection failure can never activate misc.
     for store in config.stores.values() {
         if store.active.workspace == WorkspaceKind::Project
-            && !store.active.roots.is_empty()
-            && path_match(&origins, &store.active.roots)?
+            && store.active.has_positive_roots()
+            && (path_match(&origins, &store.active.roots)?
+                || path_match(&origins, &store.active.subtree_roots)?)
         {
             project.configured = true;
             if project.root.is_none() {
@@ -311,6 +321,7 @@ pub fn select(config: &Config, context: &SelectionContext) -> Result<SelectionSn
                     .active
                     .roots
                     .iter()
+                    .chain(&store.active.subtree_roots)
                     .find(|r| origins.iter().any(|p| p.starts_with(r)))
                     .cloned();
             }
@@ -352,13 +363,18 @@ pub fn select(config: &Config, context: &SelectionContext) -> Result<SelectionSn
             WorkspaceKind::Any => true,
             WorkspaceKind::Project => {
                 project.configured
-                    && !store.active.roots.is_empty()
-                    && positive_boundary_match(&origins, &project, &store.active.roots)?
+                    && store.active.has_positive_roots()
+                    && positive_boundary_match(
+                        &origins,
+                        &project,
+                        &store.active.roots,
+                        &store.active.subtree_roots,
+                    )?
             }
             WorkspaceKind::NoProject => !project.configured,
         };
-        let roots_match =
-            store.active.roots.is_empty() || positive_match(&origins, &store.active.roots)?;
+        let roots_match = !store.active.has_positive_roots()
+            || positive_match(&origins, &store.active.roots, &store.active.subtree_roots)?;
         let is_active = admitted && workspace_matches && roots_match;
         let read = admitted && store.permissions.read;
         let write = admitted && store.permissions.write;
@@ -653,7 +669,7 @@ fn select_workspace_inner(
                             // to overlay it onto itself. Infer only its project root.
                             for store in config.stores.values_mut() {
                                 if store.active.workspace == WorkspaceKind::Project
-                                    && store.active.roots.is_empty()
+                                    && !store.active.has_positive_roots()
                                 {
                                     store.active.roots.push(parent.to_owned());
                                 }

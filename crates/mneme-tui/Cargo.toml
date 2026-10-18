@@ -13,7 +13,7 @@ mneme-mcp-client = { path = "../mneme-mcp-client" }
 serde_json = "1"
 tokio = { workspace = true, features = ["sync", "time", "signal"] }
 
-chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+mneme-present.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Mio's edge-triggered source can strand input after its first 1024-byte read.

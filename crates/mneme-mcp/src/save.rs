@@ -68,7 +68,9 @@ pub(crate) fn tool_schema(profile: CapabilityProfile) -> Value {
         .expect("shared SAVE required fields")
         .push(json!("db"));
     if profile == CapabilityProfile::Curator {
-        schema["properties"]["tags"]["items"]["not"] = json!({"const":"core"});
+        schema["properties"]["tags"]["items"]["not"] = crate::core_tag_input_schema();
+        // Hosts may render the episode arm independently of root properties.
+        schema["oneOf"][1]["properties"]["tags"]["items"]["not"] = crate::core_tag_input_schema();
     }
     json!({
         "name":"save",

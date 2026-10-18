@@ -32,6 +32,23 @@ or possible fragmentation; they do not decide usefulness. `compiler` and
 be exactly the filter someone needs. New connections still need support in the
 memory: prospective usefulness is not permission to invent facts or significance.
 
+## Canonical spelling
+
+New tag materialization uses only ASCII `a-z`, `0-9`, and `-`. ASCII uppercase
+becomes lowercase; spaces, `_`, `:`, `/`, `.`, and `-` become one collapsed dash,
+with leading/trailing separators removed. For example, ` Rust:Libs ` becomes
+`rust-libs`. Spellings that normalize to the same tag collapse into one member.
+Unsupported characters (including Unicode and controls), empty results, and
+resource-limit violations are errors, not guessed transliterations or aliases.
+
+Replacement tags use this policy; `expected_tags` remains the exact observed set
+for compare-and-replace. Source-keyed capture and episode replay proofs retain
+submitted spellings, not normalized spellings. An exact replay checks that original
+proof before attempting new materialization; changing spelling on a retry changes
+the submitted request even when it would produce the same canonical tags.
+Persisted legacy tag sets require the [explicit migration and writer fence](tag-normalization.md); source
+changes alone are not permission to open an unmigrated live store.
+
 ## Discover the vocabulary
 
 The existing inventory operation also lists tag names:

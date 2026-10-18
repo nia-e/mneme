@@ -53,6 +53,45 @@ class StoreRegistryTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.select()
 
+    def test_core_cleanup_defaults_preserve_snapshot_bytes_and_false_narrows(self):
+        before = self.select()
+        frozen = json.dumps(before.stores[0].to_dict(), sort_keys=True, separators=(",", ":"))
+        self.assertTrue(before.stores[0].maintenance.core_cleanup)
+        self.assertNotIn("core_cleanup", before.stores[0].to_dict()["maintenance"])
+        self.entry["maintenance"]["core_cleanup"] = True
+        self.write([self.entry])
+        # Editing registry source bytes changes its selection pin, but the
+        # retained owner policy keeps its original canonical default shape.
+        self.assertEqual(json.dumps(self.select().stores[0].to_dict(), sort_keys=True, separators=(",", ":")), frozen)
+        self.entry["maintenance"]["core_cleanup"] = False
+        self.write([self.entry])
+        after = self.select()
+        self.assertFalse(after.stores[0].maintenance.core_cleanup)
+        self.assertEqual(after.stores[0].to_dict()["maintenance"]["core_cleanup"], False)
+        self.assertNotEqual(after.digest, before.digest)
+        self.assertTrue(after.stores[0].maintenance.enabled)
+        for invalid in (None, 0, "false"):
+            self.entry["maintenance"]["core_cleanup"] = invalid
+            self.write([self.entry])
+            with self.assertRaises(ValueError):
+                self.select()
+
+    def test_native_selection_projects_core_cleanup_and_rejects_lossy_flags(self):
+        snapshot = {"schema":"mneme.config-selection.v1", "digest":"a"*64,
+                    "config":{}, "cwd":str(self.cwd), "active":[{
+                        "name":"memory", "store":{"id":ID1, "owner":{"db":"project", "url":"http://127.0.0.1:1"}},
+                        "eligible":dict.fromkeys(("read","write","core","context","recall","record","maintenance"),True)}]}
+        selected = registry.NativeSelection(snapshot, str(self.path), "/fixture/mnemed")
+        self.assertTrue(selected.stores[0].maintenance.core_cleanup)
+        snapshot["active"][0]["store"]["background"] = {"core_cleanup":False}
+        selected = registry.NativeSelection(snapshot, str(self.path), "/fixture/mnemed")
+        self.assertFalse(selected.stores[0].maintenance.core_cleanup)
+        self.assertTrue(selected.stores[0].maintenance.enabled)
+        for invalid in (None, 0, "false"):
+            snapshot["active"][0]["store"]["background"]["core_cleanup"] = invalid
+            with self.assertRaises(ValueError):
+                registry.NativeSelection(snapshot, str(self.path), "/fixture/mnemed")
+
     def test_empty_registry_is_empty_not_historical_defaults(self):
         self.write([])
         self.assertEqual(self.select().stores, ())

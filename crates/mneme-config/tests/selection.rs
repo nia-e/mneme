@@ -115,6 +115,7 @@ fn each_background_lane_is_independent() {
                     recall,
                     record,
                     maintenance,
+                    ..StoreBackground::default()
                 };
                 let s = select(&cfg, &context(dir.path())).unwrap().active.remove(0);
                 assert!(s.eligible.core && s.eligible.context);
@@ -255,6 +256,683 @@ fn strict_closed_duplicate_types_bounds_and_no_diagnostic_secrets() {
             "{suffix}"
         );
     }
+}
+
+fn path_list_toml(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| serde_json::to_string(path.to_str().unwrap()).unwrap())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn path_list_config(location: &str, paths: &[PathBuf]) -> String {
+    let paths = path_list_toml(paths);
+    let store = if let Some(field) = location.strip_prefix("active.") {
+        entry(
+            "memory",
+            FIRST,
+            &format!("workspace='any',{field}=[{paths}]"),
+        )
+    } else {
+        format!(
+            "{}{location}=[{paths}]\n",
+            entry("memory", FIRST, "workspace='any'")
+        )
+    };
+    format!("schema='mneme.config.v1'\n{store}")
+}
+
+fn path_list_locations() -> Vec<String> {
+    [
+        "active",
+        "applicability.core",
+        "applicability.context",
+        "applicability.recall",
+        "applicability.record",
+        "applicability.maintenance",
+    ]
+    .into_iter()
+    .flat_map(|scope| {
+        [
+            format!("{scope}.roots"),
+            format!("{scope}.subtree_roots"),
+            format!("{scope}.excluded_roots"),
+        ]
+    })
+    .collect()
+}
+
+#[test]
+fn every_root_list_accepts_explicit_worktree_capacity_and_refuses_one_more() {
+    assert_eq!(MAX_PATHS_PER_LIST, 256);
+    let paths = (0..=MAX_PATHS_PER_LIST)
+        .map(|i| PathBuf::from(format!("/worktrees/w{i:03}")))
+        .collect::<Vec<_>>();
+    for location in path_list_locations() {
+        // Retain the old range, and exercise the reported fleet and exact new cap.
+        for count in [0, 64, 65, 150, MAX_PATHS_PER_LIST] {
+            let text = path_list_config(&location, &paths[..count]);
+            Config::parse(&text).unwrap();
+            Config::parse_overlay(&text).unwrap();
+        }
+        let text = path_list_config(&location, &paths);
+        for parse in [Config::parse, Config::parse_overlay] {
+            let error = parse(&text).unwrap_err().to_string();
+            assert!(error.contains("256 entries"), "{location}: {error}");
+            assert!(error.contains("reduce roots/excluded_roots"));
+            assert!(!error.contains("/worktrees"));
+        }
+    }
+    assert_eq!(MAX_STORES, 64, "store identity capacity is independent");
+}
+
+#[test]
+fn every_root_list_retains_aggregate_utf8_byte_and_individual_path_bounds() {
+    assert_eq!(MAX_PATH_LIST_BYTES, 16_384);
+    // Eight distinct 2,048-byte paths: count characters incorrectly and the +1
+    // case would pass. These are parser-only paths, not filesystem components.
+    let paths = (0..8)
+        .map(|i| PathBuf::from(format!("/{}{i}", "é".repeat(1023))))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths.iter().map(|p| p.as_os_str().len()).sum::<usize>(),
+        MAX_PATH_LIST_BYTES
+    );
+    for location in path_list_locations() {
+        let text = path_list_config(&location, &paths);
+        Config::parse(&text).unwrap();
+        Config::parse_overlay(&text).unwrap();
+        let mut over = paths.clone();
+        over[0].as_mut_os_string().push("x");
+        for parse in [Config::parse, Config::parse_overlay] {
+            let error = parse(&path_list_config(&location, &over))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("16384 total path bytes"),
+                "{location}: {error}"
+            );
+            assert!(error.contains("shorten paths or reduce"));
+            assert!(!error.contains('é'));
+        }
+        let maximum_path = PathBuf::from(format!("/{}", "a".repeat(4095)));
+        Config::parse(&path_list_config(
+            &location,
+            std::slice::from_ref(&maximum_path),
+        ))
+        .unwrap();
+        let mut oversized_path = maximum_path;
+        oversized_path.as_mut_os_string().push("a");
+        assert!(Config::parse(&path_list_config(&location, &[oversized_path])).is_err());
+        assert!(
+            Config::parse(&path_list_config(
+                &location,
+                &[PathBuf::from("/same"), PathBuf::from("/same")]
+            ))
+            .is_err()
+        );
+        assert!(
+            Config::parse(&path_list_config(
+                &location,
+                &[PathBuf::from("/work/../other")]
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn explicit_150_worktrees_select_without_parent_membership_or_nested_project_leaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().canonicalize().unwrap();
+    let mut roots = (0..150)
+        .map(|i| parent.join(format!("w{i:03}")))
+        .collect::<Vec<_>>();
+    for root in &roots {
+        std::fs::create_dir(root).unwrap();
+        // Git worktrees use a .git file; selection inspects presence, not Git data.
+        std::fs::write(root.join(".git"), "gitdir: /unused-metadata-only-fixture").unwrap();
+    }
+    let user = parent.join("user.toml");
+    let write_config = |roots: &[PathBuf], exclusions: &[PathBuf]| {
+        let roots = path_list_toml(roots);
+        std::fs::write(
+            &user,
+            format!(
+                "schema='mneme.config.v1'\n{}applicability.record={{roots=[{roots}]}}\n",
+                entry(
+                    "work",
+                    FIRST,
+                    &format!(
+                        "workspace='project',roots=[{roots}],excluded_roots=[{}]",
+                        path_list_toml(exclusions)
+                    )
+                )
+            ),
+        )
+        .unwrap();
+    };
+    write_config(&roots, &[]);
+    for root in &roots {
+        let selected = select_workspace(&user, root, None).unwrap();
+        assert_eq!(store_names(&selected), vec!["work"]);
+        assert!(selected.active[0].eligible.record);
+        selected.verify_digest().unwrap();
+    }
+    let unrelated = parent.join("unlisted");
+    std::fs::create_dir(&unrelated).unwrap();
+    assert!(
+        select_workspace(&user, &unrelated, None)
+            .unwrap()
+            .active
+            .is_empty()
+    );
+    // A parent is not a shorthand for membership: it crosses neither the Git
+    // worktree marker nor a nested .git/.mneme boundary.
+    write_config(std::slice::from_ref(&parent), &[]);
+    assert!(
+        select_workspace(&user, roots.last().unwrap(), None)
+            .unwrap()
+            .active
+            .is_empty()
+    );
+    write_config(&roots, &[]);
+    for marker in [".git", ".mneme"] {
+        let child = roots[149].join(marker.trim_start_matches('.'));
+        std::fs::create_dir_all(child.join(marker)).unwrap();
+        assert!(
+            select_workspace(&user, &child, None)
+                .unwrap()
+                .active
+                .is_empty()
+        );
+        roots.push(child.clone());
+        write_config(&roots, &[]);
+        assert!(
+            select_workspace(&user, &child, None).unwrap().active[0]
+                .eligible
+                .record
+        );
+    }
+    // Exclusions still override a listed root, even at the end of a large list.
+    let excluded = roots[149].clone();
+    let mut exclusions = roots[..150].to_vec();
+    write_config(&roots, &exclusions);
+    let selected = select_workspace(&user, &excluded, None).unwrap();
+    assert!(selected.active.is_empty());
+    assert!(selected.explicit_store("work").is_err());
+    #[cfg(unix)]
+    {
+        let lexical_parent = parent.join("private-aliases");
+        std::fs::create_dir(&lexical_parent).unwrap();
+        let lexical = lexical_parent.join("alias");
+        std::os::unix::fs::symlink(&excluded, &lexical).unwrap();
+        // An alias in the exclusion blocks the canonical root too.
+        exclusions[149] = lexical.clone();
+        write_config(&roots, &exclusions);
+        assert!(
+            select_workspace(&user, &excluded, None)
+                .unwrap()
+                .active
+                .is_empty()
+        );
+        // This parent is not an ancestor of the canonical cwd. Only the lexical
+        // origin proves the exclusion, and it must survive canonicalization.
+        exclusions[149] = lexical_parent;
+        write_config(&roots, &exclusions);
+        assert!(
+            select_workspace(&user, &lexical, None)
+                .unwrap()
+                .active
+                .is_empty()
+        );
+        assert!(
+            select_workspace(&user, &excluded, None).unwrap().active[0]
+                .eligible
+                .record
+        );
+    }
+}
+
+fn positive_path_lists_config(scope: &str, roots: &[PathBuf], subtrees: &[PathBuf]) -> String {
+    let fields = format!(
+        "roots=[{}],subtree_roots=[{}]",
+        path_list_toml(roots),
+        path_list_toml(subtrees)
+    );
+    let store = if scope == "active" {
+        entry("memory", FIRST, &format!("workspace='any',{fields}"))
+    } else {
+        format!(
+            "{}{scope}={{{fields}}}\n",
+            entry("memory", FIRST, "workspace='any'")
+        )
+    };
+    format!("schema='mneme.config.v1'\n{store}")
+}
+
+#[test]
+fn ordinary_and_subtree_roots_share_count_bytes_and_uniqueness_bounds() {
+    let short = (0..=MAX_PATHS_PER_LIST)
+        .map(|i| PathBuf::from(format!("/w/{i}")))
+        .collect::<Vec<_>>();
+    let long = (0..8)
+        .map(|i| PathBuf::from(format!("/{}{i}", "é".repeat(1023))))
+        .collect::<Vec<_>>();
+    for scope in [
+        "active",
+        "applicability.core",
+        "applicability.context",
+        "applicability.recall",
+        "applicability.record",
+        "applicability.maintenance",
+    ] {
+        for parse in [Config::parse, Config::parse_overlay] {
+            parse(&positive_path_lists_config(
+                scope,
+                &short[..128],
+                &short[128..256],
+            ))
+            .unwrap();
+            let error = parse(&positive_path_lists_config(
+                scope,
+                &short[..128],
+                &short[128..],
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("256 entries") && error.contains("share one bound"));
+            parse(&positive_path_lists_config(scope, &long[..4], &long[4..])).unwrap();
+            let mut over = long.clone();
+            over[7].as_mut_os_string().push("x");
+            let error = parse(&positive_path_lists_config(scope, &over[..4], &over[4..]))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("16384 total path bytes") && error.contains("share one bound"));
+            assert!(
+                parse(&positive_path_lists_config(scope, &short[..1], &short[..1]))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("duplicate path")
+            );
+        }
+    }
+}
+
+fn subtree_project_config(root: &Path, activation_extra: &str) -> String {
+    format!(
+        "schema='mneme.config.v1'\n{}{}{}",
+        entry("personal", FIRST, "workspace='any'"),
+        entry("ordinary", SECOND, "workspace='no-project'"),
+        entry(
+            "work",
+            THIRD,
+            &format!(
+                "workspace='project',subtree_roots=[{}]{activation_extra}",
+                path_list_toml(&[root.to_owned()])
+            )
+        )
+    )
+}
+
+#[test]
+fn subtree_activation_includes_future_unrelated_projects_without_enumeration() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("worktrees");
+    std::fs::create_dir(&parent).unwrap();
+    let user = dir.path().join("user.toml");
+    std::fs::write(&user, subtree_project_config(&parent, "")).unwrap();
+    let retained_parent = select_workspace(&user, &parent, None).unwrap();
+    assert_eq!(store_names(&retained_parent), vec!["personal", "work"]);
+    assert_eq!(retained_parent.read_default.as_deref(), Some("work"));
+    for marker in [
+        "git-directory",
+        "git-worktree-file",
+        "mneme",
+        "codex-routing",
+    ] {
+        let child = parent.join(marker);
+        std::fs::create_dir(&child).unwrap();
+        let retained_child = select_workspace(&user, &child, None).unwrap();
+        match marker {
+            "git-directory" => std::fs::create_dir(child.join(".git")).unwrap(),
+            "git-worktree-file" => {
+                std::fs::write(child.join(".git"), "gitdir: unrelated-fixture").unwrap()
+            }
+            "mneme" => std::fs::create_dir(child.join(".mneme")).unwrap(),
+            "codex-routing" => {
+                std::fs::create_dir(child.join(".codex")).unwrap();
+                std::fs::write(
+                    child.join(".codex/config.toml"),
+                    "[mcp_servers.mneme]\nurl='http://127.0.0.1:1'",
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            retained_child.revalidate_exact().is_err(),
+            "new ancestry metadata is still frozen"
+        );
+        let selected = select_workspace(&user, &child, None).unwrap();
+        assert_eq!(store_names(&selected), vec!["personal", "work"]);
+        assert!(selected.active[1].eligible.core && selected.active[1].eligible.record);
+        selected.revalidate_exact().unwrap();
+        retained_parent.revalidate_exact().unwrap();
+    }
+    let ordinary_roots = subtree_project_config(&parent, "").replace("subtree_roots", "roots");
+    std::fs::write(&user, &ordinary_roots).unwrap();
+    assert_eq!(
+        store_names(&select_workspace(&user, &parent.join("git-directory"), None).unwrap()),
+        vec!["personal"]
+    );
+    std::fs::write(
+        &user,
+        ordinary_roots.replace("workspace='project'", "workspace='any'"),
+    )
+    .unwrap();
+    assert!(
+        store_names(&select_workspace(&user, &parent.join("git-directory"), None).unwrap())
+            .contains(&"work"),
+        "existing any-workspace root-prefix behavior is unchanged"
+    );
+    std::fs::write(&user, subtree_project_config(&parent, "")).unwrap();
+    let outside = dir.path().join("worktrees-other");
+    std::fs::create_dir(&outside).unwrap();
+    let selected = select_workspace(&user, &outside, None).unwrap();
+    assert_eq!(store_names(&selected), vec!["ordinary", "personal"]);
+    assert_eq!(selected.read_default.as_deref(), Some("ordinary"));
+    // Disabled project scope still proves project presence, never misc fallback.
+    std::fs::write(&user, subtree_project_config(&parent, ",enabled=false")).unwrap();
+    let selected = select_workspace(&user, &parent, None).unwrap();
+    assert!(selected.project.configured);
+    assert_eq!(store_names(&selected), vec!["personal"]);
+}
+
+#[test]
+fn every_operation_subtree_is_independent_and_exclusions_still_win() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("work");
+    let child = parent.join("new-project");
+    let excluded = child.join("private");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(child.join(".git")).unwrap();
+    std::fs::create_dir(&excluded).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let user = dir.path().join("user.toml");
+    for scope in ["core", "context", "recall", "record", "maintenance"] {
+        std::fs::write(&user, format!(
+            "schema='mneme.config.v1'\n{}applicability.{scope}={{subtree_roots=[{}],excluded_roots=[{}]}}\n",
+            entry("personal", FIRST, "workspace='any'"),
+            path_list_toml(&[parent.clone()]), path_list_toml(&[excluded.clone()])
+        )).unwrap();
+        for (cwd, scoped) in [(&child, true), (&outside, false), (&excluded, false)] {
+            let selected = select_workspace(&user, cwd, None).unwrap();
+            let store = &selected.active[0];
+            assert!(store.eligible.read && store.eligible.write);
+            for (operation, name, eligible) in [
+                (Operation::Core, "core", store.eligible.core),
+                (Operation::Context, "context", store.eligible.context),
+                (Operation::Recall, "recall", store.eligible.recall),
+                (Operation::Record, "record", store.eligible.record),
+                (
+                    Operation::Maintenance,
+                    "maintenance",
+                    store.eligible.maintenance,
+                ),
+            ] {
+                let expected =
+                    scoped || (scope != name && !(scope == "context" && name == "recall"));
+                assert_eq!(
+                    eligible, expected,
+                    "scope={scope} operation={name} cwd={cwd:?}"
+                );
+                assert_eq!(store.require_operation(operation).is_ok(), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn subtree_scope_does_not_bypass_profiles_allowlists_permissions_or_nested_overlays() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("work");
+    let child = parent.join("child");
+    std::fs::create_dir_all(child.join(".mneme")).unwrap();
+    let user = dir.path().join("user.toml");
+    std::fs::write(&user, subtree_project_config(&parent, "")).unwrap();
+    let profile = child.join(".mneme/profile.json");
+    for (mode, names, allowed) in [
+        ("default", "[]", false),
+        ("private", "['work']", true),
+        ("isolated", "[]", false),
+        ("isolated", "['work']", true),
+    ] {
+        let names = names.replace('\'', "\"");
+        std::fs::write(
+            &profile,
+            format!(r#"{{"schema":"mneme.profile.v2","mode":"{mode}","stores":{names}}}"#),
+        )
+        .unwrap();
+        let selected = select_workspace(&user, &child, None).unwrap();
+        assert_eq!(
+            store_names(&selected),
+            if allowed { vec!["work"] } else { vec![] }
+        );
+        assert_eq!(selected.explicit_store("work").is_ok(), allowed);
+    }
+    std::fs::remove_file(&profile).unwrap();
+    std::fs::write(
+        &user,
+        format!(
+            "{}[workspace]\nallow_stores=[]\n",
+            subtree_project_config(&parent, "")
+        ),
+    )
+    .unwrap();
+    assert!(
+        select_workspace(&user, &child, None)
+            .unwrap()
+            .active
+            .is_empty()
+    );
+    std::fs::write(
+        &user,
+        subtree_project_config(&parent, ",profiles=['default']"),
+    )
+    .unwrap();
+    assert_eq!(
+        store_names(&select_workspace(&user, &child, Some("private")).unwrap()),
+        vec!["personal"]
+    );
+    let policy = format!(
+        "{}permissions={{read=false,write=false}}\n",
+        subtree_project_config(&parent, "")
+    );
+    std::fs::write(&user, policy).unwrap();
+    let selected = select_workspace(&user, &child, None).unwrap();
+    let work = &selected.active[1];
+    assert!(
+        !work.eligible.read && !work.eligible.write && !work.eligible.core && !work.eligible.record
+    );
+    std::fs::write(&user, subtree_project_config(&parent, "")).unwrap();
+    std::fs::write(
+        child.join(".mneme/memory.toml"),
+        "schema='mneme.config.v1'\n[background]\nenabled=false\n",
+    )
+    .unwrap();
+    let selected = select_workspace(&user, &child, None).unwrap();
+    assert!(selected.active[1].eligible.core && !selected.active[1].eligible.record);
+    std::fs::write(child.join(".mneme/memory.toml"), "invalid").unwrap();
+    assert!(select_workspace(&user, &child, None).is_err());
+}
+
+#[test]
+fn subtree_selectors_suppress_both_overlay_default_root_inference_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(project.join(".mneme")).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    let text = format!(
+        "schema='mneme.config.v1'\n{}",
+        entry(
+            "work",
+            THIRD,
+            &format!(
+                "workspace='project',subtree_roots=[{}]",
+                path_list_toml(&[elsewhere.clone()])
+            )
+        )
+    );
+    let merged = config("")
+        .merge_project(Config::parse_overlay(&text).unwrap(), &project)
+        .unwrap();
+    assert!(merged.stores["work"].active.roots.is_empty());
+    assert_eq!(merged.stores["work"].active.subtree_roots, vec![elsewhere]);
+    let overlay = project.join(".mneme/memory.toml");
+    std::fs::write(&overlay, &text).unwrap();
+    let user = dir.path().join("user.toml");
+    std::fs::write(&user, "schema='mneme.config.v1'").unwrap();
+    for source in [&user, &overlay] {
+        let selected = select_workspace(source, &project, None).unwrap();
+        assert!(selected.config.stores["work"].active.roots.is_empty());
+        assert!(
+            selected.active.is_empty(),
+            "an explicit elsewhere scope must not acquire its overlay's root"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn subtree_scope_preserves_lexical_canonical_exclusions_and_all_origin_matching() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().canonicalize().unwrap().join("work");
+    let child = parent.join("child");
+    let private = parent.join("private");
+    let outside = dir.path().canonicalize().unwrap().join("outside");
+    std::fs::create_dir_all(child.join(".git")).unwrap();
+    std::fs::create_dir(&private).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let user = dir.path().join("user.toml");
+    let link = private.join("alias");
+    symlink(&child, &link).unwrap();
+    std::fs::write(
+        &user,
+        subtree_project_config(
+            &parent,
+            &format!(",excluded_roots=[{}]", path_list_toml(&[private])),
+        ),
+    )
+    .unwrap();
+    assert!(
+        select_workspace(&user, &link, None)
+            .unwrap()
+            .explicit_store("work")
+            .is_err()
+    );
+    assert!(
+        select_workspace(&user, &child, None)
+            .unwrap()
+            .explicit_store("work")
+            .is_ok()
+    );
+    std::fs::write(
+        &user,
+        subtree_project_config(
+            &parent,
+            &format!(",excluded_roots=[{}]", path_list_toml(&[link])),
+        ),
+    )
+    .unwrap();
+    assert!(
+        select_workspace(&user, &child, None)
+            .unwrap()
+            .explicit_store("work")
+            .is_err()
+    );
+    std::fs::write(&user, subtree_project_config(&parent, "")).unwrap();
+    let escape = parent.join("escape");
+    symlink(&outside, &escape).unwrap();
+    assert!(!store_names(&select_workspace(&user, &escape, None).unwrap()).contains(&"work"));
+    let outside_alias = outside.join("alias");
+    symlink(&child, &outside_alias).unwrap();
+    assert!(
+        !store_names(&select_workspace(&user, &outside_alias, None).unwrap()).contains(&"work")
+    );
+    // Each origin can use a different explicit grant, without requiring an
+    // implicit escape: lexical outside path has its own ordinary-root grant.
+    let ordinary = parent.join("ordinary");
+    std::fs::create_dir(&ordinary).unwrap();
+    let ordinary_alias = outside.join("ordinary-alias");
+    symlink(&ordinary, &ordinary_alias).unwrap();
+    std::fs::write(
+        &user,
+        subtree_project_config(&parent, &format!(",roots=[{}]", path_list_toml(&[outside]))),
+    )
+    .unwrap();
+    assert!(
+        store_names(&select_workspace(&user, &ordinary_alias, None).unwrap()).contains(&"work")
+    );
+}
+
+#[test]
+fn empty_subtree_selectors_preserve_old_snapshot_shape_and_new_grants_are_frozen() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = config(&entry("personal", FIRST, "workspace='any'"));
+    let before = select(&base, &context(dir.path())).unwrap();
+    let text = format!(
+        "schema='mneme.config.v1'\n{}applicability.record={{subtree_roots=[]}}\n",
+        entry("personal", FIRST, "workspace='any',subtree_roots=[]")
+    );
+    let after = select(&Config::parse(&text).unwrap(), &context(dir.path())).unwrap();
+    assert_eq!(before, after);
+    assert!(
+        !serde_json::to_string(&after)
+            .unwrap()
+            .contains("subtree_roots")
+    );
+    let user = dir.path().join("user.toml");
+    std::fs::write(
+        &user,
+        format!(
+            "schema='mneme.config.v1'\n{}",
+            entry(
+                "work",
+                THIRD,
+                &format!(
+                    "workspace='project',roots=[{}]",
+                    path_list_toml(&[dir.path().to_owned()])
+                )
+            )
+        ),
+    )
+    .unwrap();
+    let retained = select_workspace(&user, dir.path(), None).unwrap();
+    std::fs::write(
+        &user,
+        format!(
+            "schema='mneme.config.v1'\n{}",
+            entry(
+                "work",
+                THIRD,
+                &format!(
+                    "workspace='project',subtree_roots=[{}]",
+                    path_list_toml(&[dir.path().to_owned()])
+                )
+            )
+        ),
+    )
+    .unwrap();
+    assert!(retained.revalidate_exact().is_err());
+    let selected = select_workspace(&user, dir.path(), None).unwrap();
+    assert_eq!(store_names(&retained), store_names(&selected));
+    assert_eq!(retained.active[0].eligible, selected.active[0].eligible);
+    assert_ne!(retained.digest, selected.digest);
+    selected.revalidate_exact().unwrap();
 }
 
 const PREFERENCE_CAPTURE: &str = "intent='collaboration-preferences',kinds=['lesson'],evidence_kinds=['user_statement'],required_tags=['collaboration-preference'],allow_associations=false,max_summary_bytes=384,max_body_bytes=1024";
@@ -1334,4 +2012,31 @@ fn nested_symlink_and_loopback_alias_cannot_escape_positive_operation_scope() {
             .iter()
             .any(|p| p.ends_with("projects/child"))
     );
+}
+
+#[test]
+fn capture_required_tags_normalize_before_reserved_membership_validation() {
+    for tag in [
+        "Core",
+        " CORE ",
+        "Routing_Judgment",
+        "Possibility",
+        "Pursuing",
+        "Closed",
+    ] {
+        let text = format!(
+            "schema='mneme.config.v1'\n{}capture={{required_tags=['{tag}']}}",
+            entry("memory", FIRST, "workspace='any'")
+        );
+        assert!(
+            Config::parse(&text).is_err(),
+            "reserved normalized tag: {tag}"
+        );
+    }
+    let text = format!(
+        "schema='mneme.config.v1'\n{}capture={{required_tags=[' Rust:Libs ', 'rust-libs']}}",
+        entry("memory", FIRST, "workspace='any'")
+    );
+    let config = Config::parse(&text).unwrap();
+    assert_eq!(config.stores["memory"].capture.required_tags, ["rust-libs"]);
 }

@@ -739,11 +739,18 @@ class ReaderRuntimeTest(unittest.TestCase):
     def test_assess_decoder_recursion_returns_bounded_failure(self):
         source = self.observation()
         prepared = recording_contract.prepare(source, [])
+        decode = json.loads
+        def fail_frame(value, *args, **kwargs):
+            # Transport frames are bytes; frozen local coverage is a JSON string.
+            # Patching the shared json module must not fail before transport starts.
+            if isinstance(value, bytes):
+                raise RecursionError
+            return decode(value, *args, **kwargs)
         with ReaderRuntime(self.config, self.root / "scratch") as runtime:
             # Decoder depth limits vary by Python version; exercise its failure
             # contract without relying on an implementation-specific threshold.
             with (patch("recording_contract.prepare", return_value=prepared),
-                  patch("reader_runtime.json.loads", side_effect=RecursionError)):
+                  patch("reader_runtime.json.loads", side_effect=fail_frame)):
                 result = runtime.assess(source, [])
         self.assertEqual(result["reason"], "invalid_events")
         self.assertTrue(result["provider_attempt"])

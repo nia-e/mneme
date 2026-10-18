@@ -43,6 +43,7 @@ struct ValidatedCurrentSchemaRequest {
     dimension: usize,
     database_id: String,
     generation_marker: &'static str,
+    tag_policy: &'static str,
     catalog: CatalogContract,
 }
 
@@ -174,6 +175,21 @@ pub(super) fn stage_touchstones_schema(
     let mut request = validate_request(dimension, database_id.get())?;
     request.generation_marker = TOUCHSTONES_V1_CATALOG_GENERATION_MARKER;
     request.catalog = CatalogContract::TouchstonesV1;
+    request.tag_policy = crate::tag_projection::META_VALUE;
+    stage_validated_current_schema(database, &request, FailureInjection::NONE)
+}
+
+/// Frozen named target in the historical format-upgrade ladder. It preserves
+/// exact predecessor tag spellings; current writable admission still refuses
+/// it until the separate reviewed lexical migration publishes its policy.
+pub(super) fn stage_legacy_touchstones_schema(
+    database: &DbInstance,
+    dimension: usize,
+    database_id: DatabaseId,
+) -> Result<()> {
+    let mut request = validate_request(dimension, database_id.get())?;
+    request.generation_marker = TOUCHSTONES_V1_CATALOG_GENERATION_MARKER;
+    request.catalog = CatalogContract::TouchstonesV1;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 pub(super) fn touchstones_memory_schema(dimension: usize) -> String {
@@ -235,6 +251,7 @@ fn validate_request(
         dimension,
         database_id: canonical,
         generation_marker: STRUCT_MAP_CATALOG_GENERATION_MARKER,
+        tag_policy: crate::tag_projection::LEGACY_META_VALUE,
         catalog: CatalogContract::Predecessor,
     })
 }
@@ -434,7 +451,7 @@ fn required_metadata(
         ),
         (
             crate::tag_projection::META_KEY.to_owned(),
-            crate::tag_projection::META_VALUE.to_owned(),
+            request.tag_policy.to_owned(),
         ),
     ]);
     if include_generation {

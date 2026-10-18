@@ -288,6 +288,7 @@ mod tests {
             LaneWindow::complete(vec![
                 PrimaryInputCard::new(
                     id(10),
+                    1234,
                     NonZeroU16::new(1).unwrap(),
                     "The author's own meaning",
                 )
@@ -348,7 +349,7 @@ mod tests {
             crate::minimum_retrieval_metadata(),
             LaneWindow::complete(Vec::new()),
             LaneWindow::complete(vec![
-                PrimaryInputCard::new(id(10), NonZeroU16::new(1).unwrap(), "meaning")
+                PrimaryInputCard::new(id(10), 1234, NonZeroU16::new(1).unwrap(), "meaning")
                     .unwrap()
                     .with_touchstone(view(TouchstoneResolution::MatchesSnapshot)),
             ]),

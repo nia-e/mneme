@@ -690,8 +690,9 @@ fn context_generation_reuses_physical_catalog_but_fences_old_app_contracts() {
 #[test]
 fn touchstones_generation_extends_closed_inventory_and_refuses_prior_admission_unchanged() {
     use crate::storage_contract::conventional_unmanaged::admission::{
-        CatalogSealGenerationV1, close_touchstones_source_bound_seal_v1,
-        recognize_episode_context_open_source_v2, recognize_touchstones_open_source_v1,
+        CatalogSealGenerationV1, close_normalized_tags_source_bound_seal_v1,
+        recognize_episode_context_open_source_v2, recognize_normalized_tags_open_source_v1,
+        recognize_touchstones_open_source_v1,
     };
     let (path, database) = fresh_sqlite("touchstones-exact");
     stage_touchstones_schema(&database, 4, database_id()).unwrap();
@@ -716,15 +717,21 @@ fn touchstones_generation_extends_closed_inventory_and_refuses_prior_admission_u
         )
         .is_err()
     );
-    drop(
+    assert!(
         recognize_touchstones_open_source_v1(ExistingSqliteSnapshotSource::open(&path).unwrap())
-            .unwrap(),
+            .is_err()
+    );
+    drop(
+        recognize_normalized_tags_open_source_v1(
+            ExistingSqliteSnapshotSource::open(&path).unwrap(),
+        )
+        .unwrap(),
     );
     let reader = ExistingSqliteSnapshotSource::open(&path)
         .unwrap()
         .into_managed_reader(ManagedSnapshotPolicy::TouchstonesV1)
         .unwrap();
-    let seal = close_touchstones_source_bound_seal_v1(reader).unwrap();
+    let seal = close_normalized_tags_source_bound_seal_v1(reader).unwrap();
     assert_eq!(seal.generation(), CatalogSealGenerationV1::TouchstonesV1);
     drop(seal);
     assert_eq!(fs::read(&path).unwrap(), before);

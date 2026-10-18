@@ -139,7 +139,9 @@ impl PreparedCapture {
             return Err(format!("capture tags exceed {MAX_TAGS} entries").into());
         }
         for tag in tags {
-            bounded_nonempty("tags[]", tag, MAX_TAG_BYTES)?;
+            if tag.is_empty() || tag.len() > MAX_TAG_BYTES || tag.chars().any(char::is_control) {
+                return Err("capture tags must be bounded, nonempty and control-free".into());
+            }
         }
         for (name, value) in [
             ("stability", self.stability),
@@ -202,7 +204,7 @@ impl PreparedCapture {
             .as_deref()
             .unwrap_or(&[])
             .iter()
-            .any(|tag| tag == "core")
+            .any(|tag| mneme_core::normalize_tag(tag).is_ok_and(|tag| tag == "core"))
         {
             true
         } else {
@@ -581,6 +583,8 @@ mod tests {
         assert!(PreparedCapture::parse(&active).is_err());
         let mut core = candidate();
         core["tags"] = json!(["core"]);
+        assert!(PreparedCapture::parse(&core).unwrap().requires_operator());
+        core["tags"] = json!([" Core "]);
         assert!(PreparedCapture::parse(&core).unwrap().requires_operator());
     }
 

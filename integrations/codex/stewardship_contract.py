@@ -4,11 +4,11 @@ import json
 import re
 import unicodedata
 
-from tag_context import PROTECTED_TAGS, ordinary_tags, validate_context
+from tag_context import PROTECTED_TAGS, is_canonical_tag, validate_context
 
 ULID=re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 SHA=re.compile(r"[0-9a-f]{64}\Z")
-REVISION="mneme.codex-tag-classifier.v2"
+REVISION="mneme.codex-tag-classifier.v3"
 INSTRUCTIONS="""You are a quiet memory librarian, classifying a bounded batch of canonical
 summaries. Return only the supplied structured decisions; do not use tools.
 Think prospectively: what future questions and supported cross-domain associations
@@ -30,6 +30,12 @@ set of tags only when the summary supports it; noop with existing tags when usef
 as-is; unresolved with existing tags when evidence is insufficient. Ambiguity is
 not a reason to manufacture generic or confident tags. New ordinary topic names
 are allowed when observed vocabulary lacks a suitable supported distinction.
+Every tag in a retag replacement must already match [a-z0-9]+(?:-[a-z0-9]+)*,
+at most 256 ASCII bytes: lowercase letters/digits and single internal dashes.
+Do not emit case, space, underscore, colon, slash or dot aliases. Historical
+spellings are exact evidence: noop/unresolved may repeat them unchanged. A node
+with retained colon-bearing protected tags cannot be retagged before explicit
+migration; do not silently rename them to fit the new grammar.
 """
 
 
@@ -52,10 +58,24 @@ def _tags(value):
     return tuple(sorted(value))
 
 
+def validate_retag_tags(original, desired):
+    """Check replacement intent, not historical facts or Rust normalization.
+
+    Even a retained alias could acquire a protected meaning when Rust normalizes
+    a fresh replacement. Never send noncanonical spellings down that write path.
+    """
+    original, desired = _tags(original), _tags(desired)
+    if ({tag for tag in desired if protected(tag)} != {tag for tag in original if protected(tag)}
+            or any(not is_canonical_tag(tag) for tag in desired)):
+        raise ValueError("invalid_tag_replacement")
+    return desired
+
+
 @dataclass(frozen=True)
 class Context:
     targets_json: str
     answer_bytes: int
+    core_cleanup: bool = True
 
     @property
     def targets(self):
@@ -77,9 +97,11 @@ def schema(context):
                     "items":{"type":"string","minLength":1,"maxLength":256}}}}}}}
 
 
-def prepare(targets,tag_context,*,budget):
+def prepare(targets,tag_context,*,budget,core_cleanup=True):
     try:
         validate_context(tag_context)
+        if type(core_cleanup) is not bool:
+            raise ValueError("invalid_core_cleanup_policy")
         if not tag_context.enabled or not isinstance(targets,list) or not targets:
             raise ValueError("invalid_input")
         maximum=budget.stewardship_prompt_bytes
@@ -93,9 +115,11 @@ def prepare(targets,tag_context,*,budget):
                     or not target["summary"].strip() or len(target["summary"].encode())>maximum
                     or not isinstance(target["content_fingerprint"],str) or not SHA.fullmatch(target["content_fingerprint"])):
                 raise ValueError("invalid_input")
+            if not core_cleanup and "core" in _tags(target["tags"]):
+                raise ValueError("core_cleanup_requires_foreground")
             ids.add(target["id"])
             checked.append({**target,"tags":list(_tags(target["tags"]))})
-        context=Context(encoded(checked).decode(),budget.stewardship_answer_bytes)
+        context=Context(encoded(checked).decode(),budget.stewardship_answer_bytes,core_cleanup)
         packet={"targets":[{k:v for k,v in t.items() if k!="content_fingerprint"} for t in checked],
                 "tag_context":tag_context.packet()}
         # Prefer complete canonical summaries/guide over optional vocabulary
@@ -133,13 +157,14 @@ def validate_answer(answer,context):
             raise ValueError("invalid_answer")
         seen.add(decision["id"])
         original=_tags(expected[decision["id"]]["tags"])
+        if not context.core_cleanup and "core" in original:
+            raise ValueError("core_cleanup_requires_foreground")
         desired=_tags(decision["tags"])
         if ({t for t in desired if protected(t)}!={t for t in original if protected(t)}
                 or decision["disposition"] in ("noop","unresolved") and desired!=original
                 or decision["disposition"]=="retag" and desired==original):
             raise ValueError("invalid_answer")
-        for tag in desired:
-            if tag not in original and not protected(tag):
-                ordinary_tags([tag])
+        if decision["disposition"] == "retag":
+            validate_retag_tags(list(original), list(desired))
         decisions.append({"id":decision["id"],"disposition":decision["disposition"],"tags":list(desired)})
     return {"decisions":decisions}

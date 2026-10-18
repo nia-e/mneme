@@ -133,6 +133,13 @@ pub(crate) fn schema_accepts(schema: &Value, instance: &Value) -> bool {
         {
             return false;
         }
+        if schema.get("pattern").and_then(Value::as_str) == Some(crate::CORE_TAG_INPUT_PATTERN)
+            && !text
+                .trim_matches(['-', ' ', '_', ':', '/', '.'])
+                .eq_ignore_ascii_case("core")
+        {
+            return false;
+        }
     }
     if let Some(maximum) = schema.get("maxItems").and_then(Value::as_u64)
         && instance
@@ -145,6 +152,13 @@ pub(crate) fn schema_accepts(schema: &Value, instance: &Value) -> bool {
         && instance
             .as_array()
             .is_none_or(|values| (values.len() as u64) < minimum)
+    {
+        return false;
+    }
+    if let Some(contains) = schema.get("contains")
+        && instance
+            .as_array()
+            .is_none_or(|values| !values.iter().any(|value| schema_accepts(contains, value)))
     {
         return false;
     }
@@ -211,12 +225,12 @@ pub(super) fn capability_request_cases() -> Vec<(&'static str, Value, Capability
         (
             "edit_summary",
             json!({"db":"missing","expected_db_id":other,"id":id,"expected_snapshot_sha256":"a".repeat(64),"summary":"replacement"}),
-            CapabilityClass::Operator,
+            CapabilityClass::Curator,
         ),
         (
             "edit_body",
             json!({"db":"missing","expected_db_id":other,"id":id,"expected_body_revision":"a".repeat(64),"body":""}),
-            CapabilityClass::Operator,
+            CapabilityClass::Curator,
         ),
         (
             "retag",
@@ -232,6 +246,11 @@ pub(super) fn capability_request_cases() -> Vec<(&'static str, Value, Capability
             "retag",
             json!({"db":"missing","expected_db_id":other,"id":id,"expected_tags":[],"tags":["core"]}),
             CapabilityClass::Operator,
+        ),
+        (
+            "retag",
+            json!({"db":"missing","expected_db_id":other,"id":id,"expected_tags":["core","fact"],"tags":["core","closed"]}),
+            CapabilityClass::Curator,
         ),
         ("databases", json!({}), CapabilityClass::ReadOnly),
         (

@@ -155,6 +155,15 @@ def _record_dict(policy):
 class MaintenancePolicy:
     enabled: bool = False
     tag_guide_id: str | None = None
+    core_cleanup: bool = True
+
+
+def _maintenance_dict(policy):
+    value = asdict(policy)
+    # The enabled default adds no bytes to retained selection snapshots/digests.
+    if policy.core_cleanup:
+        value.pop("core_cleanup")
+    return value
 
 
 @dataclass(frozen=True)
@@ -200,11 +209,12 @@ def _policies(value):
     ordinary_tags([tag for tag in recording.required_tags if tag != "collaboration-preference"], max_count=32)
     if recording.enabled and (not recording.kinds or not recording.evidence_kinds):
         raise ValueError("record permission requires explicit kinds and evidence kinds")
-    maintenance = _object(value.get("maintenance", {}), ("enabled", "tag_guide_id"))
+    maintenance = _object(value.get("maintenance", {}), ("enabled", "tag_guide_id", "core_cleanup"))
     guide = maintenance.get("tag_guide_id")
     if guide is not None and (not isinstance(guide, str) or not ULID.fullmatch(guide)):
         raise ValueError("tag guide must have a native ID")
-    upkeep = MaintenancePolicy(_bool(maintenance.get("enabled", False)), guide)
+    upkeep = MaintenancePolicy(_bool(maintenance.get("enabled", False)), guide,
+                               _bool(maintenance.get("core_cleanup", True)))
     return applies, reading, recording, upkeep
 
 
@@ -247,7 +257,7 @@ class SelectedStore:
                 "db_alias": self.db_alias, "database_path": self.database_path,
                 "db_id": self.db_id, "purpose": self.purpose, "when": asdict(self.when),
                 "read": asdict(self.read), "record": _record_dict(self.record),
-                "maintenance": asdict(self.maintenance), "service_digest": self.service_digest,
+                "maintenance": _maintenance_dict(self.maintenance), "service_digest": self.service_digest,
                 "workspace_root": self.workspace_root}
         if self.native_binding is not None:
             value.update(native_binding=self.native_binding, guidance=self.guidance)
@@ -615,6 +625,14 @@ def _native_record_policy(entry, eligible):
     return replace(record, allow_associations=record.allow_associations and eligible["read"])
 
 
+def _native_core_cleanup(entry):
+    background = _object(entry.get("background", {}),
+                         ("recall", "record", "maintenance", "core_cleanup"))
+    for value in background.values():
+        _bool(value)
+    return _bool(background.get("core_cleanup", True))
+
+
 @dataclass(frozen=True)
 class NativeSelection:
     snapshot: dict
@@ -645,6 +663,7 @@ class NativeSelection:
                 raise ValueError("duplicate or invalid native selected identity")
             names.add(row["name"]); owners.add(store["id"])
             _native_record_policy(store, row["eligible"])
+            _native_core_cleanup(store)
         if len(json.dumps(value).encode()) > MAX_NATIVE_SNAPSHOT_BYTES:
             raise ValueError("native selected snapshot exceeds byte limit")
 
@@ -673,7 +692,8 @@ class NativeSelection:
             result.append(SelectedStore(row["name"], self.registry_path, owner["db"], owner.get("path") or "",
                 entry["id"], purpose, read=ReadPolicy(eligible["read"], eligible["core"]),
                 record=_native_record_policy(entry, eligible),
-                maintenance=MaintenancePolicy(eligible["maintenance"], (guidance.get("tag_guide") or {}).get("id")),
+                maintenance=MaintenancePolicy(eligible["maintenance"], (guidance.get("tag_guide") or {}).get("id"),
+                                              _native_core_cleanup(entry)),
                 service_digest=self.digest, workspace_root=workspace_root, native_binding=binding, guidance=guidance))
         return tuple(result)
     def subset(self, operation):

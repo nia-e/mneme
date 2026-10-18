@@ -332,7 +332,11 @@ fn parse_write(mut value: Value) -> Result<PreparedWrite, EpisodeError> {
         return Err(invalid("episode tags exceed 32 entries"));
     }
     for tag in tags {
-        bounded_text("tags[]", tag, MAX_TAG_BYTES)?;
+        if tag.is_empty() || tag.len() > MAX_TAG_BYTES || tag.chars().any(char::is_control) {
+            return Err(invalid(
+                "episode tags must be bounded, nonempty and control-free",
+            ));
+        }
         if tag == "core" {
             return Err(invalid("episodes cannot have the core tag"));
         }
@@ -607,8 +611,25 @@ impl PreparedEpisode {
             Request::References(_) => EpisodeAction::References,
         }
     }
+    pub fn requires_operator(&self) -> bool {
+        let write = match &self.request {
+            Request::Append(write) | Request::Revise { write, .. } => write,
+            _ => return false,
+        };
+        write
+            .input
+            .tags
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|tag| mneme_core::normalize_tag(tag).is_ok_and(|tag| tag == "core"))
+    }
     pub fn capability(&self) -> EpisodeCapability {
-        self.action().capability()
+        if self.requires_operator() {
+            EpisodeCapability::Operator
+        } else {
+            self.action().capability()
+        }
     }
     pub fn is_mutation(&self) -> bool {
         self.capability() != EpisodeCapability::ReadOnly
@@ -782,6 +803,20 @@ fn occurrence_json(span: &OccurrenceSpan) -> Value {
 /// A compact header never contains body or duplicated provenance.
 pub fn header_json(header: &EpisodeHeader) -> Value {
     let mut value = json!({"episode_id":header.identity.episode_id,"edition_id":header.identity.edition_id,"revision":header.identity.revision,"summary":header.summary,"occurred":occurrence_json(&header.occurred),"recorded_at":header.recorded_at,"edition_recorded_at":header.edition_recorded_at,"thread":header.thread,"current_edition_id":header.current_edition_id});
+    value
+        .as_object_mut()
+        .expect("episode header object")
+        .extend(
+            serde_json::to_value(mneme_present::EpisodeTimePresentation::new(
+                &header.occurred,
+                header.recorded_at,
+                header.edition_recorded_at,
+            ))
+            .expect("typed calendar dates serialize")
+            .as_object()
+            .expect("calendar dates object")
+            .clone(),
+        );
     if let Some(contexts) = &header.occurrence_contexts {
         value["occurrence_contexts"] = json!(contexts);
     }
@@ -1033,7 +1068,11 @@ impl PreparedEpisode {
                     &page.items,
                     page.next.as_ref().map(ToString::to_string),
                     false,
-                    |item| json!({"edge":item.edge,"from_episode":item.from_episode,"to_episode":item.to_episode}),
+                    |item| {
+                        json!({"edge":item.edge,
+                        "edge_last_reinforced_utc":mneme_present::format_timestamp_millis(item.edge.last_reinforced()),
+                        "from_episode":item.from_episode,"to_episode":item.to_episode})
+                    },
                     |last| {
                         Ok(EpisodeReferencesCursor::new(
                             db_id,
@@ -1363,16 +1402,21 @@ impl PreparedEpisode {
             }
             _ => return Err(invalid("episode read has no write readback proof")),
         };
-        let mut expected_tags = write
-            .input
-            .tags
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        expected_tags.sort_unstable();
-        expected_tags.dedup();
+        // Replay proves the original submission, not mutable canonical tags.
+        let replayed = receipt["replayed"] == true;
+        let expected_tags = if replayed {
+            None
+        } else {
+            Some(mneme_core::normalize_tags(
+                write
+                    .input
+                    .tags
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(String::as_str),
+            )?)
+        };
         let mut actual_tags = readback["tags"]
             .as_array()
             .ok_or("episode readback lacks tags")?
@@ -1396,7 +1440,9 @@ impl PreparedEpisode {
             && readback["revises"] == json!(revises)
             && readback["edit_reason"] == json!(reason)
             && readback["source"] == source_json(&expected_source)
-            && actual_tags == expected_tags;
+            && expected_tags
+                .as_ref()
+                .is_none_or(|tags| actual_tags == tags.iter().collect::<Vec<_>>());
         if !valid {
             return Err(invalid(
                 "episode readback authored fields, identity or source proof mismatch",
