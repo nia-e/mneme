@@ -41,7 +41,7 @@ def validate_static(value):
     for key in ("state_dir", "native_cli", "reader_claude", "transcripts_root"):
         if not isinstance(value[key], str):
             raise ValueError("adapter paths must be explicit strings")
-        
+
         if str(canonical_path(value[key])) != value[key]:
             raise ValueError("adapter paths must be normalized absolute paths")
     for key in ("native_cli_sha256", "reader_claude_sha256"):
