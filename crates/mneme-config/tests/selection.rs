@@ -256,6 +256,300 @@ fn strict_closed_duplicate_types_bounds_and_no_diagnostic_secrets() {
         );
     }
 }
+
+const PREFERENCE_CAPTURE: &str = "intent='collaboration-preferences',kinds=['lesson'],evidence_kinds=['user_statement'],required_tags=['collaboration-preference'],allow_associations=false,max_summary_bytes=384,max_body_bytes=1024";
+
+fn capture_config(policy: &str) -> String {
+    format!(
+        "schema='mneme.config.v1'\n{}capture={{{policy}}}",
+        entry("not_personal", FIRST, "workspace='any'")
+    )
+}
+
+#[test]
+fn capture_intent_defaults_to_ordinary_without_name_or_tag_inference() {
+    let cfg = config(&entry("personal", FIRST, "workspace='any'"));
+    assert_eq!(cfg.stores["personal"].capture, CapturePolicy::default());
+    assert_eq!(CapturePolicy::default().intent, CaptureIntent::Ordinary);
+    let encoded = serde_json::to_value(&cfg.stores["personal"].capture).unwrap();
+    assert!(encoded.get("intent").is_none());
+    assert_eq!(
+        serde_json::from_value::<CapturePolicy>(encoded).unwrap(),
+        CapturePolicy::default()
+    );
+
+    // The historical tag and narrow structure alone do not confer an intent.
+    for policy in [
+        PREFERENCE_CAPTURE.replace("intent='collaboration-preferences',", ""),
+        PREFERENCE_CAPTURE.replace("collaboration-preferences", "ordinary"),
+    ] {
+        let cfg = Config::parse(&capture_config(&policy)).unwrap();
+        assert_eq!(
+            cfg.stores["not_personal"].capture.intent,
+            CaptureIntent::Ordinary
+        );
+        assert!(
+            serde_json::to_value(&cfg.stores["not_personal"].capture)
+                .unwrap()
+                .get("intent")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn collaboration_preference_intent_roundtrips_with_extra_ordinary_tags_and_narrower_bounds() {
+    let policy = PREFERENCE_CAPTURE
+        .replace(
+            "['collaboration-preference']",
+            "['collaboration-preference','writing']",
+        )
+        .replace("=384", "=128")
+        .replace("=1024", "=512");
+    let cfg = Config::parse(&capture_config(&policy)).unwrap();
+    let capture = &cfg.stores["not_personal"].capture;
+    assert_eq!(capture.intent, CaptureIntent::CollaborationPreferences);
+    let json = serde_json::to_value(capture).unwrap();
+    assert_eq!(json["intent"], "collaboration-preferences");
+    assert_eq!(
+        serde_json::from_value::<CapturePolicy>(json).unwrap(),
+        *capture
+    );
+    let round: Config = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    round.validate().unwrap();
+    assert_eq!(round, cfg);
+}
+
+#[test]
+fn cross_workspace_intent_roundtrips_with_ordinary_structural_defaults_and_narrowing() {
+    for policy in [
+        "intent='cross-workspace'",
+        "intent='cross-workspace',kinds=['episode','possibility'],evidence_kinds=['tool_result'],required_tags=['rust'],allow_associations=false,max_summary_bytes=400,max_body_bytes=1500",
+    ] {
+        let cfg = Config::parse(&capture_config(policy)).unwrap();
+        let capture = &cfg.stores["not_personal"].capture;
+        assert_eq!(capture.intent, CaptureIntent::CrossWorkspace);
+        let ordinary = Config::parse(&capture_config(
+            &policy.replace("cross-workspace", "ordinary"),
+        ))
+        .unwrap();
+        let mut ordinary_capture = ordinary.stores["not_personal"].capture.clone();
+        ordinary_capture.intent = CaptureIntent::CrossWorkspace;
+        assert_eq!(*capture, ordinary_capture);
+        let json = serde_json::to_value(capture).unwrap();
+        assert_eq!(json["intent"], "cross-workspace");
+        assert_eq!(
+            serde_json::from_value::<CapturePolicy>(json).unwrap(),
+            *capture
+        );
+        let round: Config = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+        round.validate().unwrap();
+        assert_eq!(round, cfg);
+        assert_eq!(Config::parse_overlay(&capture_config(policy)).unwrap(), cfg);
+    }
+
+    for invalid in [
+        "kinds=[]",
+        "evidence_kinds=[]",
+        "kinds=['lesson','lesson']",
+        "required_tags=['core']",
+        "max_summary_bytes=513",
+        "max_body_bytes=2049",
+        "allow_associations='yes'",
+    ] {
+        for intent in ["ordinary", "cross-workspace"] {
+            let text = capture_config(&format!("intent='{intent}',{invalid}"));
+            assert!(Config::parse(&text).is_err(), "{intent}: {invalid}");
+            assert!(Config::parse_overlay(&text).is_err(), "{intent}: {invalid}");
+        }
+    }
+}
+
+#[test]
+fn capture_intent_rejects_unknown_values_wrong_types_and_incompatible_policies() {
+    for intent in [
+        serde_json::json!("secret-token"),
+        serde_json::json!(null),
+        serde_json::json!(true),
+        serde_json::json!(7),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        assert!(
+            serde_json::from_value::<CapturePolicy>(serde_json::json!({
+                "intent": intent,
+            }))
+            .is_err()
+        );
+    }
+    for bad_intent in ["'secret-token'", "true", "7", "[]", "{}"] {
+        let text =
+            capture_config(&PREFERENCE_CAPTURE.replace("'collaboration-preferences'", bad_intent));
+        for result in [Config::parse(&text), Config::parse_overlay(&text)] {
+            let error = result.unwrap_err();
+            assert!(!error.to_string().contains("secret-token"));
+        }
+    }
+    for (from, to) in [
+        ("kinds=['lesson']", "kinds=['episode']"),
+        ("kinds=['lesson']", "kinds=['lesson','episode']"),
+        (
+            "evidence_kinds=['user_statement']",
+            "evidence_kinds=['assistant_assertion']",
+        ),
+        (
+            "evidence_kinds=['user_statement']",
+            "evidence_kinds=['user_statement','tool_result']",
+        ),
+        ("allow_associations=false", "allow_associations=true"),
+        ("max_summary_bytes=384", "max_summary_bytes=385"),
+        ("max_body_bytes=1024", "max_body_bytes=1025"),
+        (
+            "required_tags=['collaboration-preference']",
+            "required_tags=[]",
+        ),
+        (
+            "required_tags=['collaboration-preference']",
+            "required_tags=['writing']",
+        ),
+    ] {
+        let text = capture_config(&PREFERENCE_CAPTURE.replace(from, to));
+        assert!(Config::parse(&text).is_err(), "{from} -> {to}");
+        assert!(Config::parse_overlay(&text).is_err(), "{from} -> {to}");
+    }
+    // Selecting the intent does not silently choose its required structural policy.
+    assert!(Config::parse(&capture_config("intent='collaboration-preferences'")).is_err());
+
+    // Programmatic construction cannot bypass admission, even for an inactive owner.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::parse(&capture_config(PREFERENCE_CAPTURE)).unwrap();
+    let store = cfg.stores.get_mut("not_personal").unwrap();
+    store.active.enabled = false;
+    store.capture.allow_associations = true;
+    assert!(select(&cfg, &context(dir.path())).is_err());
+}
+
+#[test]
+fn capture_intent_is_selected_and_fenced_without_changing_authority() {
+    for (policy, intent) in [
+        (PREFERENCE_CAPTURE, CaptureIntent::CollaborationPreferences),
+        ("intent='cross-workspace'", CaptureIntent::CrossWorkspace),
+    ] {
+        assert_capture_intent_selected_and_fenced(policy, intent);
+    }
+}
+
+fn assert_capture_intent_selected_and_fenced(policy: &str, intent: CaptureIntent) {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::parse(&capture_config(policy)).unwrap();
+    let selected = select(&cfg, &context(dir.path())).unwrap();
+    assert_eq!(selected.active[0].store.capture.intent, intent);
+    assert_eq!(
+        selected.stores[0].store.capture,
+        cfg.stores["not_personal"].capture
+    );
+    assert!(selected.active[0].eligible.record);
+    let round: SelectionSnapshot =
+        serde_json::from_slice(&serde_json::to_vec(&selected).unwrap()).unwrap();
+    round.verify_digest().unwrap();
+    assert_eq!(selected, round);
+
+    let mut ordinary = cfg.clone();
+    ordinary
+        .stores
+        .get_mut("not_personal")
+        .unwrap()
+        .capture
+        .intent = CaptureIntent::Ordinary;
+    let ordinary = select(&ordinary, &context(dir.path())).unwrap();
+    assert_eq!(selected.active[0].eligible, ordinary.active[0].eligible);
+    assert_ne!(selected.digest, ordinary.digest);
+
+    // Each duplicated policy in the frozen snapshot is independently fenced.
+    for field in ["config", "stores", "active"] {
+        let mut changed = selected.clone();
+        let capture = match field {
+            "config" => {
+                &mut changed
+                    .config
+                    .stores
+                    .get_mut("not_personal")
+                    .unwrap()
+                    .capture
+            }
+            "stores" => &mut changed.stores[0].store.capture,
+            "active" => &mut changed.active[0].store.capture,
+            _ => unreachable!(),
+        };
+        capture.intent = CaptureIntent::Ordinary;
+        assert!(changed.verify_digest().is_err(), "{field}");
+    }
+
+    let mut no_write = cfg.clone();
+    no_write
+        .stores
+        .get_mut("not_personal")
+        .unwrap()
+        .permissions
+        .write = false;
+    let selected = select(&no_write, &context(dir.path())).unwrap();
+    assert!(!selected.active[0].eligible.record);
+    assert!(
+        selected.active[0]
+            .require_operation(Operation::Record)
+            .is_err()
+    );
+    let mut isolated = context(dir.path());
+    isolated.profile = "isolated".into();
+    assert!(select(&cfg, &isolated).unwrap().active.is_empty());
+    let mut scoped = cfg;
+    scoped
+        .stores
+        .get_mut("not_personal")
+        .unwrap()
+        .applicability
+        .record
+        .roots = vec![dir.path().join("elsewhere")];
+    assert!(
+        !select(&scoped, &context(dir.path())).unwrap().active[0]
+            .eligible
+            .record
+    );
+}
+
+#[test]
+fn changing_capture_intent_invalidates_filesystem_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = dir.path().join("memory.toml");
+    for original in ["ordinary", "collaboration-preferences", "cross-workspace"] {
+        for changed in ["ordinary", "collaboration-preferences", "cross-workspace"] {
+            if original == changed {
+                continue;
+            }
+            // Keep every structural field identical and valid for all intents.
+            std::fs::write(
+                &user,
+                capture_config(&PREFERENCE_CAPTURE.replace("collaboration-preferences", original)),
+            )
+            .unwrap();
+            let selected = select_workspace(&user, dir.path(), None).unwrap();
+            selected.revalidate_exact().unwrap();
+            std::fs::write(
+                &user,
+                capture_config(&PREFERENCE_CAPTURE.replace("collaboration-preferences", changed)),
+            )
+            .unwrap();
+            assert!(
+                selected.revalidate_exact().is_err(),
+                "{original} -> {changed}"
+            );
+            let fresh = select_workspace(&user, dir.path(), None).unwrap();
+            fresh.revalidate_exact().unwrap();
+            assert_ne!(selected.digest, fresh.digest);
+        }
+    }
+}
+
 #[test]
 fn identity_owner_and_tag_guide_are_validated_without_contact() {
     let base = format!(
@@ -676,11 +970,12 @@ fn declarative_symlinks_do_not_relax_legacy_privacy_markers() {
 fn preference_capture_recipe_is_executable_policy_not_prose() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(&format!(
-        "{}capture={{kinds=['lesson'],evidence_kinds=['user_statement'],required_tags=['collaboration-preference'],allow_associations=false,max_summary_bytes=384,max_body_bytes=1024}}\nretrieval={{tags=['collaboration-preference']}}",
+        "{}capture={{{PREFERENCE_CAPTURE}}}\nretrieval={{tags=['collaboration-preference']}}",
         entry("not_global", FIRST, "workspace='any'")
     ));
     let s = select(&cfg, &context(dir.path())).unwrap();
     let policy = &s.active[0].store.capture;
+    assert_eq!(policy.intent, CaptureIntent::CollaborationPreferences);
     assert_eq!(policy.kinds, vec![CaptureKind::Lesson]);
     assert_eq!(policy.evidence_kinds, vec![EvidenceKind::UserStatement]);
     assert!(!policy.allow_associations);

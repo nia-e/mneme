@@ -27,6 +27,7 @@ ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 PROFILES = ("default", "private", "isolated")
 KINDS = ("lesson", "episode", "possibility")
 EVIDENCE_KINDS = ("user_statement", "assistant_assertion", "tool_call", "tool_result", "memory_delivery")
+CAPTURE_INTENTS = ("ordinary", "collaboration-preferences", "cross-workspace")
 
 
 def _digest(value):
@@ -126,6 +127,28 @@ class RecordPolicy:
     allow_associations: bool = False
     max_summary_bytes: int = 384
     max_body_bytes: int = 1024
+    intent: str = "ordinary"
+
+
+def validate_capture_intent(policy):
+    """Check purpose-specific shape without inferring purpose from names or tags."""
+    if policy.intent not in CAPTURE_INTENTS:
+        raise ValueError("invalid_capture_intent")
+    if policy.intent == "collaboration-preferences" and (
+            tuple(policy.kinds) != ("lesson",)
+            or tuple(policy.evidence_kinds) != ("user_statement",)
+            or policy.allow_associations
+            or policy.max_summary_bytes > 384 or policy.max_body_bytes > 1024
+            or "collaboration-preference" not in policy.required_tags):
+        raise ValueError("invalid_preference_capture_policy")
+
+
+def _record_dict(policy):
+    value = asdict(policy)
+    # Old ordinary snapshots retain their canonical shape and selection digest.
+    if policy.intent == "ordinary":
+        value.pop("intent")
+    return value
 
 
 @dataclass(frozen=True)
@@ -157,7 +180,7 @@ def _policies(value):
     reading = ReadPolicy(_bool(read.get("enabled", False)), _bool(read.get("core", False)), cue)
     if reading.core and not reading.enabled:
         raise ValueError("core requires read permission")
-    record = _object(value.get("record", {}), ("enabled", "kinds", "evidence_kinds", "required_tags",
+    record = _object(value.get("record", {}), ("enabled", "intent", "kinds", "evidence_kinds", "required_tags",
                                                "allow_associations", "max_summary_bytes", "max_body_bytes"))
     summary, body = record.get("max_summary_bytes", 384), record.get("max_body_bytes", 1024)
     if type(summary) is not int or not 1 <= summary <= 512 or type(body) is not int or not 1 <= body <= 2048:
@@ -166,7 +189,9 @@ def _policies(value):
                              _strings(record.get("kinds", []), allowed=KINDS),
                              _strings(record.get("evidence_kinds", []), allowed=EVIDENCE_KINDS),
                              _strings(record.get("required_tags", [])),
-                             _bool(record.get("allow_associations", False)), summary, body)
+                             _bool(record.get("allow_associations", False)), summary, body,
+                             record.get("intent", "ordinary"))
+    validate_capture_intent(recording)
     if set(recording.required_tags) & {"core", "routing-judgment", "possibility", "pursuing", "closed"}:
         raise ValueError("record policy cannot grant core, feedback or lifecycle tags")
     if len(recording.required_tags) > 32:
@@ -221,7 +246,7 @@ class SelectedStore:
         value = {"name": self.name, "service_config": self.service_config,
                 "db_alias": self.db_alias, "database_path": self.database_path,
                 "db_id": self.db_id, "purpose": self.purpose, "when": asdict(self.when),
-                "read": asdict(self.read), "record": asdict(self.record),
+                "read": asdict(self.read), "record": _record_dict(self.record),
                 "maintenance": asdict(self.maintenance), "service_digest": self.service_digest,
                 "workspace_root": self.workspace_root}
         if self.native_binding is not None:
@@ -577,6 +602,19 @@ def native_select(config_path, binary, cwd):
     return NativeSelection(snapshot, config_path, binary, cwd, pin)
 
 
+def _native_record_policy(entry, eligible):
+    capture = _object(entry.get("capture", {}),
+                      ("intent", "kinds", "evidence_kinds", "required_tags",
+                       "allow_associations", "max_summary_bytes", "max_body_bytes"))
+    # Native defaults differ from the opt-in legacy registry defaults. Validate
+    # the complete native policy before narrowing associations for read denial.
+    record = _policies({"record": {"kinds": KINDS, "evidence_kinds": EVIDENCE_KINDS,
+                                  "allow_associations": True, "max_summary_bytes": 512,
+                                  "max_body_bytes": 2048, **capture,
+                                  "enabled": eligible["record"]}})[2]
+    return replace(record, allow_associations=record.allow_associations and eligible["read"])
+
+
 @dataclass(frozen=True)
 class NativeSelection:
     snapshot: dict
@@ -606,6 +644,7 @@ class NativeSelection:
                     or row["name"] in names or store["id"] in owners):
                 raise ValueError("duplicate or invalid native selected identity")
             names.add(row["name"]); owners.add(store["id"])
+            _native_record_policy(store, row["eligible"])
         if len(json.dumps(value).encode()) > MAX_NATIVE_SNAPSHOT_BYTES:
             raise ValueError("native selected snapshot exceeds byte limit")
 
@@ -626,7 +665,6 @@ class NativeSelection:
             entry, eligible = row["store"], row["eligible"]
             owner, guidance = entry["owner"], entry.get("guidance") or {}
             purpose = "Knowledge and experience belonging to this selected owner."
-            capture = entry.get("capture") or {}
             project = self.snapshot.get("project") or {}
             workspace_root = (project.get("root") if project.get("configured") and
                               (entry.get("active") or {}).get("workspace") == "project" else None)
@@ -634,10 +672,7 @@ class NativeSelection:
                        "cwd": self.cwd, "digest": self.digest, "entry": row, "binary_pin": self.binary_pin}
             result.append(SelectedStore(row["name"], self.registry_path, owner["db"], owner.get("path") or "",
                 entry["id"], purpose, read=ReadPolicy(eligible["read"], eligible["core"]),
-                record=RecordPolicy(eligible["record"], tuple(capture.get("kinds", KINDS)),
-                    tuple(capture.get("evidence_kinds", EVIDENCE_KINDS)), tuple(capture.get("required_tags", [])),
-                    capture.get("allow_associations", True) and eligible["read"],
-                    capture.get("max_summary_bytes", 512), capture.get("max_body_bytes", 2048)),
+                record=_native_record_policy(entry, eligible),
                 maintenance=MaintenancePolicy(eligible["maintenance"], (guidance.get("tag_guide") or {}).get("id")),
                 service_digest=self.digest, workspace_root=workspace_root, native_binding=binding, guidance=guidance))
         return tuple(result)

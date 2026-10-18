@@ -239,6 +239,8 @@ def validate_payload(config, job):
     store = selected.named(job["destination"])
     revalidate(selected, operation="record", store_name=store.name)
     rule = store.record
+    from store_registry import validate_capture_intent
+    validate_capture_intent(rule)
     payload = job["payload"]
     if (encoded(job.get("frozen_selection")) != encoded(config["frozen_selection"])
             or store.db_id is not None and job["db_id"] != store.db_id
@@ -251,7 +253,9 @@ def validate_payload(config, job):
             or not job.get("citations")
             or any(citation.get("kind") not in rule.evidence_kinds for citation in job["citations"])):
         raise ValueError("registry_recording_policy_changed")
-    if set(rule.evidence_kinds) == {"user_statement"} and (store.native_binding is not None or "root_user_ref_json" in job):
+    if set(rule.evidence_kinds) == {"user_statement"} and (
+            rule.intent != "ordinary"
+            or store.native_binding is not None or "root_user_ref_json" in job):
         root_ref = job.get("root_user_ref_json")
         if not isinstance(root_ref, str):
             raise ValueError("registry_root_user_evidence")

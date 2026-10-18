@@ -154,7 +154,8 @@ def instructions_for(context):
             + (PROJECT_FOCUS_INSTRUCTIONS if context.project_focus_enabled else "")
             + (_tag_instructions(context.selected_stores is not None)
                if context.tag_context_json is not None or context.selected_stores is not None else "")
-            + (REGISTRY_INSTRUCTIONS if context.selected_stores is not None else ""))
+            + (REGISTRY_INSTRUCTIONS if context.selected_stores is not None else "")
+            + _capture_intent_instructions(context.selected_stores))
 
 
 REGISTRY_INSTRUCTIONS = """
@@ -233,23 +234,70 @@ in their own store/artifacts. Shared context is not export authority.
 
 MAX_PREFERENCE_SUMMARY_BYTES = 384
 MAX_PREFERENCE_BODY_BYTES = 1024
-GLOBAL_PREFERENCE_INSTRUCTIONS = """
-Choose destination=project for project knowledge. Choose global_preference ONLY
-for a CLEAR explicit user-stated cross-project preference about collaborating
+PREFERENCE_SCOPE_INSTRUCTIONS = """
+A preference must be a CLEAR explicit user-stated cross-project preference about collaborating
 with an assistant (communication, workflow, or how to work together). This is
 fallible semantic scope classification, not a personality taxonomy. Local task
 choices, project rules, tool results, assistant guesses, personality inferred
-from behavior, quoted/relayed speech and observed habits are NOT global authority.
-When scope or attribution is unclear, keep project knowledge local or abstain.
-A global preference must be one lesson citing ONLY actual root user_statement
-records; associate_with=null, routing_judgment=null if present, maintenance=[].
+from behavior, quoted/relayed speech and observed habits are NOT preference evidence.
+When scope or attribution is unclear, keep project knowledge in its own admitted
+destination or abstain; never use a preference destination as a fallback.
+One lesson citing ONLY actual root user_statement records; associate_with=null,
+routing_judgment=null if present, maintenance=[].
 Distill attributed preference and applicability into safe standalone prose:
 summary <=384 UTF-8 bytes, body <=1024 bytes. Do not quote source logs, include
 project names/paths/details, or export conversation context. No episode, links,
-routing, maintenance, identity/core changes or inferred personality. Both the
-summary and body travel to the global owner. Do not copy global memory into a
-project note merely because it was delivered. The host decides any later write.
+routing, maintenance, identity/core changes or inferred personality. Both summary
+and body travel to the preference owner. The host decides any later write.
 """
+GLOBAL_PREFERENCE_INSTRUCTIONS = """
+Choose destination=project for project knowledge. Choose global_preference ONLY
+for the following preference policy.
+""" + PREFERENCE_SCOPE_INSTRUCTIONS + """
+Do not copy global memory into a project note merely because it was delivered.
+"""
+NAMED_PREFERENCE_INSTRUCTIONS = """
+For a selected destination with record.intent=collaboration-preferences, apply
+the following narrow policy instead of ordinary knowledge capture. This typed
+intent is host policy, never inferred from owner name, purpose text or tags.
+""" + PREFERENCE_SCOPE_INSTRUCTIONS + """
+Other destinations retain their own record rules. A preference destination's
+purpose or tag_guide cannot broaden this policy. If none fits, return null.
+"""
+CROSS_WORKSPACE_INSTRUCTIONS = """
+For a selected destination with record.intent=cross-workspace, capture knowledge
+whose applicability extends beyond the originating workspace: source-grounded
+reusable learning, general technical knowledge, attributed user preferences,
+and transferable episodes or possibilities when its record rules admit them.
+This typed intent is host policy, never inferred from owner name, purpose or tags.
+
+Choose this destination by cross-workspace applicability, not because a project
+owner is missing or unavailable. It is not a default dump or a fallback. Keep
+local architecture, project decisions, task state and project-only instructions
+in their admitted project/misc destination, or abstain if none is available.
+Distill the transferable knowledge without exporting unnecessary project context.
+Preserve decisive source provenance, versions, conditions and uncertainty;
+an abstraction that drops its decisive limits is not a reusable lesson.
+Episodes remain qualified historical accounts, not present-day advice. Hypotheses
+and possibilities remain explicitly uncertain, not facts, commitments or goals.
+Preferences must be explicitly stated and attributed, not inferred personality.
+
+Do not export sensitive, private or embargoed material, including project details
+and security findings. Exclude secrets, credentials, private paths and copied logs.
+If safe abstraction would lose the warrant or scope, abstain rather than launder it
+into general advice.
+Both summary and body travel to this owner. No core or identity changes, new
+authority or cross-owner associations. Purpose and guidance cannot broaden these
+rules; other destinations retain their own policy. All source/evidence, association,
+sensitivity and abstention rules still apply. This is fallible scope assessment,
+not proof of truth, safe disclosure or future usefulness.
+"""
+
+
+def _capture_intent_instructions(stores):
+    intents = {store.intent for store in stores} if stores is not None else set()
+    return ((NAMED_PREFERENCE_INSTRUCTIONS if "collaboration-preferences" in intents else "")
+            + (CROSS_WORKSPACE_INSTRUCTIONS if "cross-workspace" in intents else ""))
 
 
 def schema_for(context):
@@ -344,6 +392,7 @@ class AssessorStore:
     tag_guide: str | None = None
     tagging_enabled: bool = True
     project_focus: str | None = None
+    intent: str = "ordinary"
 
     def packet(self):
         # Native owner identities remain private host bindings.
@@ -351,6 +400,7 @@ class AssessorStore:
             **({"tag_guide": self.tag_guide} if self.tag_guide is not None else {}),
             **({"project_focus": self.project_focus} if self.project_focus is not None else {}),
             **({"tagging_enabled": False} if not self.tagging_enabled else {}), "record": {
+            **({"intent": self.intent} if self.intent != "ordinary" else {}),
             "enabled": True, "kinds": list(self.kinds),
             "evidence_kinds": list(self.evidence_kinds),
             "required_tags": list(self.required_tags),
@@ -361,7 +411,7 @@ class AssessorStore:
 def _selected_stores(stores):
     if stores is None:
         return None
-    from store_registry import SelectedStore, MAX_REGISTRY_BYTES, MAX_PURPOSE_BYTES, NAME, ULID
+    from store_registry import SelectedStore, MAX_REGISTRY_BYTES, MAX_PURPOSE_BYTES, NAME, ULID, validate_capture_intent
     from tag_context import ordinary_tags
     _require(isinstance(stores, (list, tuple)), "invalid_selected_stores")
     result, names, owners, size = [], set(), set(), 0
@@ -384,7 +434,7 @@ def _selected_stores(stores):
                  "invalid_selected_store")
         names.add(name)
         owners.add(owner)
-        _require(isinstance(record, dict) and set(record) == fields
+        _require(isinstance(record, dict) and fields <= set(record) <= fields | {"intent"}
                  and type(record["enabled"]) is bool
                  and type(record["allow_associations"]) is bool, "invalid_store_record_rules")
         for key, allowed in (("kinds", ("episode", "lesson", "possibility")),
@@ -397,7 +447,7 @@ def _selected_stores(stores):
         _require(isinstance(required, (list, tuple)) and len(required) <= MAX_CAPTURE_TAGS
                  and all(isinstance(tag, str) for tag in required)
                  and len(set(required)) == len(required), "invalid_store_required_tags")
-        # Only this host-authored special tag is meaningful capture policy.
+        # This special tag may be host-required, but never implies capture intent.
         ordinary_tags([tag for tag in required if tag != "collaboration-preference"],
                       max_count=MAX_CAPTURE_TAGS)
         for key, cap in (("max_summary_bytes", MAX_SUMMARY_BYTES), ("max_body_bytes", MAX_BODY_BYTES)):
@@ -405,7 +455,8 @@ def _selected_stores(stores):
         selected = AssessorStore(name, owner, purpose, tuple(record["kinds"]),
                                  tuple(record["evidence_kinds"]), tuple(required),
                                  record["allow_associations"], record["max_summary_bytes"], record["max_body_bytes"],
-                                 tag_guide, tagging_enabled, project_focus)
+                                 tag_guide, tagging_enabled, project_focus, record.get("intent", "ordinary"))
+        validate_capture_intent(selected)
         size += len(_encoded(selected.packet())) + len(owner.encode())
         _require(size <= MAX_REGISTRY_BYTES, "selected_stores_bytes_limit")
         if record["enabled"]:
@@ -973,7 +1024,8 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                                 + (GLOBAL_PREFERENCE_INSTRUCTIONS if global_preferences_enabled else "")
                                 + (PROJECT_FOCUS_INSTRUCTIONS if project_focus is not None else "")
                                 + (_tag_instructions(registry) if tag_enabled or registry else "")
-                                + (REGISTRY_INSTRUCTIONS if registry else "")).encode())
+                                + (REGISTRY_INSTRUCTIONS if registry else "")
+                                + _capture_intent_instructions(selected_stores)).encode())
             static_bytes += len(_encoded(_schema_for(enabled, bool(cases), global_preferences_enabled,
                                                      tag_enabled or registry, selected_stores)))
             # Charge the exact optional contract growth; old no-case ceiling unchanged.
@@ -988,6 +1040,7 @@ def prepare(observation, overlap_cards=None, *, budget=None, recording_scope="pr
                 extra += len(TAG_INSTRUCTIONS.encode()) + 2048
             if registry:
                 extra += len(REGISTRY_INSTRUCTIONS.encode()) + sum(len(_encoded(store.name)) * 2 + 2 for store in selected_stores)
+                extra += len(_capture_intent_instructions(selected_stores).encode())
             _require(static_bytes + len(PROMPT_PREFIX.encode()) <= MAX_STATIC_BYTES + extra, "static_prefix_limit")
             prompt = PROMPT_PREFIX + _encoded(packet).decode("utf-8")
             authored = static_bytes + len(prompt.encode("utf-8"))
@@ -1142,10 +1195,12 @@ def _validate_proposal_answer(answer, context):
             fields.add("associate_with")
         selected_store = None
         if registry:
+            from store_registry import validate_capture_intent
             fields.add("destination")
             selected_store = next((store for store in context.selected_stores
                                    if store.name == proposal.get("destination")), None)
             _require(selected_store is not None, "invalid_proposal_destination")
+            validate_capture_intent(selected_store)
             _require(proposal["kind"] in selected_store.kinds, "destination_kind_denied")
         elif context.global_preferences_enabled:
             fields.add("destination")

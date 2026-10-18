@@ -88,6 +88,77 @@ class StoreRegistryTests(unittest.TestCase):
         self.assertEqual(selected.recordable, ())
         self.assertEqual(selected.maintainable, ())
 
+    def test_capture_intent_defaults_to_ordinary_and_roundtrips_explicitly(self):
+        selected = self.select()
+        self.assertEqual(selected.stores[0].record.intent, "ordinary")
+        # Default serialization preserves existing ordinary snapshot digests.
+        self.assertNotIn("intent", selected.stores[0].to_dict()["record"])
+        self.assertEqual(registry.selection_from_dict(selected.to_dict()), selected)
+        self.entry["record"].update(intent="collaboration-preferences",
+                                    required_tags=["collaboration-preference"])
+        self.write([self.entry])
+        selected = self.select()
+        self.assertEqual(selected.stores[0].record.intent, "collaboration-preferences")
+        self.assertEqual(selected.stores[0].to_dict()["record"]["intent"], "collaboration-preferences")
+        self.assertEqual(registry.selection_from_dict(selected.to_dict()), selected)
+        with self.assertRaises(FrozenInstanceError):
+            selected.stores[0].record.intent = "ordinary"
+
+    def test_capture_intent_is_not_inferred_from_alias_or_required_tag(self):
+        self.entry.update(name="global_preference", db_alias="user")
+        self.entry["record"].update(required_tags=["collaboration-preference"])
+        self.write([self.entry])
+        self.assertEqual(self.select().stores[0].record.intent, "ordinary")
+
+    def test_cross_workspace_intent_roundtrips_ordinary_capture_envelope(self):
+        self.entry["record"] = {"enabled": True, "intent": "cross-workspace", "kinds": list(registry.KINDS),
+                                "evidence_kinds": list(registry.EVIDENCE_KINDS), "required_tags": [],
+                                "allow_associations": True, "max_summary_bytes": 512, "max_body_bytes": 2048}
+        self.write([self.entry])
+        selected = self.select()
+        policy = selected.stores[0].record
+        self.assertEqual((policy.intent, policy.kinds, policy.evidence_kinds, policy.required_tags,
+                          policy.allow_associations, policy.max_summary_bytes, policy.max_body_bytes),
+                         ("cross-workspace", registry.KINDS, registry.EVIDENCE_KINDS, (), True, 512, 2048))
+        self.assertEqual(registry.selection_from_dict(selected.to_dict()), selected)
+        self.assertEqual(selected.stores[0].to_dict()["record"]["intent"], "cross-workspace")
+        for change in ({"max_summary_bytes": 513}, {"max_body_bytes": 2049}, {"required_tags": ["core"]}):
+            self.write([{**self.entry, "record": {**self.entry["record"], **change}}])
+            with self.subTest(change=change), self.assertRaises(ValueError), \
+                 patch.object(registry, "load_config", side_effect=AssertionError("owner parsed")):
+                self.select()
+
+    def test_capture_intent_rejects_unknown_or_contradictory_rules_before_owner_read(self):
+        preference = {**self.entry["record"], "intent": "collaboration-preferences",
+                      "required_tags": ["collaboration-preference"]}
+        invalid = [{"intent": value} for value in (None, True, [], "future", "global_preference")]
+        invalid += [{"kinds": ["episode"]}, {"kinds": ["lesson", "possibility"]},
+                    {"evidence_kinds": ["assistant_assertion"]},
+                    {"evidence_kinds": ["user_statement", "tool_result"]},
+                    {"allow_associations": True}, {"max_summary_bytes": 385},
+                    {"max_body_bytes": 1025}, {"required_tags": []}]
+        with patch.object(registry, "load_config", side_effect=AssertionError("owner parsed")):
+            for change in invalid:
+                self.write([{**self.entry, "record": {**preference, **change}}])
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    self.select()
+
+    def test_intent_only_change_revokes_frozen_selection(self):
+        self.entry["record"].update(required_tags=["collaboration-preference"])
+        for before, after in (("ordinary", "collaboration-preferences"),
+                              ("collaboration-preferences", "cross-workspace"), ("cross-workspace", "ordinary")):
+            with self.subTest(before=before, after=after):
+                self.entry["record"]["intent"] = before
+                self.write([self.entry])
+                selected = self.select()
+                original = selected.to_dict()
+                self.entry["record"]["intent"] = after
+                self.write([self.entry])
+                with self.assertRaisesRegex(ValueError, "changed"):
+                    registry.revalidate(selected, operation="record", store_name="company")
+                self.assertEqual(selected.to_dict(), original)
+                self.assertNotEqual(self.select().digest, selected.digest)
+
     def test_permission_types_combinations_bounds_and_authority_tags(self):
         changes = [{"read": {"enabled": 1}}, {"read": {"core": True}},
                    {"record": {"enabled": True}}, {"record": {"max_summary_bytes": 513}},

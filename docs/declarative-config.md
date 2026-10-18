@@ -28,6 +28,13 @@ permissions = { read = true, write = true }
 delivery = { core = true, context = true }
 background = { recall = true, record = true, maintenance = false }
 
+[stores.global.capture]
+intent = "cross-workspace"
+
+# Broad reads do not require automatic export from private project work.
+[stores.global.applicability.record]
+excluded_roots = ["/absolute/private-work"]
+
 [stores.project]
 id = "01ARZ3NDEKTSV4RRFFQ69G5FA2"
 owner = { url = "http://127.0.0.1:19000/", db = "project" }
@@ -92,6 +99,41 @@ roots = ["/absolute/project"]
 The same scoped table exists for `core`, `context`, `recall` and `maintenance`, with
 `roots` and `excluded_roots`. A migration must preserve each existing operation's
 scope, not broaden global auto-write because the name sounds global.
+
+### What automatic recording is for
+
+`capture.intent` is independent of workspace scope. Its default, `"ordinary"`,
+retains ordinary source-bound lessons, episodes and possibilities within the
+configured capture limits. Neither a store named `global` nor a required tag
+implicitly changes that intent.
+
+Use `"cross-workspace"` for knowledge whose usefulness extends beyond the source
+workspace: reusable technical lessons, collaboration preferences, and qualified
+experiences or open questions. Ordinary capture kinds, evidence, bounds and
+same-owner associations remain available. Select by applicability, not by where
+the turn happened or whether another destination is missing. Project architecture,
+local decisions and task state belong in their admitted project/misc destination;
+general lessons retain decisive source, revision and uncertainty qualifications.
+Private or embargoed project/security details are not exportable merely because
+they might be reusable. Use operation exclusions for a deterministic no-record
+boundary, as above; the assessor's semantic scope judgment remains fallible.
+
+Use `"collaboration-preferences"` for explicit user-stated cross-project
+preferences about working with an assistant only. For that narrower recipe set
+`kinds = ["lesson"]`, `evidence_kinds = ["user_statement"]`,
+`required_tags = ["collaboration-preference"]`, `allow_associations = false`,
+`max_summary_bytes = 384` and `max_body_bytes = 1024`. Native
+validation requires lesson/user-statement-only capture, no associations, the
+`collaboration-preference` tag, and summary/body limits no greater than 384/1024
+UTF-8 bytes. The assessor receives explicit instructions to exclude project-only
+decisions, inferred preferences, quoted speech and private project details, and
+to abstain when attribution or scope is unclear. These structural checks and
+instructions do not make semantic classification infallible.
+
+Deploy the native client and matching Codex helper bundle together before adding
+this field. Older native clients reject the new field rather than silently
+ignoring it. A changed intent invalidates frozen selections and queued work;
+start fresh sessions instead of rewriting retained ledgers.
 
 ## Background instructions and tag guides
 

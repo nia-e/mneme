@@ -66,6 +66,100 @@ class NativeHookConfigTests(unittest.TestCase):
         self.assertEqual((rule.kinds, rule.evidence_kinds, rule.required_tags, rule.allow_associations,
                           rule.max_summary_bytes, rule.max_body_bytes),
                          (("lesson",), ("user_statement",), ("collaboration-preference",), False, 384, 1024))
+        self.assertEqual(rule.intent, "ordinary")
+
+    def test_native_capture_intent_is_explicit_and_unknown_policy_fails_before_work(self):
+        value = copy.deepcopy(self.raw_snapshot)
+        value["active"][0]["store"]["capture"]["intent"] = "collaboration-preferences"
+        selected = registry.NativeSelection(value, self.value["memory_config"], self.value["native_cli"])
+        self.assertEqual(selected.named("named").record.intent, "collaboration-preferences")
+        invalid = [{"intent": value} for value in (None, True, [], "future")]
+        invalid += [{"kinds": ["lesson", "episode"]}, {"evidence_kinds": ["user_statement", "tool_result"]},
+                    {"allow_associations": True}, {"required_tags": []},
+                    {"max_summary_bytes": 385}, {"max_body_bytes": 1025}]
+        with patch("store_registry.native_bridge", side_effect=AssertionError("owner contacted")), \
+             patch("hooks._reader_worker", side_effect=AssertionError("worker started")):
+            for change in invalid:
+                changed = copy.deepcopy(value)
+                changed["active"][0]["store"]["capture"].update(change)
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    registry.NativeSelection(changed, self.value["memory_config"], self.value["native_cli"]).recordable
+
+    def test_native_intent_change_fences_an_existing_recording_job(self):
+        import registry_recording
+        value = copy.deepcopy(self.raw_snapshot)
+        value["active"][0]["store"]["capture"]["intent"] = "collaboration-preferences"
+        self.selected = registry.NativeSelection(value, self.value["memory_config"], self.value["native_cli"])
+        config = self.load()
+        job = {"destination": "named", "proposal_kind": "lesson", "db_id": DB,
+               "frozen_selection": copy.deepcopy(config["frozen_selection"]),
+               "tagging_enabled": True, "root_user_ref_json": "{\"ordinal\":0}",
+               "payload": {"summary": "User prefers brief answers.",
+                           "body": "The user explicitly asked for brief answers across projects.",
+                           "tags": ["collaboration-preference"]},
+               "citations": [{"kind": "user_statement", "source_ref_json": "{\"ordinal\":0}",
+                              "source_field": "content[0].text", "rendering": "exact_text"}]}
+        original = copy.deepcopy(job)
+        with patch("store_registry.native_bridge", side_effect=AssertionError("owner contacted")):
+            self.assertEqual(registry_recording.validate_payload(config, job).record.intent,
+                             "collaboration-preferences")
+            changed = copy.deepcopy(value)
+            changed["active"][0]["store"]["capture"]["intent"] = "ordinary"
+            changed["digest"] = "c" * 64
+            self.selected = registry.NativeSelection(changed, self.value["memory_config"], self.value["native_cli"])
+            with self.assertRaisesRegex(ValueError, "configuration changed"):
+                registry_recording.validate_payload(config, job)
+            # Reloading new authority does not silently rebind the frozen job.
+            with self.assertRaisesRegex(ValueError, "registry_recording_policy_changed"):
+                registry_recording.validate_payload(self.load(), job)
+        self.assertEqual(job, original)
+
+    def test_native_cross_workspace_job_fence_does_not_reset_paid_accounting(self):
+        import reader_worker
+        import registry_recording
+        value = copy.deepcopy(self.raw_snapshot)
+        value["active"][0]["store"]["capture"] = {"intent": "cross-workspace"}
+        self.selected = registry.NativeSelection(value, self.value["memory_config"], self.value["native_cli"])
+        config = self.load()
+        policy = self.selected.named("named").record
+        self.assertEqual((policy.kinds, policy.evidence_kinds, policy.required_tags,
+                          policy.allow_associations, policy.max_summary_bytes, policy.max_body_bytes),
+                         (registry.KINDS, registry.EVIDENCE_KINDS, (), True, 512, 2048))
+        job = {"destination": "named", "proposal_kind": "episode", "db_id": DB,
+               "frozen_selection": copy.deepcopy(config["frozen_selection"]), "tagging_enabled": True,
+               "payload": {"summary": "The experiment found a bounded failure.",
+                           "body": "The tool reported failure under the tested conditions.", "tags": []},
+               "citations": [{"kind": "tool_result", "source_ref_json": '{"ordinal":2}',
+                              "source_field": "output", "rendering": "exact_text"}]}
+        original = copy.deepcopy(job)
+        event = {"cwd": str(self.root), "session_id": "session-1"}
+        with patch("store_registry.native_bridge", side_effect=AssertionError("owner contacted")):
+            registry_runtime.admit_session(config, event)
+            ledger = hooks._state_path(self.root / "state", "session-1")
+            old_ledger = ledger.read_bytes()
+            ok, _ = reader_worker._state(config, "session-1", lambda data: (data.update(
+                attempts=3, input_tokens=21, output_tokens=4, reservation={"paid": "original-intent"}), True))
+            self.assertTrue(ok)
+            self.assertEqual(registry_recording.validate_payload(config, job).record.intent, "cross-workspace")
+            changed = copy.deepcopy(value)
+            changed["active"][0]["store"]["capture"]["intent"] = "ordinary"
+            changed["digest"] = "c" * 64
+            self.selected = registry.NativeSelection(changed, self.value["memory_config"], self.value["native_cli"])
+            with self.assertRaisesRegex(ValueError, "configuration changed"):
+                registry_recording.validate_payload(config, job)
+            fresh = self.load()
+            with self.assertRaisesRegex(ValueError, "registry_recording_policy_changed"):
+                registry_recording.validate_payload(fresh, job)
+            with self.assertRaisesRegex(hooks.HookError, "registry selection changed"):
+                registry_runtime.admit_session(fresh, event)
+            self.assertEqual(ledger.read_bytes(), old_ledger)
+            # Even the worker's lower-level config refresh retains already-paid
+            # usage and reservation identity; a new intent is not a fresh budget.
+            self.assertTrue(reader_worker._state(fresh, "session-1", lambda data: (None, False))[0])
+            data = json.loads(reader_worker._paths(fresh, "session-1")[0].read_text())
+            self.assertEqual((data["attempts"], data["input_tokens"], data["output_tokens"]), (3, 21, 4))
+            self.assertEqual(data["reservation"], {"paid": "original-intent"})
+        self.assertEqual(job, original)
 
     def test_logical_config_path_survives_leaf_and_parent_symlinks(self):
         generation = self.root / "generation"

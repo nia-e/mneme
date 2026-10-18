@@ -205,6 +205,9 @@ impl Default for StoreBackground {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CapturePolicy {
+    /// Semantic recording purpose, independent of owner names and ordinary tags.
+    #[serde(default, skip_serializing_if = "CaptureIntent::is_ordinary")]
+    pub intent: CaptureIntent,
     #[serde(default = "capture_kinds")]
     pub kinds: Vec<CaptureKind>,
     #[serde(default = "evidence_kinds")]
@@ -217,6 +220,19 @@ pub struct CapturePolicy {
     pub max_summary_bytes: u32,
     #[serde(default = "body_bound")]
     pub max_body_bytes: u32,
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureIntent {
+    #[default]
+    Ordinary,
+    CollaborationPreferences,
+    CrossWorkspace,
+}
+impl CaptureIntent {
+    fn is_ordinary(&self) -> bool {
+        *self == Self::Ordinary
+    }
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
@@ -259,6 +275,7 @@ fn body_bound() -> u32 {
 impl Default for CapturePolicy {
     fn default() -> Self {
         Self {
+            intent: CaptureIntent::Ordinary,
             kinds: capture_kinds(),
             evidence_kinds: evidence_kinds(),
             required_tags: vec![],
@@ -542,6 +559,21 @@ impl Config {
                         "capture required_tags must be unique non-reserved ordinary tags",
                     ));
                 }
+            }
+            if policy.intent == CaptureIntent::CollaborationPreferences
+                && (policy.kinds != [CaptureKind::Lesson]
+                    || policy.evidence_kinds != [EvidenceKind::UserStatement]
+                    || policy.allow_associations
+                    || policy.max_summary_bytes > 384
+                    || policy.max_body_bytes > 1024
+                    || !policy
+                        .required_tags
+                        .iter()
+                        .any(|tag| tag == "collaboration-preference"))
+            {
+                return Err(error(
+                    "collaboration-preferences capture requires only lesson/user_statement, no associations, at most 384/1024 summary/body bytes and the collaboration-preference tag",
+                ));
             }
             if let Some(filter) = &store.retrieval {
                 if filter.tags.is_empty() || filter.tags.len() > 32 {

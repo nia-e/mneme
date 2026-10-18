@@ -1,16 +1,17 @@
 """Pure finite registry-assessor contracts: no providers, files or native writes."""
 import copy
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict, replace
 import hashlib
 import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import recording_contract as contract
 from fixture_source_turn import delivery_packet, refresh_delivery_packet
-from store_registry import SelectedStore, RecordPolicy
+from store_registry import NativeSelection, Selection, SelectedStore, RecordPolicy
 
 PROJECT, PERSONAL, MISC, READONLY = (str(i) * 26 for i in range(4))
 
@@ -29,6 +30,27 @@ def stores():
                   required_tags=["collaboration-preference"], allow_associations=False,
                   max_summary_bytes=384, max_body_bytes=1024),
             store("scratch", MISC), store("archive", READONLY, enabled=False)]
+
+
+def preference_store(name="arbitrary-user-lane", owner=PERSONAL):
+    return store(name, owner, intent="collaboration-preferences", kinds=["lesson"],
+                 evidence_kinds=["user_statement"], required_tags=["collaboration-preference"],
+                 allow_associations=False, max_summary_bytes=384, max_body_bytes=1024)
+
+
+def native_acquisition(*authored):
+    from registry_recording import Acquisition
+    snapshot = {"schema": "mneme.config-selection.v1", "digest": "a" * 64,
+                "cwd": "/synthetic-unconfigured-workspace", "config": {},
+                "project": {"configured": False, "root": None, "overlay": None},
+                "active": [{"name": value["name"], "store": {
+                    "id": value["db_id"], "owner": {"url": "http://127.0.0.1:1", "db": "user", "path": None},
+                    "capture": {key: item for key, item in value["record"].items() if key != "enabled"}},
+                    "eligible": {"read": True, "write": True, "core": True, "context": True,
+                                 "recall": True, "record": value["record"]["enabled"], "maintenance": False}}
+                    for value in authored]}
+    selected = NativeSelection(snapshot, "/synthetic/memory.toml", "/synthetic/mnemed")
+    return Acquisition(selected, selected.recordable, [], 0, 10, {})
 
 
 def observation(packet=None):
@@ -129,16 +151,17 @@ class RegistryRecordingContractTests(unittest.TestCase):
             self.assertEqual(reason, "invalid_selected_tag_guidance")
 
     def test_user_only_capture_requires_root_user_not_later_relabelled_message(self):
-        selected = [store("arbitrary-user-lane", PROJECT, evidence_kinds=["user_statement"])]
         source = observation()
         source["evidence"][1] = {"kind": "user_statement", "ref": source["evidence"][1]["ref"],
             "content": [{"content_index": 0, "text": "later message is not the admitted root"}]}
-        prompt, context = contract.prepare(source, selected_stores=selected)
-        self.assertIsNotNone(prompt)
-        self.assertEqual(contract.validate_answer(answer("arbitrary-user-lane"), context)["proposal"].evidence[0].kind,
-                         "user_statement")
-        with self.assertRaisesRegex(ValueError, "destination_root_user_evidence_required"):
-            contract.validate_answer(answer("arbitrary-user-lane", evidence_ids=["e002"]), context)
+        for policy in (store("arbitrary-user-lane", PROJECT, evidence_kinds=["user_statement"]), preference_store()):
+            with self.subTest(intent=policy["record"].get("intent", "ordinary")):
+                prompt, context = contract.prepare(source, selected_stores=[policy])
+                self.assertIsNotNone(prompt)
+                self.assertEqual(contract.validate_answer(answer("arbitrary-user-lane"), context)["proposal"].evidence[0].kind,
+                                 "user_statement")
+                with self.assertRaisesRegex(ValueError, "destination_root_user_evidence_required"):
+                    contract.validate_answer(answer("arbitrary-user-lane", evidence_ids=["e002"]), context)
 
     def test_one_finite_schema_has_three_destinations_not_readonly(self):
         packet, context = self.prepared()
@@ -222,6 +245,191 @@ class RegistryRecordingContractTests(unittest.TestCase):
         _, context = self.prepared([store("global_preference", MISC)])
         selected = contract.validate_answer(answer("global_preference", kind="episode", evidence_ids=["e002"]), context)
         self.assertEqual(selected["proposal"].kind, "episode")
+
+    def test_native_capture_intent_reaches_actual_assessor_instructions(self):
+        authored = preference_store()
+        acquisition = native_acquisition(authored)
+        self.assertEqual(acquisition.stores[0].record.intent, "collaboration-preferences")
+        offered = acquisition.scope_options["selected_stores"][0]
+        self.assertEqual(offered["record"]["intent"], "collaboration-preferences")
+        prompt, context = contract.prepare(with_tool_exchange(observation()), **acquisition.scope_options)
+        self.assertIsNotNone(prompt, context)
+        self.assertEqual(context.selected_stores[0].intent, "collaboration-preferences")
+        packet = json.loads(prompt.split("PAYLOAD:\n", 1)[1])
+        self.assertEqual(packet["selected_stores"][0]["record"]["intent"], "collaboration-preferences")
+        self.assertNotIn("project-private", prompt)
+        self.assertEqual([binding.kind for binding in context.bindings], ["user_statement"])
+        instructions = contract.instructions_for(context)
+        self.assertIn(contract.NAMED_PREFERENCE_INSTRUCTIONS, instructions)
+        self.assertEqual(context.authored_bytes, len(instructions.encode())
+                         + len(contract._encoded(contract.schema_for(context))) + len(prompt.encode()))
+        # These are semantic assessor instructions, not a claim that the host
+        # can decide from note prose whether a project-local choice generalizes.
+        normalized = " ".join(instructions.split())
+        for requirement in ("explicit user-stated cross-project preference", "Local task choices, project rules",
+                            "assistant guesses", "quoted/relayed speech", "NOT preference evidence",
+                            "never use a preference destination as a fallback",
+                            "project names/paths/details", "identity/core changes or inferred personality"):
+            self.assertIn(requirement, normalized)
+        accepted = contract.validate_answer(answer(authored["name"]), context)["proposal"]
+        self.assertEqual(accepted.tags, ("collaboration-preference",))
+        self.assertEqual(accepted.evidence[0].kind, "user_statement")
+        self.assertIsNone(accepted.associate_with)
+
+    def test_ordinary_intent_has_no_alias_or_tag_inferred_preference_semantics(self):
+        for name in ("global", "global_preference", "cross-workspace", "arbitrary-user-lane"):
+            tagged = store(name, PERSONAL, required_tags=["collaboration-preference"])
+            packet, context = self.prepared([tagged])
+            self.assertEqual(context.selected_stores[0].intent, "ordinary")
+            self.assertNotIn("intent", packet["selected_stores"][0]["record"])
+            instructions = contract.instructions_for(context)
+            self.assertNotIn(contract.NAMED_PREFERENCE_INSTRUCTIONS, instructions)
+            self.assertNotIn(contract.CROSS_WORKSPACE_INSTRUCTIONS, instructions)
+            # Adding an explicit ordinary spelling changes no behavior.
+            _, explicit = self.prepared([{**tagged, "record": {**tagged["record"], "intent": "ordinary"}}])
+            self.assertEqual(instructions, contract.instructions_for(explicit))
+            _, preference = self.prepared([preference_store(name)])
+            self.assertNotEqual(instructions, contract.instructions_for(preference))
+            accepted = contract.validate_answer(answer(name, kind="episode", evidence_ids=["e002"]), context)
+            self.assertEqual(accepted["proposal"].kind, "episode")
+
+    def test_native_cross_workspace_intent_keeps_general_evidence_and_capture_kinds(self):
+        authored = store("mechanism-notes", MISC, intent="cross-workspace")
+        acquisition = native_acquisition(authored)
+        self.assertEqual(acquisition.stores[0].record.intent, "cross-workspace")
+        self.assertEqual(acquisition.scope_options["selected_stores"][0]["record"]["intent"], "cross-workspace")
+        prompt, context = contract.prepare(with_tool_exchange(observation()), **acquisition.scope_options)
+        self.assertIsNotNone(prompt, context)
+        packet = json.loads(prompt.split("PAYLOAD:\n", 1)[1])
+        self.assertEqual(packet["selected_stores"][0]["record"]["intent"], "cross-workspace")
+        self.assertEqual(context.selected_stores[0].intent, "cross-workspace")
+        self.assertEqual([binding.kind for binding in context.bindings],
+                         ["user_statement", "assistant_assertion", "tool_call", "tool_result"])
+        instructions = contract.instructions_for(context)
+        self.assertIn(contract.CROSS_WORKSPACE_INSTRUCTIONS, instructions)
+        self.assertNotIn(contract.NAMED_PREFERENCE_INSTRUCTIONS, instructions)
+        self.assertEqual(context.authored_bytes, len(instructions.encode())
+                         + len(contract._encoded(contract.schema_for(context))) + len(prompt.encode()))
+        # Scope/privacy remain semantic assessor instructions, not a prose
+        # classifier or a claim that all supplied evidence is safe to export.
+        normalized = " ".join(instructions.split())
+        for requirement in ("cross-workspace applicability", "not a default dump or a fallback",
+                            "source provenance, versions, conditions and uncertainty",
+                            "Do not export sensitive, private or embargoed material", "security findings"):
+            self.assertIn(requirement, normalized)
+        for kind in ("lesson", "episode", "possibility"):
+            for evidence in ("e001", "e002", "t001_call", "t001_result"):
+                with self.subTest(kind=kind, evidence=evidence):
+                    proposal = contract.validate_answer(answer(authored["name"], kind=kind,
+                        evidence_ids=[evidence], summary="x" * 512, body="x" * 2048), context)["proposal"]
+                    self.assertEqual(proposal.kind, kind)
+                    self.assertEqual(proposal.tags, ())
+        for fields in ({"summary": "é" * 257}, {"body": "é" * 1025}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, "invalid_proposal_text"):
+                contract.validate_answer(answer(authored["name"], **fields), context)
+
+    def test_cross_workspace_mixed_scope_keeps_rules_and_associations_owner_qualified(self):
+        broad = store("mechanism-notes", MISC, intent="cross-workspace")
+        selected = [store("global", PROJECT), preference_store(), broad]
+        overlap = [{"id": "same-native-id", "kind": "semantic", "summary": "Scoped earlier note", "db_id": owner}
+                   for owner in (PROJECT, MISC)]
+        prompt, context = contract.prepare(with_tool_exchange(observation()), overlap, selected_stores=selected)
+        self.assertIsNotNone(prompt, context)
+        instructions = contract.instructions_for(context)
+        self.assertIn(contract.CROSS_WORKSPACE_INSTRUCTIONS, instructions)
+        self.assertIn(contract.NAMED_PREFERENCE_INSTRUCTIONS, instructions)
+        self.assertEqual(context.authored_bytes, len(instructions.encode())
+                         + len(contract._encoded(contract.schema_for(context))) + len(prompt.encode()))
+        self.assertEqual([item.intent for item in context.selected_stores],
+                         ["ordinary", "collaboration-preferences", "cross-workspace"])
+        result = contract.validate_answer(answer("mechanism-notes", evidence_ids=["t001_result"],
+                                          associate_with="overlap002"), context)["proposal"]
+        self.assertEqual(result.associate_with.db_id, MISC)
+        with self.assertRaisesRegex(ValueError, "association_owner_mismatch"):
+            contract.validate_answer(answer("mechanism-notes", associate_with="overlap001"), context)
+        with self.assertRaisesRegex(ValueError, "destination_evidence_denied"):
+            contract.validate_answer(answer("arbitrary-user-lane", evidence_ids=["t001_result"]), context)
+        self.assertEqual(contract.validate_answer(answer("global", kind="episode", evidence_ids=["e002"]),
+                                                  context)["proposal"].kind, "episode")
+        # Cross-workspace intent does not override an owner's narrower rules.
+        restricted = {**broad, "record": {**broad["record"], "kinds": ["lesson"], "allow_associations": False}}
+        _, narrow = self.prepared([restricted])
+        with self.assertRaisesRegex(ValueError, "destination_kind_denied"):
+            contract.validate_answer(answer("mechanism-notes", kind="episode"), narrow)
+
+    def test_preference_intent_requires_coherent_structural_envelope(self):
+        policy = preference_store()
+        changes = [{"intent": value} for value in (None, True, [], "future", "global_preference")]
+        changes += [{"kinds": ["episode"]}, {"kinds": ["lesson", "possibility"]},
+                    {"evidence_kinds": ["assistant_assertion"]},
+                    {"evidence_kinds": ["user_statement", "tool_result"]},
+                    {"allow_associations": True}, {"max_summary_bytes": 385},
+                    {"max_body_bytes": 1025}, {"required_tags": []}]
+        for change in changes:
+            with self.subTest(change=change):
+                prompt, reason = contract.prepare(observation(), selected_stores=[{
+                    **policy, "record": {**policy["record"], **change}}])
+                self.assertIsNone(prompt)
+                self.assertEqual(reason, "invalid_capture_intent" if "intent" in change
+                                 else "invalid_preference_capture_policy")
+
+    def test_preference_intent_enforces_citations_tags_limits_and_no_associations(self):
+        selected = [store("project", PROJECT), preference_store()]
+        overlaps = [{"id": "same-native-id", "kind": "semantic", "summary": "Earlier preference",
+                     "db_id": PERSONAL}]
+        prompt, context = contract.prepare(with_tool_exchange(observation()), overlaps, selected_stores=selected)
+        self.assertIsNotNone(prompt, context)
+        accepted = contract.validate_answer(answer("arbitrary-user-lane", tags=["communication"]), context)["proposal"]
+        self.assertEqual(set(accepted.tags), {"communication", "collaboration-preference"})
+        for fields, reason in (({"kind": "episode"}, "destination_kind_denied"),
+                               ({"evidence_ids": ["e002"]}, "destination_evidence_denied"),
+                               ({"evidence_ids": ["t001_call"]}, "destination_evidence_denied"),
+                               ({"evidence_ids": ["t001_result"]}, "destination_evidence_denied"),
+                               ({"associate_with": "overlap001"}, "destination_association_denied"),
+                               ({"summary": "é" * 193}, "destination_text_limit"),
+                               ({"body": "é" * 513}, "destination_text_limit"),
+                               ({"tags": ["collaboration-preference"]}, "invalid_topic_tags")):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, reason):
+                contract.validate_answer(answer("arbitrary-user-lane", **fields), context)
+
+    def test_explicit_user_only_replay_requires_root_proof_without_changing_ordinary_compatibility(self):
+        import registry_recording
+        for intent in ("collaboration-preferences", "cross-workspace"):
+            configured = SelectedStore("arbitrary-user-lane", "/synthetic/owner.json", "user", "/synthetic/db",
+                PERSONAL, "Explicit collaboration preferences.", record=RecordPolicy(
+                    True, ("lesson",), ("user_statement",), ("collaboration-preference",), False,
+                    384, 1024, intent))
+            self.assertIsNone(configured.native_binding)
+            _, context = self.prepared([configured])
+            proposal = contract.validate_answer(answer(configured.name), context)["proposal"]
+            selected = Selection("/synthetic/stores.json", "a" * 64, "/synthetic", "async", (), (configured,))
+            config = {"frozen_selection": selected.to_dict()}
+            job = {"destination": configured.name, "proposal_kind": proposal.kind, "db_id": PERSONAL,
+                   "frozen_selection": config["frozen_selection"], "root_user_ref_json": context.root_user_ref_json,
+                   "payload": {"summary": proposal.summary, "body": proposal.body, "tags": list(proposal.tags)},
+                   "citations": [asdict(citation) for citation in proposal.evidence]}
+            # Selection admission is tested separately; this isolates the frozen
+            # replay envelope without contacting any owner or reading config files.
+            with patch("registry_recording.selection", return_value=selected) as current, \
+                 patch("registry_recording.revalidate", return_value=selected), \
+                 patch("store_registry.native_bridge", side_effect=AssertionError("owner contacted")), \
+                 patch("store_registry.load_config", side_effect=AssertionError("owner config read")):
+                self.assertEqual(registry_recording.validate_payload(config, job), configured)
+                missing = copy.deepcopy(job)
+                missing.pop("root_user_ref_json")
+                with self.assertRaisesRegex(ValueError, "registry_root_user_evidence"):
+                    registry_recording.validate_payload(config, missing)
+                for change in ({"source_ref_json": '{"ordinal":1}'},
+                               {"source_field": "content[1].text"}, {"rendering": "canonical_json"}):
+                    invalid = copy.deepcopy(job)
+                    invalid["citations"][0].update(change)
+                    with self.subTest(change=change), self.assertRaisesRegex(ValueError, "registry_root_user_evidence"):
+                        registry_recording.validate_payload(config, invalid)
+                ordinary = replace(configured, record=replace(configured.record, intent="ordinary"))
+                current.return_value = replace(selected, stores=(ordinary,))
+                ordinary_config = {"frozen_selection": current.return_value.to_dict()}
+                missing["frozen_selection"] = ordinary_config["frozen_selection"]
+                self.assertEqual(registry_recording.validate_payload(ordinary_config, missing), ordinary)
 
     def test_readonly_unknown_and_unavailable_names_are_never_valid(self):
         _, context = self.prepared()
