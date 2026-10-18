@@ -17,6 +17,7 @@ New to Mneme? Start with [installation and a first session](../README.md).
 | Guide | Use it to |
 | --- | --- |
 | [Codex integration](../integrations/codex/README.md) | Set up project recall and optional background recording |
+| [Nix client package](nix.md) | Build remote clients and use per-user Home Manager configuration |
 | [Declarative configuration](declarative-config.md) | Select existing owners and separate activation, grants and delivery while retaining background instructions |
 | [Remote CLI](remote-cli.md) | Connect to an existing memory server over HTTP or SSH |
 | [Memory libraries](memory-libraries.md) | Read across enrolled projects and read-only snapshots |
