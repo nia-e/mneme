@@ -51,6 +51,20 @@ silently replacing a user binding. Process/background settings remain user-owned
 A project entry in an overlay can omit `active.roots`: its containing project root
 supplies the scope. Disabled project presence still prevents `misc` fallback.
 
+Both user and project TOML files may be symlinks, including Home Manager's
+relative/chained links. The target must be a readable regular file of at most
+64 KiB. Broken links, loops, directories, FIFOs and oversized files fail closed,
+not as missing configuration. The overlay's project directory still supplies its
+scope even when the file itself lives in `/nix/store`. This does not permit
+symlinked project `.mneme` directories, legacy privacy metadata, databases, bodies
+or leases.
+
+A configured process freezes the logical config path, resolved target and file
+contents. Changing the target (even to identical contents in a new Home Manager
+generation) invalidates that selection: restart configured MCP processes/start
+fresh sessions and reassess queued work after activating a new generation. A
+symlink is not a live hot-reload mechanism.
+
 Be deliberate about grants: omitted permissions, delivery and per-store background
 switches have enabled defaults. A minimal example is not a scope-preserving
 migration of an older installation.

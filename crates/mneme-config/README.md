@@ -109,7 +109,7 @@ an ambient native library grant.
 
 ## Frozen contract
 
-`select_workspace` loads bounded non-symlink regular files and returns
+`select_workspace` loads bounded regular files and returns
 `mneme.config-selection.v1`. The snapshot freezes raw-file SHA-256 witnesses,
 fully resolved typed config, lexical/canonical origins, profile, project boundaries,
 store inventory, operation eligibility, admitted libraries and default selection.
@@ -117,6 +117,20 @@ Product snapshots also freeze the original selection request: explicit/discovery
 mode, the exact user path even when absent, original lexical cwd, requested
 profile and accepted lexical/device-exemption witnesses. Its digest hashes the
 complete deterministic JSON snapshot with `digest=""`.
+
+Declarative user and project TOML may be symlinks, including relative/chained
+links managed by Home Manager. Their resolved targets must be readable regular
+files within the same 64 KiB bound. Broken/looping links, directories, FIFOs and
+oversized targets refuse; they never count as absent configuration. The logical
+project location supplies overlay scope, not the target's directory. Legacy
+privacy/routing metadata and the project `.mneme` directory retain their stricter
+non-symlink admission; database, body and lease rules are unchanged.
+
+Snapshots retain the logical request path and canonical target witnesses.
+Retargeting a config link invalidates an existing selection even when the new
+target has identical bytes. Restart configured MCP processes/start fresh sessions
+after a Home Manager generation switch; queued work must be reselected and
+reassessed, never silently redirected.
 
 A digest is an integrity/staleness witness, **not authentication or write authority**.
 Consumers call `revalidate_exact` before native contact and before applying frozen

@@ -67,6 +67,82 @@ class NativeHookConfigTests(unittest.TestCase):
                           rule.max_summary_bytes, rule.max_body_bytes),
                          (("lesson",), ("user_statement",), ("collaboration-preference",), False, 384, 1024))
 
+    def test_logical_config_path_survives_leaf_and_parent_symlinks(self):
+        generation = self.root / "generation"
+        generation.mkdir()
+        target = generation / "memory.toml"
+        target.write_text('schema = "mneme.config.v1"\n')
+        leaf = self.root / "managed-memory.toml"
+        leaf.symlink_to(target)
+        directory = self.root / "managed-config"
+        directory.symlink_to(generation, target_is_directory=True)
+        for logical in (leaf, directory / "memory.toml"):
+            with self.subTest(logical=logical):
+                self.value["memory_config"] = str(logical)
+                self.write()
+                self.selected = registry.NativeSelection(self.raw_snapshot, str(logical), self.value["native_cli"], str(self.root))
+                with patch("store_registry.native_select", return_value=self.selected) as select:
+                    config = self.load()
+                self.assertEqual(config["memory_config"], logical)
+                self.assertEqual(config["frozen_selection"]["config_path"], str(logical))
+                self.assertTrue(all(str(call.args[0]) == str(logical) for call in select.call_args_list))
+
+    def test_symlink_generation_change_does_not_rebind_existing_session(self):
+        logical = Path(self.value["memory_config"])
+        targets = [self.root / name for name in ("generation-one.toml", "generation-two.toml")]
+        for target in targets:
+            target.write_text('schema = "mneme.config.v1"\n')
+        logical.symlink_to(targets[0])
+
+        def select(path, *_):
+            self.assertEqual(str(path), str(logical))
+            value = copy.deepcopy(self.raw_snapshot)
+            value["sources"] = [{"role": "user", "path": str(logical.resolve(strict=True)),
+                                 "sha256": hashlib.sha256(targets[0].read_bytes()).hexdigest()}]
+            return registry.NativeSelection(value, str(logical), self.value["native_cli"], str(self.root))
+
+        with patch("store_registry.native_select", side_effect=select):
+            config = self.load()
+            event = {"cwd": str(self.root), "session_id": "session-1"}
+            registry_runtime.admit_session(config, event)
+            ledger = hooks._state_path(self.root / "state", "session-1")
+            original = ledger.read_bytes()
+            logical.unlink()
+            logical.symlink_to(targets[1])
+            with self.assertRaisesRegex(ValueError, "configuration changed"):
+                registry_runtime.selection(config)
+            with self.assertRaisesRegex(hooks.HookError, "registry selection changed"):
+                # A fresh selection is not permission to replace an old ledger.
+                # Real native snapshots include sources in their digest.
+                self.raw_snapshot["digest"] = "c" * 64
+                registry_runtime.admit_session(self.load(), event)
+            self.assertEqual(ledger.read_bytes(), original)
+
+    def test_native_target_rejection_precedes_state_admission(self):
+        logical = Path(self.value["memory_config"])
+        logical.symlink_to(self.root / "absent.toml")
+        with patch("store_registry.native_select", side_effect=ValueError("native configuration refused")) as select:
+            with self.assertRaisesRegex(hooks.HookError, "reprepare and use a fresh session"):
+                self.load()
+        select.assert_called_once()
+        self.assertEqual(select.call_args.args[0], str(logical))
+        self.assertFalse((self.root / "state").exists())
+
+    def test_only_native_memory_toml_gets_symlink_admission(self):
+        target = self.root / "target"
+        target.write_text("fixture")
+        linked = self.root / "linked"
+        linked.symlink_to(target)
+        for field in ("state_dir", "native_cli", "reader_codex", "reader_auth"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "symlink"):
+                registry_runtime.validate_native_static({**self.value, field: str(linked)})
+
+    def test_native_memory_path_rejects_nonabsolute_unbounded_and_ambiguous_strings(self):
+        for value in (None, True, "relative.toml", "/tmp/../memory.toml", "/tmp//memory.toml",
+                      "//host/memory.toml", "/tmp/memory.toml\x00", "/" + "a" * 4096):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                registry_runtime.validate_native_static({**self.value, "memory_config": value})
+
     def test_background_off_keeps_core_and_manual_grants(self):
         self.selected = registry.NativeSelection(snapshot(self.root, background=False), self.value["memory_config"], self.value["native_cli"])
         config = self.load()

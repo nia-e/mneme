@@ -113,9 +113,9 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
     Workspace adapters choose only retained ledger locations and reader binaries.
     Store activation, purpose, grants and background policy remain native-owned.
     """
-    from registry_runtime import NATIVE_SCHEMA, validate_native_static
+    from registry_runtime import NATIVE_SCHEMA, native_memory_config_path, validate_native_static
     from store_registry import native_select
-    path = canonical_path(Path(memory_config).resolve(strict=True))
+    path = native_memory_config_path(Path(memory_config).absolute())
     native = canonical_path(Path(native_cli).resolve(strict=True))
     workspace = canonical_path(Path(cwd).resolve(strict=True))
     reader = canonical_path(Path(reader_codex).resolve(strict=True))

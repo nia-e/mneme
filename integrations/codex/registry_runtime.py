@@ -10,6 +10,7 @@ import re
 
 from librarian_policy import resolve as resolve_budget
 from misc_binding import canonical_path, validate_binding
+from profile import MAX_PATH_BYTES
 from store_registry import (Selection, project_store, resolve, admit_project_workspace)
 from tag_config import FIELDS as TAG_FIELDS, validate as validate_tags
 
@@ -169,11 +170,30 @@ NATIVE_SCHEMA = "mneme.codex-hooks.config.v13"
 NATIVE_FIELDS = {"schema", "state_dir", "memory_config", "native_cli", "reader_codex", "reader_codex_sha256"}
 
 
+def native_memory_config_path(value):
+    """Keep the logical declarative input; native selection pins its target/bytes.
+
+    Unlike state, credentials or legacy registry files, this read-only TOML input
+    may be a Home Manager symlink. Do not resolve it here: later revalidation must
+    observe a generation switch through the same logical path. Target admission,
+    including broken links and bounded regular-file reads, is native-owned.
+    """
+    if (not isinstance(value, (str, Path)) or "\x00" in str(value)
+            or len(str(value).encode()) > MAX_PATH_BYTES):
+        raise ValueError("memory config path must be a bounded normalized absolute path")
+    path = Path(value)
+    if (not path.is_absolute() or str(path) != str(value)
+            or ".." in path.parts or str(value).startswith("//")):
+        raise ValueError("memory config path must be a bounded normalized absolute path")
+    return path
+
+
 def validate_native_static(value):
     if (not isinstance(value, dict) or value.get("schema") != NATIVE_SCHEMA
             or not NATIVE_FIELDS <= set(value) or set(value) - NATIVE_FIELDS - {"reader_auth", "workspace_adapters"}):
         raise ValueError("invalid native hook adapter fields")
-    for key in ("state_dir", "memory_config", "native_cli", "reader_codex", "reader_auth"):
+    native_memory_config_path(value["memory_config"])
+    for key in ("state_dir", "native_cli", "reader_codex", "reader_auth"):
         if key in value: canonical_path(value[key])
     if not isinstance(value["reader_codex_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["reader_codex_sha256"]):
         raise ValueError("invalid reader executable hash")
@@ -220,7 +240,8 @@ def load_native(value, path, raw, *, cwd=None, workspace_binding=None):
                   frozen_selection=selected.to_dict(), _config_path=Path(path).resolve(),
                   _registry_config_sha256=hashlib.sha256(raw).hexdigest())
     resolve_budget(config)
-    for key in ("state_dir", "memory_config", "native_cli", "reader_codex", "reader_auth"):
+    config["memory_config"] = native_memory_config_path(config["memory_config"])
+    for key in ("state_dir", "native_cli", "reader_codex", "reader_auth"):
         if key in config: config[key] = Path(config[key]).resolve()
     if _bounded_json(Path(path), MAX_CONFIG, with_raw=True)[1] != raw:
         raise ValueError("native hook adapter changed during selection")

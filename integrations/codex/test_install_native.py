@@ -21,7 +21,8 @@ class NativeInstallTests(unittest.TestCase):
         self.memory = self.fixture.base / "memory.toml"
         self.memory.write_text('schema = "mneme.config.v1"\n')
         self.snapshot = {"schema": "mneme.config-selection.v1", "digest": "a" * 64,
-            "sources": [{"role": "user", "path": str(self.memory), "sha256": install.digest(self.memory.read_bytes())}],
+            "sources": [{"role": "user", "path": str(self.memory), "sha256": install.digest(self.memory.read_bytes()),
+                         "bytes": len(self.memory.read_bytes())}],
             "config": {"background": {"enabled": False, "model": "gpt-6.1-sol", "effort": "medium"}},
             "stores": [], "active": [], "read_default": None, "cwd": str(self.fixture.project), "project": {"configured": False}}
         self.select = patch("store_registry.native_select", return_value=SimpleNamespace(snapshot=self.snapshot))
@@ -60,6 +61,84 @@ class NativeInstallTests(unittest.TestCase):
         self.memory.unlink()
         self.select.stop()
         self.assertEqual(install.uninstall(result["receipt"])["status"], "configuration removed")
+
+    def test_native_source_byte_witness_is_preserved_and_bounded(self):
+        plan = self.plan()
+        self.assertEqual(plan["memory_config"]["sources"], self.snapshot["sources"])
+        self.assertEqual(plan["memory_config"]["sources"][0]["bytes"], len(self.memory.read_bytes()))
+        for invalid in (None, True, -1, 1.5, "25", install.MAX_NATIVE_SOURCE_BYTES + 1):
+            candidate = copy.deepcopy(plan)
+            candidate["memory_config"]["sources"][0]["bytes"] = invalid
+            candidate["plan_sha256"] = install.plan_hash(candidate)
+            with self.subTest(bytes=invalid), self.assertRaisesRegex(ValueError, "invalid native memory config pin"):
+                install.validate_plan(candidate)
+        for change in ("missing", "unknown"):
+            candidate = copy.deepcopy(plan)
+            source = candidate["memory_config"]["sources"][0]
+            if change == "missing":
+                del source["bytes"]
+            else:
+                source["unknown"] = True
+            candidate["plan_sha256"] = install.plan_hash(candidate)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "invalid native memory config pin"):
+                install.validate_plan(candidate)
+
+    def test_source_inventory_uses_byte_envelope_not_eight_ancestor_quota(self):
+        plan = self.plan()
+        source = plan["memory_config"]["sources"][0]
+        plan["memory_config"]["sources"] = [
+            {**source, "path": str(self.fixture.base / f"ancestor-{index}.toml")} for index in range(9)]
+        plan["plan_sha256"] = install.plan_hash(plan)
+        install.validate_plan(plan)
+        for kind in ("aggregate-input", "wire-envelope"):
+            candidate = copy.deepcopy(plan)
+            for row in candidate["memory_config"]["sources"]:
+                if kind == "aggregate-input":
+                    row["bytes"] = install.MAX_NATIVE_SOURCE_BYTES
+                else:
+                    row["path"] += "a" * (64 * 1024)
+            candidate["plan_sha256"] = install.plan_hash(candidate)
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "exceeds byte bounds"):
+                install.validate_plan(candidate)
+
+    def test_symlink_path_is_preserved_and_target_only_drift_refuses_install(self):
+        original = self.memory
+        self.memory = self.fixture.base / "managed-memory.toml"
+        self.memory.symlink_to(original)
+        replacement = self.fixture.base / "generation-two.toml"
+        replacement.write_bytes(original.read_bytes())
+
+        def select(path, *_):
+            self.assertEqual(path, str(self.memory))
+            value = copy.deepcopy(self.snapshot)
+            # Native selection supplies the canonical source witness. Even if a
+            # caller returned an unchanged digest, target-only drift is fenced.
+            value["sources"][0]["path"] = str(Path(path).resolve(strict=True))
+            return SimpleNamespace(snapshot=value)
+
+        with patch("store_registry.native_select", side_effect=select):
+            plan = self.plan()
+            self.assertEqual(plan["memory_config"]["path"], str(self.memory))
+            self.assertEqual(plan["memory_config"]["sources"][0]["path"], str(original))
+            self.assertEqual(install.runtime_configs(plan)[1]["memory_config"], str(self.memory))
+            outputs = install.config_outputs(plan, {"config.toml": None, "hooks.json": None})
+            import tomllib
+            args = tomllib.loads(outputs["config.toml"].decode())["mcp_servers"][install.SERVER]["args"]
+            self.assertEqual(args[args.index("--memory-config") + 1], str(self.memory))
+            self.memory.unlink()
+            self.memory.symlink_to(replacement)
+            with self.assertRaisesRegex(ValueError, "memory config changed"):
+                install.apply(plan)
+            self.assertFalse(self.fixture.prefix.exists())
+
+    def test_native_rejection_of_config_target_stops_prepare_without_publication(self):
+        self.memory.unlink()
+        self.memory.symlink_to(self.fixture.base / "missing.toml")
+        with patch("store_registry.native_select", side_effect=ValueError("native configuration refused")) as select:
+            with self.assertRaisesRegex(ValueError, "native configuration refused"):
+                self.plan()
+        self.assertEqual(select.call_args.args[0], str(self.memory))
+        self.assertFalse(self.fixture.prefix.exists())
 
     def test_native_source_drift_refuses_without_running_changed_selector(self):
         plan = self.plan()
@@ -115,12 +194,15 @@ class NativeInstallTests(unittest.TestCase):
         adapters = [{"root": str(self.fixture.project), "state_dir": str(self.fixture.project / ".mneme/retained"),
                      "reader_codex": str(self.fixture.native("codex"))}]
         destination = self.fixture.base / "device-hooks.json"
-        args = dict(memory_config=self.memory, native_cli=self.fixture.native("mnemed"), cwd=self.fixture.project,
+        logical = self.fixture.base / "managed-memory.toml"
+        logical.symlink_to(self.memory)
+        args = dict(memory_config=logical, native_cli=self.fixture.native("mnemed"), cwd=self.fixture.project,
                     state_dir=self.fixture.base / "device-state", reader_codex=self.fixture.native("codex"),
                     hooks_program=Path(hook_launcher.__file__), hook_config_path=destination,
                     workspace_adapters=adapters)
         prepared = registry_config.prepare_native(**args)
         config = prepared["hook_config"]
+        self.assertEqual(config["memory_config"], str(logical))
         self.assertEqual(config["workspace_adapters"][0]["state_dir"], adapters[0]["state_dir"])
         self.assertNotIn("recording_mode", config)
         start = prepared["global_hooks"]["hooks"]["SessionStart"]
@@ -134,6 +216,9 @@ class NativeInstallTests(unittest.TestCase):
             registry_config.prepare_native(**args)
 
     def test_copied_native_adapter_uses_its_bundle_without_source_tree(self):
+        logical = self.fixture.base / "managed-memory.toml"
+        logical.symlink_to(self.memory)
+        self.memory = logical
         native = self.fixture.native("mnemed")
         native.write_text("#!" + sys.executable + "\nimport json\nprint(json.dumps(" + repr(self.snapshot) + "))\n")
         plan = self.plan(program_root=Path(install.__file__).parent)
@@ -146,6 +231,8 @@ import hooks, store_registry, registry_runtime, guidance, registry_config
 config = hooks._config(Path(sys.argv[2]), cwd=sys.argv[3])
 assert config["schema"] == "mneme.codex-hooks.config.v13"
 assert config["recording_mode"] == "off"
+assert str(config["memory_config"]) == sys.argv[4]
+assert config["memory_config"].is_symlink()
 assert registry_runtime.selection(config).stores == ()
 for module in (hooks, store_registry, registry_runtime, guidance, registry_config):
     assert Path(module.__file__).parent == Path(sys.argv[1])
@@ -153,7 +240,7 @@ print(json.dumps({"schema": config["schema"], "selected": 0}))
 """
         process = subprocess.run([sys.executable, "-I", "-c", script,
             str(self.fixture.prefix / "lib"), str(self.fixture.prefix / "config/hooks.json"),
-            str(self.fixture.project)], capture_output=True, text=True, timeout=10, check=True,
+            str(self.fixture.project), str(self.memory)], capture_output=True, text=True, timeout=10, check=True,
             cwd=self.fixture.base)
         self.assertEqual(json.loads(process.stdout), {"schema": "mneme.codex-hooks.config.v13", "selected": 0})
         self.assertFalse((self.fixture.project / ".mneme/codex-hook-state").exists())

@@ -475,13 +475,13 @@ fn file_admission_refuses_oversize_and_directory() {
 }
 #[cfg(unix)]
 #[test]
-fn file_and_workspace_symlinks_refuse_and_alias_exclusion_frozen() {
+fn config_symlink_is_allowed_but_workspace_symlink_and_alias_exclusion_stay_fenced() {
     use std::os::unix::fs::symlink;
     let dir = tempfile::tempdir().unwrap();
     let user = write_user(dir.path(), &config(""));
     let alias = dir.path().join("alias.toml");
     symlink(&user, &alias).unwrap();
-    assert!(Config::load(&alias).is_err());
+    assert_eq!(Config::load(&alias).unwrap(), Config::load(&user).unwrap());
     let work = dir.path().join("work");
     std::fs::create_dir(&work).unwrap();
     symlink(dir.path(), work.join(".mneme")).unwrap();
@@ -503,6 +503,174 @@ fn file_and_workspace_symlinks_refuse_and_alias_exclusion_frozen() {
     let s = select(&cfg, &ctx).unwrap();
     assert!(s.active.is_empty());
     assert_eq!(s.origins.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_chained_declarative_symlinks_keep_logical_project_scope() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let work = root.join("work");
+    std::fs::create_dir_all(work.join(".mneme")).unwrap();
+    std::fs::create_dir(root.join("generated")).unwrap();
+    let user = root.join("user.toml");
+    std::fs::write(
+        &user,
+        format!(
+            "schema='mneme.config.v1'{}",
+            entry("ordinary", FIRST, "workspace='no-project'")
+        ),
+    )
+    .unwrap();
+    symlink(user.file_name().unwrap(), root.join("user-link")).unwrap();
+    symlink("user-link", root.join("memory.toml")).unwrap();
+    let overlay = root.join("generated/project.toml");
+    std::fs::write(
+        &overlay,
+        format!(
+            "schema='mneme.config.v1'{}",
+            entry("work", SECOND, "workspace='project'")
+        ),
+    )
+    .unwrap();
+    symlink("project.toml", root.join("generated/link")).unwrap();
+    symlink("../../generated/link", work.join(".mneme/memory.toml")).unwrap();
+
+    let snapshot = select_workspace(&root.join("memory.toml"), &work, None).unwrap();
+    assert_eq!(snapshot.project.root.as_ref(), Some(&work));
+    assert_eq!(snapshot.project.overlay.as_ref(), Some(&overlay));
+    assert_eq!(
+        snapshot.config.stores["work"].active.roots,
+        vec![work.clone()]
+    );
+    assert_eq!(store_names(&snapshot), vec!["work"]);
+    assert_eq!(
+        snapshot.request.as_ref().unwrap().user_path.as_ref(),
+        Some(&root.join("memory.toml"))
+    );
+    snapshot.revalidate_exact().unwrap();
+
+    // Explicitly choosing the overlay alias must still avoid merging the same
+    // owner twice, and infer scope from its .mneme location, not its target.
+    let direct = select_workspace(&work.join(".mneme/memory.toml"), &work, None).unwrap();
+    assert_eq!(direct.config.stores["work"].active.roots, vec![work]);
+    assert_eq!(store_names(&direct), vec!["work"]);
+    direct.revalidate_exact().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn declarative_symlink_retarget_or_edit_invalidates_frozen_admission() {
+    use std::os::unix::fs::symlink;
+    for same_bytes in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.toml");
+        let new = dir.path().join("new.toml");
+        let link = dir.path().join("memory.toml");
+        std::fs::write(&old, "schema='mneme.config.v1'").unwrap();
+        std::fs::write(
+            &new,
+            if same_bytes {
+                "schema='mneme.config.v1'"
+            } else {
+                "schema='mneme.config.v1'\n[background]\nenabled=false"
+            },
+        )
+        .unwrap();
+        symlink(&old, &link).unwrap();
+        let snapshot = select_workspace(&link, dir.path(), None).unwrap();
+        snapshot.revalidate_exact().unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(&new, &link).unwrap();
+        assert!(
+            snapshot.revalidate_exact().is_err(),
+            "retarget invalidates even identical bytes: {same_bytes}"
+        );
+        let fresh = select_workspace(&link, dir.path(), None).unwrap();
+        fresh.revalidate_exact().unwrap();
+        std::fs::write(
+            &new,
+            "schema='mneme.config.v1'\n[workspace]\nprofile='isolated'",
+        )
+        .unwrap();
+        assert!(fresh.revalidate_exact().is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_declarative_symlinks_fail_closed_and_keep_diagnostics_sanitized() {
+    use std::os::unix::fs::symlink;
+    for kind in [
+        "dangling",
+        "loop",
+        "directory",
+        "fifo",
+        "oversized",
+        "invalid",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("private-target-secret");
+        let user = dir.path().join("memory.toml");
+        match kind {
+            "dangling" => {}
+            "loop" => symlink(&user, &target).unwrap(),
+            "directory" => std::fs::create_dir(&target).unwrap(),
+            "fifo" => {
+                use std::os::unix::ffi::OsStrExt;
+                let path = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
+                // SAFETY: this live CString supplies a readable NUL-terminated
+                // path for the whole call; mkfifo neither writes nor retains it.
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            }
+            "oversized" => std::fs::write(&target, vec![b'x'; MAX_CONFIG_BYTES + 1]).unwrap(),
+            "invalid" => std::fs::write(&target, "secret='private-contents-secret'").unwrap(),
+            _ => unreachable!(),
+        }
+        symlink(&target, &user).unwrap();
+        for result in [
+            Config::load(&user).map(|_| ()),
+            select_workspace(&user, dir.path(), None).map(|_| ()),
+        ] {
+            let message = result.expect_err(kind).to_string();
+            assert!(!message.contains("private-target-secret"), "{message}");
+            assert!(!message.contains("private-contents-secret"), "{message}");
+        }
+        // A present invalid overlay cannot disappear into misc fallback either.
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(work.join(".mneme")).unwrap();
+        symlink(&target, work.join(".mneme/memory.toml")).unwrap();
+        assert!(discover_workspace(None, &work, None).is_err(), "{kind}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn declarative_symlinks_do_not_relax_legacy_privacy_markers() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(work.join(".mneme")).unwrap();
+    let user = write_user(
+        dir.path(),
+        &config(&entry("personal", FIRST, "workspace='any'")),
+    );
+    symlink(&user, dir.path().join("memory.toml")).unwrap();
+    let privacy = dir.path().join("private.json");
+    std::fs::write(
+        &privacy,
+        r#"{"schema":"mneme.profile.v2","mode":"isolated","stores":[]}"#,
+    )
+    .unwrap();
+    symlink(&privacy, work.join(".mneme/profile.json")).unwrap();
+    assert!(select_workspace(&dir.path().join("memory.toml"), &work, None).is_err());
+    std::fs::remove_file(work.join(".mneme/profile.json")).unwrap();
+    std::fs::copy(&privacy, work.join(".mneme/profile.json")).unwrap();
+    let snapshot = select_workspace(&dir.path().join("memory.toml"), &work, None).unwrap();
+    assert_eq!(snapshot.profile, "isolated");
+    assert!(snapshot.active.is_empty());
+    assert!(snapshot.explicit_store("personal").is_err());
 }
 #[test]
 fn preference_capture_recipe_is_executable_policy_not_prose() {

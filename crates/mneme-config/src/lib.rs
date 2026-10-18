@@ -1,6 +1,7 @@
 //! Bounded declarative metadata. This crate never contacts, opens or starts an owner.
 //! Activation, authority, delivery and authored guidance selectors are independent.
 
+mod declarative_file;
 mod legacy_workspace;
 mod selection;
 pub use selection::*;
@@ -363,8 +364,10 @@ impl Config {
         Ok(config)
     }
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = legacy_workspace::read(path).map_err(|_| error("cannot read configuration: use a regular non-symlink file of at most 65536 bytes"))?.ok_or_else(|| error("configuration file does not exist"))?;
-        let text = std::str::from_utf8(&raw).map_err(|_| error("configuration must be UTF-8"))?;
+        let source = declarative_file::read(path)?
+            .ok_or_else(|| error("configuration file does not exist"))?;
+        let text =
+            std::str::from_utf8(&source.bytes).map_err(|_| error("configuration must be UTF-8"))?;
         Self::parse(text)
     }
     /// Overlay addition is explicit: duplicate names/identities cannot replace a user owner.

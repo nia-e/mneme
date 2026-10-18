@@ -519,27 +519,21 @@ pub fn default_user_path() -> Result<PathBuf> {
     Ok(dir.join("mneme/memory.toml"))
 }
 fn load_source(path: &Path, role: &str) -> Result<(Config, ConfigSource)> {
-    let raw = legacy_workspace::read(path)
-        .map_err(|_| {
-            error("cannot read configuration: repair missing, oversized or symlinked metadata")
-        })?
-        .ok_or_else(|| {
-            error("configuration file is missing; create memory.toml or choose --config")
-        })?;
+    let source = declarative_file::read(path)?.ok_or_else(|| {
+        error("configuration file is missing; create memory.toml or choose --config")
+    })?;
+    let raw = source.bytes;
     let text = std::str::from_utf8(&raw).map_err(|_| error("configuration must be UTF-8"))?;
     let config = if role == "project" {
         Config::parse_overlay(text)?
     } else {
         Config::parse(text)?
     };
-    let path = path
-        .canonicalize()
-        .map_err(|_| error("cannot resolve configuration source"))?;
     Ok((
         config,
         ConfigSource {
             role: role.into(),
-            path,
+            path: source.path,
             sha256: sha256(&raw),
             bytes: raw.len(),
         },
@@ -640,10 +634,7 @@ fn select_workspace_inner(
                     context.project.root = Some(parent.to_owned());
                 }
                 let overlay = mneme.join("memory.toml");
-                if legacy_workspace::inspect(&overlay)
-                    .map_err(|_| error("invalid project memory.toml metadata"))?
-                    .is_some()
-                {
+                if declarative_file::present(&overlay)? {
                     // The nearest configured boundary owns selection. Ancestor
                     // overlays remain witnesses only through configured presence.
                     if overlay_root.is_none() && context.project.root.as_deref() == Some(parent) {
@@ -916,13 +907,7 @@ fn resolve_request(request: &SelectionRequest) -> Result<Option<SelectionSnapsho
                 .ok_or_else(|| error("explicit selection request requires user_path"))?,
         ),
         SelectionRequestMode::Discover => match request.user_path.as_deref() {
-            Some(path)
-                if legacy_workspace::inspect(path)
-                    .map_err(|_| error("cannot inspect default memory.toml"))?
-                    .is_some() =>
-            {
-                Some(path)
-            }
+            Some(path) if declarative_file::present(path)? => Some(path),
             _ => None,
         },
     };
@@ -975,6 +960,68 @@ fn has_native_overlay(origins: &[PathBuf]) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn default_discovery_follows_config_symlinks_but_not_broken_link_absence() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("managed.toml");
+        let default = dir.path().join("memory.toml");
+        assert!(
+            discover_from_default(&default, dir.path(), None)
+                .unwrap()
+                .is_none()
+        );
+        symlink("managed.toml", &default).unwrap();
+        assert!(discover_from_default(&default, dir.path(), None).is_err());
+        symlink("memory.toml", &target).unwrap();
+        assert!(discover_from_default(&default, dir.path(), None).is_err());
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&target, "schema='mneme.config.v1'").unwrap();
+        let selected = discover_from_default(&default, dir.path(), None)
+            .unwrap()
+            .unwrap();
+        selected.revalidate_exact().unwrap();
+        std::fs::remove_file(&target).unwrap();
+        assert!(selected.revalidate_exact().is_err());
+        // A dangling parent directory link is also present invalid metadata.
+        assert!(discover_from_default(&default.join("child.toml"), dir.path(), None).is_err());
+        std::fs::create_dir(&target).unwrap();
+        assert!(discover_from_default(&default, dir.path(), None).is_err());
+        assert!(
+            discover_from_default(&default.join("child.toml"), dir.path(), None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovered_overlay_retarget_invalidates_even_identical_contents() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let default = dir.path().join("absent-user.toml");
+        std::fs::create_dir(dir.path().join(".mneme")).unwrap();
+        let old = dir.path().join("old.toml");
+        let new = dir.path().join("new.toml");
+        let overlay = dir.path().join(".mneme/memory.toml");
+        std::fs::write(&old, "schema='mneme.config.v1'").unwrap();
+        std::fs::copy(&old, &new).unwrap();
+        symlink(&old, &overlay).unwrap();
+        let selected = discover_from_default(&default, dir.path(), None)
+            .unwrap()
+            .unwrap();
+        selected.revalidate_exact().unwrap();
+        std::fs::remove_file(&overlay).unwrap();
+        symlink(&new, &overlay).unwrap();
+        assert!(selected.revalidate_exact().is_err());
+        discover_from_default(&default, dir.path(), None)
+            .unwrap()
+            .unwrap()
+            .revalidate_exact()
+            .unwrap();
+    }
+
     #[test]
     fn absent_user_path_is_frozen_and_new_file_invalidates_original_request() {
         let dir = tempfile::tempdir().unwrap();

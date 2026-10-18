@@ -36,6 +36,9 @@ SAVE_TOOLS = [*EPISODE_TOOLS, "save"]
 TOOLS = [*SAVE_TOOLS, "concern"]
 NATIVE_TOOLS = ["core", "recall_context", "get", "list", "neighbors", "save", "episode", "status"]
 MAX_CONFIG_BYTES = 1024 * 1024
+# ConfigSource witnesses use mneme-config's per-file and aggregate input bounds.
+MAX_NATIVE_SOURCE_BYTES = 64 * 1024
+MAX_NATIVE_SOURCE_TOTAL_BYTES = 4 * MAX_NATIVE_SOURCE_BYTES
 CONFIG_NAMES = ("config.toml", "hooks.json")
 LEGACY_DESTINATIONS = (("bin/mnemed", True), ("bin/mneme-mcp", True),
                        *(("lib/" + name, False) for name in PROGRAMS[:4]))
@@ -150,10 +153,9 @@ def revalidate_store_registry(plan):
 
 def memory_config_input(path, native_cli, cwd, snapshot=None):
     """One native bounded selection; never interpret TOML policy in Python."""
+    from registry_runtime import native_memory_config_path
     from store_registry import native_select
-    path = Path(path)
-    if not path.is_absolute() or path.resolve(strict=True) != path:
-        raise ValueError("memory config must be a canonical absolute regular file")
+    path = native_memory_config_path(path)
     if snapshot is None:
         snapshot = native_select(str(path), str(native_cli), str(cwd)).snapshot
     return {"path": str(path), "digest": snapshot["digest"], "sources": snapshot["sources"]}
@@ -350,14 +352,21 @@ def validate_plan(plan):
                 or not isinstance(pin, dict) or set(pin) != {"path", "digest", "sources"}
                 or not isinstance(pin["path"], str) or not Path(pin["path"]).is_absolute()
                 or not isinstance(pin["digest"], str) or not HEX_SHA256.fullmatch(pin["digest"])
-                or not isinstance(pin["sources"], list) or len(pin["sources"]) > 8
-                or any(not isinstance(source, dict) or set(source) != {"role", "path", "sha256"}
+                or not isinstance(pin["sources"], list)
+                or any(not isinstance(source, dict) or set(source) != {"role", "path", "sha256", "bytes"}
                     or not isinstance(source["role"], str) or len(source["role"]) > 128
                     or not isinstance(source["path"], str) or not Path(source["path"]).is_absolute()
                     or not isinstance(source["sha256"], str) or not HEX_SHA256.fullmatch(source["sha256"])
+                    or type(source["bytes"]) is not int or not 0 <= source["bytes"] <= MAX_NATIVE_SOURCE_BYTES
                     for source in pin["sources"])
                 or "store_registry" in plan or "global_preferences" in plan):
             raise ValueError("invalid native memory config pin")
+        from store_registry import MAX_NATIVE_SNAPSHOT_BYTES
+        if (sum(source["bytes"] for source in pin["sources"]) > MAX_NATIVE_SOURCE_TOTAL_BYTES
+                or len(json.dumps(pin, ensure_ascii=False, separators=(",", ":")).encode()) > MAX_NATIVE_SNAPSHOT_BYTES):
+            raise ValueError("native memory config pin exceeds byte bounds")
+        from registry_runtime import native_memory_config_path
+        native_memory_config_path(pin["path"])
     elif "existing_owner_binary" in plan:
         raise ValueError("retained owner binary requires native memory config")
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
@@ -544,12 +553,11 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
     if recording_mode == "automatic" and recall_mode != "async":
         raise ValueError("automatic recording requires --recall-mode async")
     if memory_config is not None:
-        memory_path = Path(memory_config)
-        if not memory_path.is_absolute() or memory_path.resolve(strict=True) != memory_path:
-            raise ValueError("memory config must be a canonical absolute regular file")
+        from registry_runtime import native_memory_config_path
+        memory_path = native_memory_config_path(memory_config)
         from store_registry import native_select
-        snapshot = native_select(str(memory_config), str(Path(mnemed).resolve(strict=True)), str(project_root)).snapshot
-        native_pin = memory_config_input(memory_config, Path(mnemed).resolve(strict=True), project_root, snapshot)
+        snapshot = native_select(str(memory_path), str(Path(mnemed).resolve(strict=True)), str(project_root)).snapshot
+        native_pin = memory_config_input(memory_path, Path(mnemed).resolve(strict=True), project_root, snapshot)
         background = snapshot["config"]["background"]
         recall_mode, reader_model = "async", background.get("model") or MODEL
         librarian_effort = background.get("effort") or "medium"
