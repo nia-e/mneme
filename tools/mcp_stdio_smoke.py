@@ -17,6 +17,7 @@ PROTOCOL_VERSION = "2025-11-25"
 PROFILE_CHOICES = ("read-only", "receipt-grounded", "curator", "operator")
 READ_ONLY_TOOLS = {
     "databases",
+    "discovery_catalog",
     "activity",
     "database_control",
     "status",

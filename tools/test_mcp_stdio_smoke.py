@@ -54,17 +54,17 @@ class StdioSmokeContractTests(unittest.TestCase):
         # server, independently of the smoke's inventory and set composition.
         # Keep exact equality: an unexpected tool is not an acceptable superset.
         catalogs = {
-            "read-only": """databases activity database_control status query
+            "read-only": """databases discovery_catalog activity database_control status query
                 recall_context recall episode concern get list graph neighbors
                 remote_edges core contradictions merges walk""",
-            "receipt-grounded": """databases activity database_control status query
+            "receipt-grounded": """databases discovery_catalog activity database_control status query
                 recall_context recall episode concern get list graph neighbors
                 remote_edges core contradictions merges walk reflect""",
-            "curator": """databases activity database_control status query
+            "curator": """databases discovery_catalog activity database_control status query
                 recall_context recall episode concern get list graph neighbors
                 remote_edges core ingest save capture retag link contradict
                 contradictions merges walk reflect""",
-            "operator": """databases activity database_control snapshot_create
+            "operator": """databases discovery_catalog activity database_control snapshot_create
                 status decay prune query recall_context recall episode concern
                 get list graph neighbors remote_edges core ingest save capture retag
                 edit_body edit_summary forget
