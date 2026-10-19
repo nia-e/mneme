@@ -75,13 +75,7 @@ impl ConfiguredServer {
                         .iter()
                         .cloned()
                     {
-                        tool["inputSchema"]["properties"]["library"] = json!({"type":"string","enum":names,"description":"Admitted configured collection; required unless exactly one collection is admitted."});
-                        if names.len() != 1 {
-                            let fields = tool["inputSchema"]["required"]
-                                .as_array_mut()
-                                .ok_or("library schema required list invalid")?;
-                            fields.push(json!("library"));
-                        }
+                        add_library_selector(&mut tool["inputSchema"], &names)?;
                         tools.push(tool);
                     }
                 }
@@ -203,6 +197,22 @@ impl ConfiguredServer {
         self.client.close().await;
     }
 }
+fn add_library_selector(schema: &mut Value, names: &[String]) -> Result<(), AnyErr> {
+    schema["properties"]["library"] = json!({"type":"string","enum":names,"description":"Admitted configured collection; required unless exactly one collection is admitted."});
+    if names.len() != 1 {
+        // JSON Schema permits an absent required list (e.g. library_catalog).
+        // Only absence means empty; a present malformed value must still fail.
+        if schema.get("required").is_none() {
+            schema["required"] = json!([]);
+        }
+        schema["required"]
+            .as_array_mut()
+            .ok_or("library schema required list invalid")?
+            .push(json!("library"));
+    }
+    Ok(())
+}
+
 fn add_source(schema: &mut Value) {
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         properties.insert("_mneme_source".into(),json!({"type":"object","description":"Exact cached reference returned by the first read; reuse unchanged for continuation.","properties":{"owner_db_id":{"type":"string"},"source_device_id":{"type":"string"},"generation":{"type":"string"},"captured_at":{"type":"integer","minimum":0},"database":{"type":"string"},"resolved_path":{"type":"string"}},"required":["owner_db_id","source_device_id","generation","captured_at","database","resolved_path"],"additionalProperties":false}));
@@ -225,6 +235,216 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+
+    #[test]
+    fn library_selector_defaults_only_an_absent_required_list() {
+        let names = vec!["offline".into(), "personal".into()];
+        for required in [None, Some(json!([])), Some(json!(["text"]))] {
+            let mut schema = json!({"type":"object","additionalProperties":false});
+            if let Some(required) = &required {
+                schema["required"] = required.clone();
+            }
+            add_library_selector(&mut schema, &names).unwrap();
+            let mut expected = required
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default();
+            expected.push(json!("library"));
+            assert_eq!(schema["required"], json!(expected));
+        }
+        for malformed in [
+            Value::Null,
+            json!("text"),
+            json!({}),
+            json!(false),
+            json!(1),
+        ] {
+            let mut schema = json!({"type":"object","required":malformed});
+            assert_eq!(
+                add_library_selector(&mut schema, &names)
+                    .unwrap_err()
+                    .to_string(),
+                "library schema required list invalid"
+            );
+            assert_eq!(schema["required"], malformed);
+        }
+        let mut schema = json!({"type":"object","additionalProperties":false});
+        add_library_selector(&mut schema, &names[..1]).unwrap();
+        assert!(schema.get("required").is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_library_catalog_and_dispatch_agree_for_zero_one_and_two_collections() {
+        use crate::tests::{schema_accepts, tool_input_schema};
+
+        let definitions = mneme_library::tool_definitions();
+        let definitions = definitions.as_array().unwrap();
+        let requests = [
+            ("library_catalog", json!({})),
+            ("library_query", json!({"text":"needle"})),
+            ("library_recall_context", json!({"text":"needle"})),
+            (
+                "library_get",
+                json!({"project_id":"missing","id":"node","source_device_id":"owner"}),
+            ),
+        ];
+        let mut metadata_tools = None;
+        for names in [vec![], vec!["personal"], vec!["offline", "personal"]] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let scratch = Scratch(
+                std::env::temp_dir()
+                    .canonicalize()
+                    .unwrap()
+                    .join(format!("mneme-configured-libraries-{}", ulid::Ulid::new())),
+            );
+            std::fs::create_dir(&scratch.0).unwrap();
+            let path = scratch.0.join("memory.toml");
+            let mut config = format!(
+                "schema='mneme.config.v1'\n[stores.fixture]\nid='01M3CPEVDTM9PP4HJTMMBZ8HR9'\nowner={{url='http://{}',db='project'}}\nactive={{workspace='any'}}\npermissions={{read=false,write=false}}\n",
+                listener.local_addr().unwrap()
+            );
+            for name in &names {
+                config.push_str(&format!(
+                    "[libraries.{name}]\ncatalog='{}'\n",
+                    scratch.0.join(format!("{name}.json")).display()
+                ));
+            }
+            std::fs::write(&path, config).unwrap();
+            let server = ConfiguredServer::from_path(&path, &scratch.0)
+                .await
+                .unwrap();
+
+            // Listing depends on admitted metadata, not readable owners or the
+            // existence of any library catalog file.
+            let listed = server.dispatch("tools/list", json!({})).await.unwrap();
+            assert_eq!(listed["omissions"], json!([]));
+            let tools = listed["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 2 + if names.is_empty() { 0 } else { 4 });
+            let metadata: Vec<_> = tools
+                .iter()
+                .filter(|tool| matches!(tool["name"].as_str(), Some("databases" | "config_select")))
+                .cloned()
+                .collect();
+            assert_eq!(metadata.len(), 2);
+            if let Some(baseline) = &metadata_tools {
+                assert_eq!(&metadata, baseline);
+            } else {
+                metadata_tools = Some(metadata);
+            }
+            for name in ["databases", "config_select"] {
+                assert!(schema_accepts(tool_input_schema(tools, name), &json!({})));
+                let response = server
+                    .dispatch("tools/call", json!({"name":name,"arguments":{}}))
+                    .await
+                    .unwrap();
+                assert_eq!(response["isError"], false);
+            }
+            for (name, args) in &requests {
+                if !names.is_empty() {
+                    let schema = tool_input_schema(tools, name);
+                    let native = tool_input_schema(definitions, name);
+                    let mut required = native
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if names.len() > 1 {
+                        required.push(json!("library"));
+                    }
+                    assert_eq!(
+                        schema.get("required").cloned().unwrap_or(json!([])),
+                        json!(required)
+                    );
+                    assert_eq!(schema["properties"]["library"]["enum"], json!(names));
+                    assert_eq!(schema_accepts(schema, args), names.len() == 1);
+                    for selected in &names {
+                        let mut explicit = args.clone();
+                        explicit["library"] = json!(selected);
+                        assert!(schema_accepts(schema, &explicit));
+                        for field in native["required"].as_array().into_iter().flatten() {
+                            let mut incomplete = explicit.clone();
+                            incomplete
+                                .as_object_mut()
+                                .unwrap()
+                                .remove(field.as_str().unwrap());
+                            assert!(!schema_accepts(schema, &incomplete));
+                        }
+                    }
+                }
+                for selector in [
+                    None,
+                    Some(Value::Null),
+                    Some(json!(7)),
+                    Some(json!("unknown")),
+                ] {
+                    if selector.is_none() && names.len() == 1 {
+                        continue;
+                    }
+                    let mut invalid = args.clone();
+                    if let Some(selector) = selector {
+                        invalid["library"] = selector;
+                    }
+                    if !names.is_empty() {
+                        assert!(!schema_accepts(tool_input_schema(tools, name), &invalid));
+                    }
+                    let refused = server
+                        .dispatch("tools/call", json!({"name":name,"arguments":invalid}))
+                        .await
+                        .unwrap();
+                    assert_eq!(refused["isError"], true);
+                    assert!(
+                        refused["content"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .contains("library")
+                    );
+                }
+            }
+            for name in &names {
+                let catalog = scratch.0.join(format!("{name}.json"));
+                assert!(!catalog.exists());
+                std::fs::write(
+                    catalog,
+                    serde_json::to_vec(&json!({"schema":"mneme.library.catalog.v1","library_id":name,"revision":1,"entries":[]})).unwrap(),
+                )
+                .unwrap();
+                for (tool, args) in &requests {
+                    for defaulted in [false, true] {
+                        if defaulted && names.len() != 1 {
+                            continue;
+                        }
+                        let mut args = args.clone();
+                        if !defaulted {
+                            args["library"] = json!(name);
+                        }
+                        let response = server
+                            .dispatch("tools/call", json!({"name":tool,"arguments":args}))
+                            .await
+                            .unwrap();
+                        if *tool == "library_get" {
+                            assert_eq!(response["isError"], true);
+                            assert!(
+                                response["content"][0]["text"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("not enrolled")
+                            );
+                        } else {
+                            assert_eq!(response["isError"], false, "{response}");
+                            let result: Value = serde_json::from_str(
+                                response["content"][0]["text"].as_str().unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(result["library_id"], *name);
+                        }
+                    }
+                }
+            }
+            assert!(listener.accept().is_err(), "denied owner was contacted");
+            server.close().await;
+        }
+    }
+
     #[tokio::test]
     async fn configured_catalog_selection_replays_imports_offline_and_refuses_receipt_replacement()
     {
