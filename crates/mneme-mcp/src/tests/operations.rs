@@ -49,6 +49,7 @@ async fn library_mode_catalog_and_raw_dispatch_are_closed_to_owner_tools() {
     .unwrap();
     let server = Server {
         registry: Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::new(),
         },
@@ -116,6 +117,7 @@ async fn library_mode_catalog_and_raw_dispatch_are_closed_to_owner_tools() {
         ]
     );
     for hidden in [
+        "discovery_catalog",
         "databases",
         "query",
         "get",
@@ -601,6 +603,7 @@ fn only_unbounded_public_tools_use_the_cold_admission_lane() {
 #[tokio::test]
 async fn held_cold_permit_does_not_block_hot_dispatch() {
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: crate::activity::ActivityRing::default(),
         dbs: BTreeMap::new(),
     };

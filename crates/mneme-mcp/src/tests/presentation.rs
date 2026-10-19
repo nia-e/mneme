@@ -327,6 +327,7 @@ async fn binary_body_ranges_keep_exact_source_progress_and_core_allowance() {
         drop(handle);
 
         let registry = Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::from([("fixture".into(), slot)]),
         };

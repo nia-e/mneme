@@ -1,4 +1,4 @@
-//! Declarative coordinator: selection is metadata-only; native contacts are lazy.
+//! Declarative coordinator: discovery metadata is frozen at startup; memory contacts are lazy.
 use crate::{host::AnyErr, router_catalog, router_response};
 use mneme_store_client::{ConfiguredClient, OperationBudget, RequestAccess, request_access};
 use serde_json::{Value, json};
@@ -8,9 +8,18 @@ pub struct ConfiguredServer {
     client: ConfiguredClient,
 }
 impl ConfiguredServer {
-    pub fn from_path(path: &Path, cwd: &Path) -> Result<Self, AnyErr> {
+    pub async fn from_path(path: &Path, cwd: &Path) -> Result<Self, AnyErr> {
         Ok(Self {
-            client: ConfiguredClient::new(mneme_config::select_workspace(path, cwd, None)?)?,
+            client: ConfiguredClient::new(
+                mneme_store_client::discovery::select_workspace(
+                    path,
+                    cwd,
+                    None,
+                    mneme_store_client::discovery::ResolveOptions::default(),
+                    &OperationBudget::new(1024 * 1024, Duration::from_secs(15))?,
+                )
+                .await?,
+            )?,
         })
     }
     pub fn dispatch<'a>(
@@ -217,6 +226,80 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn configured_catalog_selection_replays_imports_offline_and_refuses_receipt_replacement()
+    {
+        use mneme_config::{DiscoveryBinding, DiscoveryGraph, DiscoveryReceipt, PublishedCatalog};
+        const ID: &str = "01M3CPEVDTM9PP4HJTMMBZ8HR9";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("mneme-configured-discovery-{}", ulid::Ulid::new()));
+        std::fs::create_dir(&root).unwrap();
+        let scratch = Scratch(root);
+        let path = scratch.0.join("memory.toml");
+        std::fs::write(&path,format!("schema='mneme.config.v1'\n[stores.fixture]\nid='{ID}'\nowner={{url='http://{}',db='project'}}\nactive={{workspace='any'}}\ndiscovery=true\n",listener.local_addr().unwrap())).unwrap();
+        let prepared = mneme_config::prepare_workspace(Some(&path), &scratch.0, None)
+            .unwrap()
+            .unwrap();
+        let document=PublishedCatalog::parse_toml(&format!("schema='mneme.discovery-catalog.v1'\n[stores.policy]\nid='{ID}'\npermissions={{read=false,write=false}}\n"),ID).unwrap();
+        let graph = DiscoveryGraph {
+            seeds: vec![ID.into()],
+            catalogs: std::collections::BTreeMap::from([(ID.into(), document)]),
+            edges: std::collections::BTreeMap::from([(ID.into(), vec![ID.into()])]),
+            ..DiscoveryGraph::default()
+        };
+        let receipt = DiscoveryReceipt::new(prepared.boundary_sha256().unwrap(), graph).unwrap();
+        let receipt_path = scratch.0.join("receipt.json");
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        std::fs::write(&receipt_path, &bytes).unwrap();
+        let binding = DiscoveryBinding {
+            path: receipt_path.clone(),
+            sha256: mneme_config::sha256(&bytes),
+        };
+        let selection =
+            mneme_config::finish_workspace(prepared, Some((&receipt, binding))).unwrap();
+        assert!(
+            selection
+                .active
+                .iter()
+                .all(|store| !store.eligible.read && !store.eligible.write)
+        );
+        let digest = selection.digest.clone();
+        let server = ConfiguredServer {
+            client: ConfiguredClient::new(selection).unwrap(),
+        };
+        let selected = server
+            .dispatch("tools/call", json!({"name":"config_select","arguments":{}}))
+            .await
+            .unwrap();
+        assert_eq!(selected["isError"], false);
+        let frozen: Value =
+            serde_json::from_str(selected["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(frozen["digest"], digest);
+        assert!(frozen["discovery"].is_object());
+        server.dispatch("tools/list", json!({})).await.unwrap();
+        assert!(
+            listener.accept().is_err(),
+            "frozen metadata must not contact its publisher"
+        );
+        // Another valid JSON byte sequence still changes the frozen receipt.
+        bytes.push(b' ');
+        std::fs::write(&receipt_path, &bytes).unwrap();
+        assert!(
+            server
+                .dispatch("tools/call", json!({"name":"config_select","arguments":{}}))
+                .await
+                .is_err()
+        );
+        assert!(
+            listener.accept().is_err(),
+            "revalidation never refreshes a changed receipt"
+        );
+    }
+
+    #[tokio::test]
     async fn configured_mode_is_lazy_denied_and_exactly_fenced() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -230,7 +313,9 @@ mod tests {
             listener.local_addr().unwrap()
         );
         std::fs::write(&path, &config).unwrap();
-        let server = ConfiguredServer::from_path(&path, &scratch.0).unwrap();
+        let server = ConfiguredServer::from_path(&path, &scratch.0)
+            .await
+            .unwrap();
         server
             .dispatch("initialize", json!({"protocolVersion":"2025-11-25"}))
             .await
@@ -242,7 +327,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selection["isError"], false);
-        for tool in ["core", "forget", "database_control"] {
+        for tool in ["core", "forget", "database_control", "discovery_catalog"] {
             let refused=server.dispatch("tools/call",json!({"name":tool,"arguments":{"db":"fixture","id":"01M3CV5EZP4HWAK56YJCMZQG2Y"}})).await.unwrap();
             assert_eq!(refused["isError"], true);
         }

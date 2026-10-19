@@ -13,6 +13,7 @@ enum TuiView {
     Map,
     Scenes,
     Touchstones,
+    Config,
 }
 impl From<TuiView> for View {
     fn from(view: TuiView) -> Self {
@@ -20,13 +21,16 @@ impl From<TuiView> for View {
             TuiView::Map => Self::Map,
             TuiView::Scenes => Self::Scenes,
             TuiView::Touchstones => Self::Touchstones,
+            // Configuration is a metadata-only modal, never a memory view.
+            TuiView::Config => Self::Map,
         }
     }
 }
 
 #[derive(Args)]
 pub(crate) struct TuiArgs {
-    /// Open Map, Scenes or Touchstones; s switches Map/Scenes, t opens the cabinet.
+    /// Open Map, Scenes, Touchstones or the metadata-only Config inspector.
+    /// Config may acquire delegated catalogs, but never reads memories at startup.
     #[arg(long, value_enum, default_value = "map")]
     view: TuiView,
     /// Synthetic constellation; never contacts a memory service.
@@ -54,6 +58,7 @@ pub(crate) async fn run(
     profile: Option<&str>,
     json: bool,
 ) -> Result<(), AnyErr> {
+    let inspect_config = matches!(args.view, TuiView::Config);
     if json {
         return Err(
             "tui is interactive, not JSON; use library/query/get for machine-readable results"
@@ -62,6 +67,9 @@ pub(crate) async fn run(
     }
     if db.is_some() {
         return Err("tui never opens database files; use a configured CLI owner, --remote URL or tui --config PATH (unset MNEME_DB)".into());
+    }
+    if inspect_config && args.query.is_some() {
+        return Err("tui --view config inspects metadata; omit --query, then explicitly open a source to search memories".into());
     }
     if args
         .query
@@ -77,8 +85,11 @@ pub(crate) async fn run(
         );
     }
     let selection = if !args.demo && args.config.is_none() && remote.remote.is_none() {
-        match crate::cli_config::discover(memory_config, profile)? {
-            Some(snapshot) => declarative_targets(snapshot, store, user)?,
+        match discover_targets(memory_config, profile, store, user, inspect_config).await? {
+            Some(selection) => selection,
+            None if inspect_config => ResolvedTargets::empty(
+                "No declarative configuration found; no ambient owner fallback was attempted",
+            ),
             None if store.is_some() || profile.is_some() || memory_config.is_some() => {
                 return Err(
                     "declarative TUI selection requires memory.toml; use --memory-config PATH"
@@ -94,7 +105,14 @@ pub(crate) async fn run(
         resolve_targets(args, remote, user)?
     };
     if args.snapshot {
-        println!("{}", mneme_tui::preview_view(120, 36, args.view.into())?);
+        println!(
+            "{}",
+            if inspect_config {
+                mneme_tui::preview_config(120, 36)?
+            } else {
+                mneme_tui::preview_view(120, 36, args.view.into())?
+            }
+        );
         return Ok(());
     }
     mneme_tui::run(Options {
@@ -103,6 +121,9 @@ pub(crate) async fn run(
         query: args.query.clone().unwrap_or_default(),
         demo: args.demo,
         view: args.view.into(),
+        config_report: selection.report,
+        config_selection: selection.selection,
+        inspect_config,
     })
     .await
     .map_err(|e| -> AnyErr { e })
@@ -111,13 +132,129 @@ pub(crate) async fn run(
 struct ResolvedTargets {
     sources: Vec<SourceChoice>,
     warnings: Vec<String>,
+    report: Option<std::sync::Arc<mneme_config::DiscoveryReport>>,
+    selection: Option<std::sync::Arc<mneme_config::SelectionSnapshot>>,
+}
+
+impl ResolvedTargets {
+    fn empty(warning: impl Into<String>) -> Self {
+        Self {
+            sources: vec![],
+            warnings: vec![warning.into()],
+            report: None,
+            selection: None,
+        }
+    }
+
+    fn attach_report(
+        &mut self,
+        report: Option<mneme_config::DiscoveryReport>,
+        inspected_name: Option<&str>,
+    ) -> Result<(), AnyErr> {
+        if let Some(report) = &report {
+            for (id, row) in &report.stores {
+                if !self
+                    .sources
+                    .iter()
+                    .any(|source| source.expected_db_id.as_deref() == Some(id.as_str()))
+                {
+                    let mut source = SourceChoice::unavailable(
+                        &row.label,
+                        "No resolved admitted owner route; inspect configuration for details",
+                    );
+                    source.expected_db_id = Some(id.clone());
+                    self.sources.push(source);
+                }
+            }
+        }
+        self.report = report.map(std::sync::Arc::new);
+        if let Some(name) = inspected_name {
+            if !self.sources.iter().any(|source| source.name == name) {
+                return Err(format!("no configured store named {name}; omit --store to inspect all declarations (no fallback attempted)").into());
+            }
+            // A denied/unresolved known row is inspectable, not an authority
+            // error. A typo is different: never silently show another source.
+            self.sources.sort_by_key(|source| source.name != name);
+        }
+        Ok(())
+    }
+}
+
+/// The shared acquisition workflow reads catalog metadata, not owner memories.
+/// Configured-but-unresolved results remain inspectable and never fall back.
+async fn discover_targets(
+    memory_config: Option<&std::path::Path>,
+    profile: Option<&str>,
+    named: Option<&str>,
+    user: bool,
+    inspect: bool,
+) -> Result<Option<ResolvedTargets>, AnyErr> {
+    let cwd = std::env::current_dir()?;
+    let budget =
+        mneme_store_client::OperationBudget::new(1024 * 1024, std::time::Duration::from_secs(15))
+            .map_err(|error| -> AnyErr { error })?;
+    let outcome = mneme_store_client::discovery::resolve_workspace(
+        memory_config,
+        &cwd,
+        profile,
+        mneme_store_client::discovery::ResolveOptions::default(),
+        &budget,
+    )
+    .await;
+    let outcome = match outcome {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => return Ok(None),
+        Err(error) if inspect => {
+            return Ok(Some(ResolvedTargets::empty(format!(
+                "Configuration unresolved: {error}; no fallback attempted",
+            ))));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut selected = match outcome.selection {
+        Some(snapshot) => declarative_targets_for_view(snapshot, named, user, inspect)?,
+        None if inspect => ResolvedTargets::empty("No resolved selection; admission and activation remain unknown"),
+        None => return Err(format!("configuration selection unresolved: {}; use tui --view config to inspect it (no fallback attempted)", outcome.error.as_deref().unwrap_or("unresolved discovery")).into()),
+    };
+    selected.attach_report(outcome.report, inspect.then_some(named).flatten())?;
+    let cache_status = serde_json::to_value(outcome.cache_status)?;
+    selected.warnings.push(format!(
+        "Configuration metadata: {}",
+        cache_status.as_str().unwrap_or("unknown")
+    ));
+    if let Some(error) = outcome.error {
+        selected.warnings.push(error);
+    }
+    if let Some(attempt) = outcome.attempt {
+        for (id, reason) in attempt.unavailable {
+            selected.warnings.push(format!(
+                "Acquisition attempt (not selected evidence): {id}: {reason}"
+            ));
+        }
+        if let Some(reason) = attempt.incomplete {
+            selected.warnings.push(format!(
+                "Incomplete acquisition attempt (not selected evidence): {reason}"
+            ));
+        }
+    }
+    Ok(Some(selected))
 }
 
 /// Same immutable metadata witness used by the CLI, MCP and native hook bridge.
+#[cfg(test)]
 fn declarative_targets(
     snapshot: mneme_config::SelectionSnapshot,
     named: Option<&str>,
     user: bool,
+) -> Result<ResolvedTargets, AnyErr> {
+    declarative_targets_for_view(snapshot, named, user, false)
+}
+
+fn declarative_targets_for_view(
+    snapshot: mneme_config::SelectionSnapshot,
+    named: Option<&str>,
+    user: bool,
+    inspect: bool,
 ) -> Result<ResolvedTargets, AnyErr> {
     if user {
         return Err(
@@ -126,15 +263,20 @@ fn declarative_targets(
     }
     let primary = named
         .or(snapshot.read_default.as_deref())
-        .ok_or("no admitted TUI default; select --store NAME")?
-        .to_owned();
-    snapshot
-        .explicit_store(&primary)?
-        .require_operation(mneme_config::Operation::ExplicitRead)?;
+        .map(str::to_owned);
+    if !inspect {
+        snapshot
+            .explicit_store(
+                primary.as_deref().ok_or(
+                    "no admitted TUI default; select --store NAME or use tui --view config",
+                )?,
+            )?
+            .require_operation(mneme_config::Operation::ExplicitRead)?;
+    }
     let snapshot = std::sync::Arc::new(snapshot);
     let mut sources = Vec::new();
     let mut rows: Vec<_> = snapshot.stores.iter().collect();
-    rows.sort_by_key(|row| row.name != primary);
+    rows.sort_by_key(|row| Some(row.name.as_str()) != primary.as_deref());
     for row in rows {
         // Choosing a source is an explicit read, not automatic workspace
         // activation. Keep inactive but admitted/readable stores selectable.
@@ -170,6 +312,8 @@ fn declarative_targets(
     Ok(ResolvedTargets {
         sources,
         warnings: vec![],
+        report: None,
+        selection: Some(snapshot),
     })
 }
 
@@ -186,6 +330,9 @@ fn resolve_targets(
                 "Synthetic memories · no live source",
             )],
             warnings: Vec::new(),
+            report: matches!(args.view, TuiView::Config)
+                .then(|| std::sync::Arc::new(mneme_tui::demo_config_report())),
+            selection: None,
         });
     }
     if let Some(config) = args.config.as_deref() {
@@ -201,6 +348,8 @@ fn resolve_targets(
         return Ok(ResolvedTargets {
             sources: crate::cli_sources::library(Some(config))?,
             warnings: Vec::new(),
+            report: None,
+            selection: None,
         });
     }
     if let Some(remote) = remote.resolve(user, None)? {
@@ -213,12 +362,16 @@ fn resolve_targets(
                 },
             ))],
             warnings: Vec::new(),
+            report: None,
+            selection: None,
         });
     }
     let selected = crate::cli_sources::default_selection(user)?;
     Ok(ResolvedTargets {
         sources: selected.choices,
         warnings: selected.warnings,
+        report: None,
+        selection: None,
     })
 }
 
@@ -378,6 +531,83 @@ active = { workspace = "any" }
     }
 
     #[test]
+    fn configuration_inspection_keeps_zero_defaultless_and_denied_stores() {
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let empty = mneme_config::Config::parse("schema = 'mneme.config.v1'").unwrap();
+        let snapshot =
+            mneme_config::select(&empty, &mneme_config::SelectionContext::new(cwd.clone()))
+                .unwrap();
+        assert!(snapshot.stores.is_empty());
+        assert!(snapshot.read_default.is_none());
+        let selected = declarative_targets_for_view(snapshot, None, false, true).unwrap();
+        assert!(selected.sources.is_empty());
+        assert!(
+            selected.selection.is_some(),
+            "empty metadata is not an absent selection"
+        );
+
+        let mut config = declarative_config(&cwd);
+        config.read_default = "project-or-misc".into();
+        let snapshot =
+            mneme_config::select(&config, &mneme_config::SelectionContext::new(cwd.clone()))
+                .unwrap();
+        assert!(snapshot.read_default.is_none());
+        assert!(declarative_targets(snapshot.clone(), None, false).is_err());
+        let selected = declarative_targets_for_view(snapshot.clone(), None, false, true).unwrap();
+        assert!(
+            selected
+                .sources
+                .iter()
+                .any(|source| source.route().is_some())
+        );
+        assert_eq!(*selected.selection.unwrap(), snapshot);
+
+        for store in config.stores.values_mut() {
+            store.active.enabled = false;
+        }
+        let snapshot =
+            mneme_config::select(&config, &mneme_config::SelectionContext::new(cwd)).unwrap();
+        let selected =
+            declarative_targets_for_view(snapshot.clone(), Some("disabled"), false, true).unwrap();
+        assert_eq!(selected.sources[0].name, "disabled");
+        assert_eq!(selected.sources.len(), snapshot.stores.len());
+        assert!(
+            selected
+                .sources
+                .iter()
+                .all(|source| source.route().is_none())
+        );
+        assert_eq!(*selected.selection.unwrap(), snapshot);
+    }
+
+    #[test]
+    fn report_only_rows_are_inspectable_but_unknown_names_do_not_select_another_source() {
+        let report = mneme_tui::demo_config_report();
+        let name = report.stores.values().next().unwrap().label.clone();
+        let id = report.stores.keys().next().unwrap().clone();
+        let mut selected = ResolvedTargets::empty("unresolved selection");
+        selected
+            .attach_report(Some(report.clone()), Some(&name))
+            .unwrap();
+        assert_eq!(selected.sources.len(), 1);
+        assert_eq!(selected.sources[0].name, name);
+        assert_eq!(
+            selected.sources[0].expected_db_id.as_deref(),
+            Some(id.as_str())
+        );
+        assert!(selected.sources[0].route().is_none());
+        assert!(selected.selection.is_none());
+        assert_eq!(*selected.report.as_ref().unwrap().as_ref(), report);
+        assert!(
+            selected
+                .attach_report(None, Some("typo"))
+                .unwrap_err()
+                .to_string()
+                .contains("no configured store named typo")
+        );
+    }
+
+    #[test]
     fn explicit_remote_and_demo_do_not_append_ambient_owners() {
         let args = TuiArgs {
             view: TuiView::Map,
@@ -392,6 +622,7 @@ active = { workspace = "any" }
         };
         let selected = resolve_targets(&args, &options, false).unwrap();
         assert!(selected.warnings.is_empty());
+        assert!(selected.report.is_none() && selected.selection.is_none());
         let targets = selected.targets();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].url, "http://127.0.0.1:1");
@@ -423,6 +654,7 @@ active = { workspace = "any" }
         };
         let selected = resolve_targets(&args, &RemoteOptions::default(), false).unwrap();
         assert!(selected.warnings.is_empty());
+        assert!(selected.report.is_none() && selected.selection.is_none());
         assert_eq!(selected.sources.len(), 3);
         assert_eq!(
             selected.sources[1].expected_db_id.as_deref(),

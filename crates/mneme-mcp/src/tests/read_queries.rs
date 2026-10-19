@@ -98,6 +98,7 @@ fn public_query_optional_arguments_are_strict_and_never_clamped() {
 #[tokio::test]
 async fn malformed_query_admission_fails_before_database_checkout() {
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: crate::activity::ActivityRing::default(),
         dbs: BTreeMap::new(),
     };
@@ -126,6 +127,7 @@ async fn malformed_query_admission_fails_before_database_checkout() {
 #[tokio::test]
 async fn malformed_observe_is_rejected_before_checkout() {
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: crate::activity::ActivityRing::default(),
         dbs: BTreeMap::new(),
     };
@@ -246,6 +248,7 @@ async fn recall_context_handler_preserves_the_packers_exact_bounded_text() {
 
     let server = Server {
         registry: Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::from([("fixture".into(), slot)]),
         },
@@ -691,6 +694,7 @@ async fn exact_tagged_query_and_context_share_one_primary_lane() {
     );
     let server = Server {
         registry: Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::from([("fixture".into(), slot)]),
         },
@@ -893,6 +897,7 @@ async fn popular_tag_partial_coverage_is_reported_without_reserved_slot() {
     );
     let server = Server {
         registry: Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::from([("fixture".into(), slot)]),
         },
@@ -1016,6 +1021,7 @@ async fn query_and_recall_do_not_expose_or_checkpoint_when_query_output_is_overs
 
     let server = Server {
         registry: Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::from([("fixture".into(), slot)]),
         },

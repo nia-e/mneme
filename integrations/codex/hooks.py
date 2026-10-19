@@ -215,15 +215,19 @@ def _valid_id(value: Any) -> bool:
     return isinstance(value, str) and ID_RE.fullmatch(value) is not None
 
 
-def _config(path: Path, *, workspace_binding=None, cwd=None) -> dict[str, Any]:
+def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_digest=None) -> dict[str, Any]:
     data, parsed_raw = _bounded_json(path, MAX_CONFIG, with_raw=True)
     if not isinstance(data, dict):
         raise HookError("invalid hook config schema")
+    if expected_selection_digest is not None and data.get("schema") != CONFIG_SCHEMA_V13:
+        raise HookError("frozen selection replay requires native hook configuration")
     if data.get("schema") in (CONFIG_SCHEMA_V12, CONFIG_SCHEMA_V13):
         from registry_runtime import load, load_native
         load = load_native if data["schema"] == CONFIG_SCHEMA_V13 else load
         try:
-            return load(data, path, parsed_raw, workspace_binding=workspace_binding, cwd=cwd)
+            replay = ({"expected_selection_digest": expected_selection_digest}
+                      if expected_selection_digest is not None else {})
+            return load(data, path, parsed_raw, workspace_binding=workspace_binding, cwd=cwd, **replay)
         except (ValueError, OSError, TypeError, KeyError) as error:
             raise HookError("invalid or changed named-store configuration; reprepare and use a fresh session") from error
     if data.get("schema") == CONFIG_SCHEMA_V11:
@@ -667,6 +671,10 @@ def _checkpoint_command(config: dict[str, Any], session_id: str, turn_id: str) -
                                                         separators=(",", ":"))])
     if "frozen_selection" in config:
         words.extend(["--selection-cwd", str(config["selection_cwd"])])
+        from registry_runtime import native_selection_digest
+        digest = native_selection_digest(config)
+        if digest is not None:
+            words.extend(["--expected-selection-digest", digest])
     return render_checkpoint_command(words)
 
 
@@ -1622,6 +1630,7 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--outcome", required=True, choices=("captured", "none", "deferred"))
     cp.add_argument("--id", action="append", default=[])
     cp.add_argument("--selection-cwd", type=Path)
+    cp.add_argument("--expected-selection-digest", help="internal frozen native selection")
     cp.add_argument("--workspace-binding", dest="checkpoint_workspace_binding",
                     help="internal checked misc workspace binding")
     args = parser.parse_args(argv)
@@ -1639,17 +1648,24 @@ def main(argv: list[str] | None = None) -> int:
             binding = decode_json(raw_binding.encode())
         if args.reader_background and args.command == "checkpoint":
             raise HookError("reader background is not a checkpoint command")
+        from store_registry import native_selection_budget
         if args.command == "checkpoint":
-            config = _config(args.config, workspace_binding=binding, cwd=args.selection_cwd)
-            result = checkpoint(config, args.session_id, args.turn_id, args.outcome, args.id)
+            replay = ({"expected_selection_digest": args.expected_selection_digest}
+                      if args.expected_selection_digest is not None else {})
+            with native_selection_budget(3):
+                config = _config(args.config, workspace_binding=binding, cwd=args.selection_cwd, **replay)
+                result = checkpoint(config, args.session_id, args.turn_id, args.outcome, args.id)
             print(json.dumps(result))
             return 0
         event = _read_event(sys.stdin.buffer)
         if event is None:
             print(json.dumps({}))
             return 0
-        config = _config(args.config, workspace_binding=binding, cwd=event.get("cwd"))
-        print(json.dumps(handle_event(event, config, reader_background=args.reader_background)))
+        selection_seconds = 1.5 if event.get("hook_event_name") in ("Interrupt", "SessionEnd") else 3
+        with native_selection_budget(selection_seconds):
+            config = _config(args.config, workspace_binding=binding, cwd=event.get("cwd"))
+            result = handle_event(event, config, reader_background=args.reader_background)
+        print(json.dumps(result))
         return 0
     except HookInputError as exc:
         warning = _input_warning(str(exc))

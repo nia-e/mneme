@@ -154,13 +154,14 @@ def revalidate_store_registry(plan):
         raise ValueError("store registry changed since prepare; prepare a new plan")
 
 
-def memory_config_input(path, native_cli, cwd, snapshot=None):
+def memory_config_input(path, native_cli, cwd, snapshot=None, *, expected_selection_digest=None):
     """One native bounded selection; never interpret TOML policy in Python."""
     from registry_runtime import native_memory_config_path
     from store_registry import native_select
     path = native_memory_config_path(path)
     if snapshot is None:
-        snapshot = native_select(str(path), str(native_cli), str(cwd)).snapshot
+        options = {"expected_selection_digest": expected_selection_digest} if expected_selection_digest is not None else {}
+        snapshot = native_select(str(path), str(native_cli), str(cwd), **options).snapshot
     return {"path": str(path), "digest": snapshot["digest"], "sources": snapshot["sources"]}
 
 
@@ -169,7 +170,10 @@ def revalidate_memory_config(plan):
         return
     native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mnemed"))
     pin = plan["memory_config"]
-    if memory_config_input(pin["path"], native["source"], plan["project_root"]) != pin:
+    # Every reviewed native selection replays offline. Even a previously local
+    # config must not acquire newly enabled discovery before drift is rejected.
+    if memory_config_input(pin["path"], native["source"], plan["project_root"],
+                           expected_selection_digest=pin["digest"]) != pin:
         raise ValueError("memory config changed since prepare; prepare a new plan")
 
 

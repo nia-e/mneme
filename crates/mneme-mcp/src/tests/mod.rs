@@ -3,6 +3,7 @@
 //! their own test modules alongside the implementation.
 
 mod capabilities;
+mod discovery_catalog;
 mod operations;
 mod presentation;
 mod protocol;

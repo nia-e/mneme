@@ -91,3 +91,45 @@ fn touchstone_preview_is_offline_and_discoverable() {
     let help = run(&["tui", "--help"]);
     assert!(String::from_utf8_lossy(&help.stdout).contains("touchstones"));
 }
+
+#[test]
+fn configuration_preview_is_explicit_offline_metadata() {
+    let out = run(&["tui", "--demo", "--view", "config", "--snapshot"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let screen = String::from_utf8_lossy(&out.stdout);
+    assert!(screen.contains("Configuration"), "{screen}");
+    assert!(screen.contains("DEMO"), "{screen}");
+    assert!(screen.contains("unavailable publishers"), "{screen}");
+    let help = run(&["tui", "--help"]);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("config"));
+    assert!(
+        !run(&[
+            "tui",
+            "--demo",
+            "--view",
+            "config",
+            "--query",
+            "memory",
+            "--snapshot"
+        ])
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn nonterminal_config_inspector_refuses_before_any_configuration_access() {
+    let out = run(&[
+        "--memory-config",
+        "/does/not/exist.toml",
+        "tui",
+        "--view",
+        "config",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("interactive terminal"));
+}

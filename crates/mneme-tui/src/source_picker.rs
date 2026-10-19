@@ -182,9 +182,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             );
         }
         let controls = if inner.width >= 34 {
-            "↑↓ select · Enter open · Esc cancel"
+            "↑↓ · Enter open · c config · Esc"
         } else {
-            "↑↓ · ↵ open · Esc"
+            "↑↓ ↵open c:cfg Esc"
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::raw(controls))),

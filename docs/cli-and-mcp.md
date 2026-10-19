@@ -38,6 +38,7 @@ mnemed list --tag rust --limit 64
 | Browse stored nodes | `list`; `neighbors ID` for links |
 | Browse observed tag names | `list --tags` |
 | Browse visually | `tui` |
+| Explain store configuration | `config inspect`; `tui --view config` |
 | Review pending work | `status`, then `reconcile` or `merges` |
 
 Use `mnemed COMMAND --help` for arguments and limits. `--json` retains coverage

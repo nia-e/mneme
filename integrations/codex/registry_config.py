@@ -1,7 +1,9 @@
-"""Reviewable named-store defaults and device hooks; never install or connect.
+"""Reviewable named-store defaults and device hooks; never install or start owners.
 
-Inputs are explicit reviewed bindings, not discovered databases. The returned
-artifact is a proposal: publishing config and trusting hooks are separate actions.
+Inputs are explicit reviewed bindings. Native preparation may acquire and freeze
+bounded discovery metadata, but does not read memory content or open databases.
+The returned artifact is a proposal: publishing hooks and granting trust remain
+separate actions.
 """
 import argparse
 import hashlib
@@ -108,10 +110,11 @@ def prepare(*, store_registry, state_dir, reader_codex, hooks_program, hook_conf
 def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
                    hooks_program, hook_config_path, python=sys.executable,
                    reader_auth=None, workspace_adapters=None):
-    """Preview one device actor from native TOML; do not write/trust/start anything.
+    """Preview one device actor; native selection may freeze discovery metadata.
 
     Workspace adapters choose only retained ledger locations and reader binaries.
     Store activation, purpose, grants and background policy remain native-owned.
+    This does not install hooks, grant trust or start memory owners.
     """
     from registry_runtime import NATIVE_SCHEMA, native_memory_config_path, validate_native_static
     from store_registry import native_select

@@ -17,6 +17,15 @@ EVENTS = hooks.HOOK_EVENTS
 
 
 def handle_event(event, config_path, *, reader_background=False, core=False):
+    from store_registry import native_selection_budget
+    # Match the existing recipe ceilings (15s core, 5s ordinary, 3s shutdown).
+    # Leave room for host/state work; nested loads and replays share this bound.
+    short = isinstance(event, dict) and event.get("hook_event_name") in ("Interrupt", "SessionEnd")
+    with native_selection_budget(12 if core else 1.5 if short else 3):
+        return _handle_event(event, config_path, reader_background=reader_background, core=core)
+
+
+def _handle_event(event, config_path, *, reader_background=False, core=False):
     if (not isinstance(event, dict) or event.get("hook_event_name") not in EVENTS
             or hooks._subagent(event) or not hooks._valid_id(event.get("session_id"))):
         return {}

@@ -5,6 +5,7 @@ use crate::*;
 pub(super) fn empty_server(allow_direct_feedback: bool) -> Server {
     Server {
         registry: Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::new(),
         },
@@ -18,6 +19,7 @@ pub(super) fn empty_server(allow_direct_feedback: bool) -> Server {
 pub(crate) fn empty_profile_server(profile: CapabilityProfile) -> Server {
     Server {
         registry: Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::new(),
         },
@@ -251,6 +253,11 @@ pub(super) fn capability_request_cases() -> Vec<(&'static str, Value, Capability
             "retag",
             json!({"db":"missing","expected_db_id":other,"id":id,"expected_tags":["core","fact"],"tags":["core","closed"]}),
             CapabilityClass::Curator,
+        ),
+        (
+            "discovery_catalog",
+            json!({"db":"missing","expected_db_id":other}),
+            CapabilityClass::ReadOnly,
         ),
         ("databases", json!({}), CapabilityClass::ReadOnly),
         (

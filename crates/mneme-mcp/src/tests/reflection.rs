@@ -89,6 +89,7 @@ async fn dispatched_reflect_is_explicit_negative_and_retry_safe() {
             .unwrap();
         drop(handle);
         let registry = Registry {
+            discovery_catalogs: Default::default(),
             activity: crate::activity::ActivityRing::default(),
             dbs: BTreeMap::from([("fixture".into(), slot.clone())]),
         };

@@ -2188,6 +2188,7 @@ mod tests {
             );
             let db_id = slot.status().unwrap().db_id;
             let registry = crate::Registry {
+                discovery_catalogs: Default::default(),
                 activity: crate::activity::ActivityRing::default(),
                 dbs: std::collections::BTreeMap::from([("project".into(), slot.clone())]),
             };

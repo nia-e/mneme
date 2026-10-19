@@ -32,6 +32,111 @@ class NativeInstallTests(unittest.TestCase):
     def plan(self, **options):
         return self.fixture.prepare(memory_config=self.memory, reader_codex=self.fixture.native("codex"), **options)
 
+    def discovery_plan(self):
+        self.snapshot["discovery"] = {
+            "binding": {"path": str(self.fixture.base / "discovery-receipt.json"), "sha256": "b" * 64},
+            "boundary_sha256": "c" * 64,
+        }
+        return self.plan()
+
+    def test_discovery_prepare_pins_digest_without_receipt_and_revalidates_frozen(self):
+        with patch("store_registry.native_select", return_value=SimpleNamespace(snapshot=self.snapshot)) as select:
+            plan = self.discovery_plan()
+        select.assert_called_once_with(str(self.memory), str(self.fixture.native("mnemed")), str(self.fixture.project))
+        pin = plan["memory_config"]
+        self.assertEqual(pin, {"path": str(self.memory), "digest": self.snapshot["digest"],
+                               "sources": self.snapshot["sources"]})
+        install.validate_plan(plan)
+        with patch("store_registry.native_select", return_value=SimpleNamespace(snapshot=self.snapshot)) as select:
+            install.revalidate_memory_config(plan)
+        select.assert_called_once_with(str(self.memory), str(self.fixture.native("mnemed")),
+                                       str(self.fixture.project), expected_selection_digest=pin["digest"])
+
+    def test_discovery_apply_preserves_pin_and_rollback_needs_no_receipt_replay(self):
+        plan = self.discovery_plan()
+        with patch("store_registry.native_select", return_value=SimpleNamespace(snapshot=self.snapshot)) as select:
+            result = install.apply(plan)
+        select.assert_called_once_with(str(self.memory), str(self.fixture.native("mnemed")),
+                                       str(self.fixture.project), expected_selection_digest=plan["memory_config"]["digest"])
+        receipt = json.loads(Path(result["receipt"]).read_bytes())
+        self.assertEqual(receipt["plan"]["memory_config"], plan["memory_config"])
+        self.memory.unlink()
+        with patch("store_registry.native_select", side_effect=AssertionError("rollback reacquired discovery")) as select:
+            self.assertEqual(install.uninstall(result["receipt"])["status"], "configuration removed")
+            select.assert_not_called()
+
+    def test_discovery_refusal_stops_reviewed_apply_before_writes_without_fallback(self):
+        plan = json.loads(json.dumps(self.discovery_plan()))
+        for cause in ("missing", "stale", "malformed"):
+            refusal = ValueError(f"native configuration refused: {cause} discovery receipt")
+            with self.subTest(cause=cause), \
+                 patch("store_registry.native_select", side_effect=[refusal, SimpleNamespace(snapshot=self.snapshot)]) as select, \
+                 patch("install.ensure_private_directory") as mkdir, \
+                 patch("install.private_write") as private_write, \
+                 patch("install.atomic_write") as atomic_write:
+                with self.assertRaises(ValueError) as caught:
+                    install.apply(plan)
+                self.assertIs(caught.exception, refusal)
+                select.assert_called_once_with(str(self.memory), str(self.fixture.native("mnemed")),
+                                               str(self.fixture.project), expected_selection_digest=plan["memory_config"]["digest"])
+                mkdir.assert_not_called()
+                private_write.assert_not_called()
+                atomic_write.assert_not_called()
+                self.assertFalse(self.fixture.prefix.exists())
+                self.assertFalse((self.fixture.project / ".codex").exists())
+
+    def test_discovery_revalidation_rejects_changed_digest_or_sources(self):
+        plan = self.discovery_plan()
+        for change in ("digest", "sources"):
+            value = copy.deepcopy(self.snapshot)
+            if change == "digest":
+                value["digest"] = "d" * 64
+            else:
+                value["sources"][0]["sha256"] = "d" * 64
+            with self.subTest(change=change), \
+                 patch("store_registry.native_select", return_value=SimpleNamespace(snapshot=value)) as select:
+                with self.assertRaisesRegex(ValueError, "memory config changed"):
+                    install.revalidate_memory_config(plan)
+                select.assert_called_once_with(str(self.memory), str(self.fixture.native("mnemed")),
+                                               str(self.fixture.project), expected_selection_digest=plan["memory_config"]["digest"])
+
+    def test_local_only_reviewed_plan_also_revalidates_offline(self):
+        plan = self.plan()
+        self.assertEqual(set(plan["memory_config"]), {"path", "digest", "sources"})
+        with patch("store_registry.native_select", return_value=SimpleNamespace(snapshot=self.snapshot)) as select:
+            install.revalidate_memory_config(plan)
+        select.assert_called_once_with(str(self.memory), str(self.fixture.native("mnemed")),
+                                       str(self.fixture.project), expected_selection_digest=plan["memory_config"]["digest"])
+
+    def test_local_only_reviewed_plan_cannot_acquire_new_discovery_after_refusal(self):
+        plan = self.plan()
+        refusal = ValueError("native config changed to enable discovery; reprepare")
+        with patch("store_registry.native_select", side_effect=[refusal, SimpleNamespace(snapshot=self.snapshot)]) as select, \
+             patch("install.ensure_private_directory") as mkdir:
+            with self.assertRaises(ValueError) as caught:
+                install.apply(plan)
+            self.assertIs(caught.exception, refusal)
+            select.assert_called_once_with(str(self.memory), str(self.fixture.native("mnemed")),
+                                           str(self.fixture.project), expected_selection_digest=plan["memory_config"]["digest"])
+            mkdir.assert_not_called()
+        self.assertFalse(self.fixture.prefix.exists())
+
+    def test_discovery_plan_rejects_unused_replay_markers_and_receipt_fields(self):
+        plan = self.discovery_plan()
+        for marker in (None, False, True, 0, 1, "true", {}, []):
+            candidate = copy.deepcopy(plan)
+            candidate["memory_config"]["discovery"] = marker
+            candidate["plan_sha256"] = install.plan_hash(candidate)
+            with self.subTest(marker=marker), patch("store_registry.native_select") as select:
+                with self.assertRaisesRegex(ValueError, "invalid native memory config pin"):
+                    install.validate_plan(candidate)
+                select.assert_not_called()
+        candidate = copy.deepcopy(plan)
+        candidate["memory_config"]["discovery_receipt"] = self.snapshot["discovery"]
+        candidate["plan_sha256"] = install.plan_hash(candidate)
+        with self.assertRaisesRegex(ValueError, "invalid native memory config pin"):
+            install.validate_plan(candidate)
+
     def test_one_policy_native_mcp_no_project_actor_no_start(self):
         with patch("service.ensure_ready") as start:
             plan = self.plan()
@@ -108,7 +213,7 @@ class NativeInstallTests(unittest.TestCase):
         replacement = self.fixture.base / "generation-two.toml"
         replacement.write_bytes(original.read_bytes())
 
-        def select(path, *_):
+        def select(path, *_, **options):
             self.assertEqual(path, str(self.memory))
             value = copy.deepcopy(self.snapshot)
             # Native selection supplies the canonical source witness. Even if a

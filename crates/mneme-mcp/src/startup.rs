@@ -36,6 +36,7 @@ pub(crate) enum StartupMode {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct OwnerOptions {
     databases: Vec<(String, PathBuf)>,
+    discovery_catalogs: Vec<(String, PathBuf)>,
     profile: CapabilityProfile,
     direct_feedback: DirectFeedback,
 }
@@ -47,6 +48,10 @@ impl OwnerOptions {
 
     pub(crate) const fn direct_feedback(&self) -> DirectFeedback {
         self.direct_feedback
+    }
+
+    pub(crate) fn discovery_catalogs(&self) -> &[(String, PathBuf)] {
+        &self.discovery_catalogs
     }
 
     pub(crate) fn into_databases(self) -> Vec<(String, PathBuf)> {
@@ -103,6 +108,7 @@ where
     F: FnOnce() -> std::io::Result<PathBuf>,
 {
     let mut dbs = Vec::new();
+    let mut discovery_catalogs = Vec::new();
     let mut library_config = None;
     let mut router_config = None;
     let mut memory_config = None;
@@ -122,6 +128,17 @@ where
                     .split_once('=')
                     .ok_or_else(|| format!("--db expects NAME=PATH, got {spec:?}"))?;
                 dbs.push((name.to_string(), PathBuf::from(path)));
+            }
+            "--discovery-catalog" => {
+                let spec = it.next().ok_or("--discovery-catalog needs ALIAS=PATH")?;
+                let (alias, path) = spec
+                    .split_once('=')
+                    .filter(|(alias, path)| !alias.is_empty() && alias.chars().count() <= 256 && !path.is_empty())
+                    .ok_or("--discovery-catalog needs ALIAS=PATH with a nonempty alias of at most 256 characters and a nonempty path")?;
+                if discovery_catalogs.iter().any(|(name, _)| name == alias) {
+                    return Err(format!("duplicate --discovery-catalog alias {alias:?}").into());
+                }
+                discovery_catalogs.push((alias.to_owned(), PathBuf::from(path)));
             }
             "--memory-config" => {
                 if memory_config.is_some() {
@@ -184,7 +201,7 @@ where
             "--allow-direct-feedback" => allow_direct_feedback = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: mneme-mcp --memory-config PATH [--cwd WORKSPACE] [--library NAME] [--http IP:PORT] | mneme-mcp [--db NAME=PATH]... [--capability-profile read-only|receipt-grounded|curator|operator] [--allow-direct-feedback (deprecated; operator only)] [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --library-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --router-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]]"
+                    "usage: mneme-mcp --memory-config PATH [--cwd WORKSPACE] [--library NAME] [--http IP:PORT] | mneme-mcp [--db NAME=PATH]... [--discovery-catalog ALIAS=PATH]... [--capability-profile read-only|receipt-grounded|curator|operator] [--allow-direct-feedback (deprecated; operator only)] [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --library-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --router-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]]"
                         .into(),
                 );
             }
@@ -212,6 +229,7 @@ where
         if router_config.is_some()
             || library_config.is_some()
             || !dbs.is_empty()
+            || !discovery_catalogs.is_empty()
             || capability_profile.is_some()
             || allow_direct_feedback
         {
@@ -232,10 +250,11 @@ where
     if let Some(config) = router_config {
         if library_config.is_some()
             || !dbs.is_empty()
+            || !discovery_catalogs.is_empty()
             || capability_profile.is_some()
             || allow_direct_feedback
         {
-            return Err("--router-config cannot be combined with --library-config, --db, --capability-profile, or --allow-direct-feedback".into());
+            return Err("--router-config cannot be combined with --library-config, --db, --discovery-catalog, --capability-profile, or --allow-direct-feedback".into());
         }
         return Ok(Startup {
             mode: StartupMode::Router { config },
@@ -243,13 +262,22 @@ where
         });
     }
     if let Some(config) = library_config {
-        if !dbs.is_empty() || capability_profile.is_some() || allow_direct_feedback {
-            return Err("--library-config cannot be combined with --db, --capability-profile, or --allow-direct-feedback".into());
+        if !dbs.is_empty()
+            || !discovery_catalogs.is_empty()
+            || capability_profile.is_some()
+            || allow_direct_feedback
+        {
+            return Err("--library-config cannot be combined with --db, --discovery-catalog, --capability-profile, or --allow-direct-feedback".into());
         }
         return Ok(Startup {
             mode: StartupMode::Library { config },
             transport,
         });
+    }
+    for (alias, _) in &discovery_catalogs {
+        if !(dbs.iter().any(|(name, _)| name == alias) || dbs.is_empty() && alias == "user") {
+            return Err(format!("--discovery-catalog alias {alias:?} must name a startup --db (or default user owner)").into());
+        }
     }
     let direct_feedback = match (allow_direct_feedback, capability_profile) {
         (false, _) => DirectFeedback::Disabled,
@@ -271,6 +299,7 @@ where
     Ok(Startup {
         mode: StartupMode::Owner(OwnerOptions {
             databases: dbs,
+            discovery_catalogs,
             profile,
             direct_feedback,
         }),
@@ -391,7 +420,7 @@ mod tests {
                     "curator",
                     "--allow-direct-feedback",
                 ],
-                "--router-config cannot be combined with --library-config, --db, --capability-profile, or --allow-direct-feedback",
+                "--router-config cannot be combined with --library-config, --db, --discovery-catalog, --capability-profile, or --allow-direct-feedback",
                 0,
             ),
             (
@@ -402,7 +431,7 @@ mod tests {
                     "curator",
                     "--allow-direct-feedback",
                 ],
-                "--library-config cannot be combined with --db, --capability-profile, or --allow-direct-feedback",
+                "--library-config cannot be combined with --db, --discovery-catalog, --capability-profile, or --allow-direct-feedback",
                 0,
             ),
         ] {

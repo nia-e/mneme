@@ -121,8 +121,10 @@ def main(argv=None):
             result = {}
         else:
             from claude_config import load_config
-            config = load_config(args.config, cwd=event["cwd"])
-            result = handle_event(event, config)
+            from store_registry import native_selection_budget
+            with native_selection_budget(3):
+                config = load_config(args.config, cwd=event["cwd"])
+                result = handle_event(event, config)
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
     except (OSError, ValueError, TypeError, KeyError, RecursionError, UnicodeError):

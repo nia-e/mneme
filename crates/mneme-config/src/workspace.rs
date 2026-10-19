@@ -2,9 +2,10 @@
 //! This module never opens a memory store or contacts an owner.
 
 use crate::{
-    Background, CONFIG_SCHEMA, Config, ConfigSource, MAX_CONFIG_BYTES, PrivacyProfile, Result,
-    SelectionContext, SelectionSnapshot, Workspace, WorkspaceKind, declarative_file, default_rule,
-    error, legacy_workspace, select, sha256, validate_path, validate_profile,
+    ConfigDeclarations, ConfigSource, DiscoveryBinding, DiscoveryGraph, DiscoveryReceipt,
+    DiscoveryResolution, DiscoverySeed, DiscoveryWitness, MAX_CONFIG_BYTES, PrivacyProfile, Result,
+    SelectionContext, SelectionSnapshot, WorkspaceKind, declarative_file, default_rule, error,
+    legacy_workspace, resolve_discovery, select, sha256, validate_path, validate_profile,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,16 +58,16 @@ pub fn default_user_path() -> Result<PathBuf> {
     validate_path(&dir)?;
     Ok(dir.join("mneme/memory.toml"))
 }
-fn load_source(path: &Path, role: &str) -> Result<(Config, ConfigSource)> {
+fn load_source(path: &Path, role: &str) -> Result<(ConfigDeclarations, ConfigSource)> {
     let source = declarative_file::read(path)?.ok_or_else(|| {
         error("configuration file is missing; create memory.toml or choose --config")
     })?;
     let raw = source.bytes;
     let text = std::str::from_utf8(&raw).map_err(|_| error("configuration must be UTF-8"))?;
     let config = if role == "project" {
-        Config::parse_overlay(text)?
+        ConfigDeclarations::parse_overlay(text)?
     } else {
-        Config::parse(text)?
+        ConfigDeclarations::parse(text)?
     };
     Ok((
         config,
@@ -103,21 +104,14 @@ pub fn select_workspace(
     )?;
     resolve_request(&request)?.ok_or_else(|| error("explicit configuration is unavailable"))
 }
-fn select_workspace_inner(
+fn prepare_workspace_inner(
     user_path: Option<&Path>,
     cwd: &Path,
     requested_profile: Option<&str>,
     origins: Vec<PathBuf>,
     user_codex: Option<&Path>,
-) -> Result<SelectionSnapshot> {
-    let mut config = Config {
-        schema: CONFIG_SCHEMA.into(),
-        read_default: default_rule(),
-        background: Background::default(),
-        workspace: Workspace::default(),
-        stores: BTreeMap::new(),
-        libraries: BTreeMap::new(),
-    };
+) -> Result<(ConfigDeclarations, SelectionContext)> {
+    let mut config = ConfigDeclarations::default();
     let mut sources = vec![];
     if let Some(path) = user_path {
         let (loaded, source) = load_source(path, "user")?;
@@ -189,15 +183,9 @@ fn select_workspace_inner(
                             }
                             // Explicitly choosing the project file is not a request
                             // to overlay it onto itself. Infer only its project root.
-                            for store in config.stores.values_mut() {
-                                if store.active.workspace == WorkspaceKind::Project
-                                    && !store.active.has_positive_roots()
-                                {
-                                    store.active.roots.push(parent.to_owned());
-                                }
-                            }
+                            infer_project_roots(&mut config, parent);
                         } else {
-                            config = config.merge_project(project_config, parent)?;
+                            config = merge_project_declarations(config, project_config, parent)?;
                         }
                         context.project.overlay = Some(source.path.clone());
                         aggregate_bytes += source.bytes;
@@ -326,7 +314,7 @@ fn select_workspace_inner(
         }
     }
     context.sources = unique.into_values().collect();
-    select(&config, &context)
+    Ok((config, context))
 }
 
 /// Opt-in discovery never parses legacy policy before finding a human native
@@ -412,7 +400,7 @@ fn make_request(
         user_codex_dir,
     })
 }
-pub(crate) fn resolve_request(request: &SelectionRequest) -> Result<Option<SelectionSnapshot>> {
+pub(crate) fn prepare_request(request: &SelectionRequest) -> Result<Option<WorkspaceDeclarations>> {
     validate_path(&request.cwd)?;
     if let Some(path) = &request.user_path {
         validate_path(path)?;
@@ -448,17 +436,435 @@ pub(crate) fn resolve_request(request: &SelectionRequest) -> Result<Option<Selec
     if user_path.is_none() && !has_native_overlay(&origins)? {
         return Ok(None);
     }
-    let mut snapshot = select_workspace_inner(
+    let (local, context) = prepare_workspace_inner(
         user_path,
         &request.cwd,
         request.requested_profile.as_deref(),
         origins,
         request.user_codex_dir.as_deref(),
     )?;
-    snapshot.request = Some(request.clone());
-    snapshot.digest = snapshot.calculated_digest()?;
-    Ok(Some(snapshot))
+    Ok(Some(WorkspaceDeclarations {
+        local,
+        context,
+        request: request.clone(),
+    }))
 }
+pub(crate) fn resolve_request(request: &SelectionRequest) -> Result<Option<SelectionSnapshot>> {
+    prepare_request(request)?
+        .map(|prepared| finish_workspace(prepared, None))
+        .transpose()
+}
+
+pub(crate) fn replay_request(
+    request: &SelectionRequest,
+    witness: Option<&DiscoveryWitness>,
+) -> Result<Option<SelectionSnapshot>> {
+    let Some(prepared) = prepare_request(request)? else {
+        return Ok(None);
+    };
+    match witness {
+        None => finish_workspace(prepared, None).map(Some),
+        Some(witness) => {
+            if prepared.boundary_sha256()? != witness.boundary_sha256 {
+                return Err(error(
+                    "local discovery boundary changed; reselect native configuration",
+                ));
+            }
+            let receipt = witness.binding.load()?;
+            finish_workspace(prepared, Some((&receipt, witness.binding.clone()))).map(Some)
+        }
+    }
+}
+
+/// Local declarations and all privacy-boundary witnesses, collected before any
+/// owner contact. The client owns acquisition; this value never opens a store.
+#[derive(Debug, Clone)]
+pub struct WorkspaceDeclarations {
+    pub local: ConfigDeclarations,
+    pub context: SelectionContext,
+    pub request: SelectionRequest,
+}
+impl WorkspaceDeclarations {
+    pub fn has_discovery(&self) -> bool {
+        self.local.has_discovery()
+    }
+    pub fn discovery_seeds(&self) -> Result<Vec<DiscoverySeed>> {
+        self.local
+            .discovery_seeds()?
+            .into_iter()
+            .filter_map(
+                |seed| match self.catalog_contact_allowed(&seed.id, &seed.label) {
+                    Ok(true) => Some(Ok(seed)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
+            .collect()
+    }
+    /// One referral admission rule for acquisition and frozen replay. A locally
+    /// explicit setting wins by canonical ID; no remote alias grants authority.
+    pub fn catalog_referral_allowed(
+        &self,
+        label: &str,
+        declaration: &crate::StoreDeclaration,
+    ) -> Result<bool> {
+        Ok(crate::discovery_opt_in(&self.local, declaration)
+            && self.catalog_contact_allowed(&declaration.id, label)?)
+    }
+    /// A finished receipt must account for every admitted referral. Omitting an
+    /// opposing branch cannot turn a partial acquisition into permissive defaults.
+    /// Explicitly incomplete graphs may omit bounded work, but remain fail-closed.
+    pub fn validate_frozen_graph(&self, graph: &DiscoveryGraph) -> Result<()> {
+        graph.validate_for(&self.local)?;
+        let expected: BTreeSet<_> = self.discovery_seeds()?.into_iter().map(|s| s.id).collect();
+        if graph.seeds.iter().cloned().collect::<BTreeSet<_>>() != expected {
+            return Err(error(
+                "discovery receipt seed set differs from admitted local seeds",
+            ));
+        }
+        if self.local.has_discovery()
+            && self.local.discovery_seeds()?.is_empty()
+            && graph.incomplete.is_none()
+        {
+            return Err(error(
+                "discovery has no complete locally routed seed; supply a seed route",
+            ));
+        }
+        for (publisher, catalog) in &graph.catalogs {
+            let mut expected = BTreeSet::new();
+            for (label, declaration) in &catalog.stores {
+                if self.catalog_referral_allowed(label, declaration)? {
+                    expected.insert(declaration.id.clone());
+                }
+            }
+            let actual: BTreeSet<_> = graph
+                .edges
+                .get(publisher)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect();
+            if !actual.is_subset(&expected) || (graph.incomplete.is_none() && actual != expected) {
+                return Err(error(
+                    "discovery receipt omits or changes an admitted referral; refresh configuration",
+                ));
+            }
+        }
+        let reached: BTreeSet<_> = graph
+            .seeds
+            .iter()
+            .chain(graph.edges.values().flatten())
+            .collect();
+        if graph.incomplete.is_none()
+            && reached
+                .iter()
+                .any(|id| !graph.catalogs.contains_key(*id) && !graph.unavailable.contains_key(*id))
+        {
+            return Err(error(
+                "discovery receipt has unanswered publishers without coverage evidence",
+            ));
+        }
+        Ok(())
+    }
+    pub fn resolve_graph(&self, graph: &DiscoveryGraph) -> Result<DiscoveryResolution> {
+        resolve_discovery(&self.local, graph)
+    }
+    pub fn boundary_sha256(&self) -> Result<String> {
+        let bytes = serde_json::to_vec(&(
+            &self.request,
+            &self.local,
+            &self.context.cwd,
+            &self.context.origins,
+            &self.context.profile,
+            &self.context.project,
+            &self.context.sources,
+        ))
+        .map_err(|_| error("cannot encode local discovery boundary"))?;
+        Ok(sha256(&bytes))
+    }
+    pub fn receipt_path(&self) -> Result<PathBuf> {
+        let cache = std::env::var_os("XDG_CACHE_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|s| !s.is_empty())
+                    .map(|h| PathBuf::from(h).join(".cache"))
+            })
+            .ok_or_else(|| error("set XDG_CACHE_HOME or HOME for native discovery receipts"))?;
+        validate_path(&cache)?;
+        Ok(cache
+            .join("mneme/discovery")
+            .join(format!("{}.json", self.boundary_sha256()?)))
+    }
+    /// Catalog-only contact is not activation. Local disable, explicit exclusion
+    /// and privacy selectors remain ceilings, including before routes resolve.
+    pub fn catalog_contact_allowed(&self, id: &str, proposed_label: &str) -> Result<bool> {
+        crate::validate_id(id)?;
+        crate::validate_name(proposed_label)?;
+        let local = self.local.stores.iter().find(|(_, store)| store.id == id);
+        let label = local
+            .map(|(label, _)| label.as_str())
+            .unwrap_or(proposed_label);
+        let profile = match self.local.workspace.profile.as_deref() {
+            Some(p) => {
+                PrivacyProfile::parse(&self.context.profile)?.narrow(PrivacyProfile::parse(p)?)
+            }
+            None => PrivacyProfile::parse(&self.context.profile)?,
+        };
+        let explicit_allow = self
+            .local
+            .workspace
+            .allow_stores
+            .as_ref()
+            .is_some_and(|v| v.iter().any(|n| n == label))
+            || self
+                .context
+                .project
+                .legacy_allow_stores
+                .as_ref()
+                .is_some_and(|v| v.iter().any(|n| n == label));
+        if (profile == PrivacyProfile::Isolated && !explicit_allow)
+            || self
+                .local
+                .workspace
+                .allow_stores
+                .as_ref()
+                .is_some_and(|v| !v.iter().any(|n| n == label))
+            || self
+                .context
+                .project
+                .legacy_allow_stores
+                .as_ref()
+                .is_some_and(|v| !v.iter().any(|n| n == label))
+            || (self.context.project.legacy_library.is_some()
+                && self.context.project.legacy_allow_stores.is_none())
+        {
+            return Ok(false);
+        }
+        if let Some((_, store)) = local {
+            if store.selected_discovery(self.local.device.as_deref()) == Some(false) {
+                return Ok(false);
+            }
+            let base = store.active.as_ref();
+            let patch = self
+                .local
+                .device
+                .as_deref()
+                .and_then(|d| store.devices.get(d))
+                .and_then(|p| p.active.as_ref());
+            let enabled = patch
+                .and_then(|p| p.enabled)
+                .or_else(|| base.and_then(|p| p.enabled))
+                .unwrap_or(true);
+            let excluded = patch
+                .and_then(|p| p.excluded_roots.as_ref())
+                .or_else(|| base.and_then(|p| p.excluded_roots.as_ref()));
+            let profiles = patch
+                .and_then(|p| p.profiles.as_ref())
+                .or_else(|| base.and_then(|p| p.profiles.as_ref()));
+            let profile_allowed = profiles
+                .map(|p| p.iter().any(|p| p == profile.as_str()))
+                .unwrap_or(profile != PrivacyProfile::Isolated);
+            if !enabled
+                || crate::selection::path_match(
+                    &self.context.origins,
+                    excluded.map(Vec::as_slice).unwrap_or_default(),
+                )?
+                || (!profile_allowed && !(profile == PrivacyProfile::Isolated && explicit_allow))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+/// Prepare the exact same explicit/discovered local request used by ordinary
+/// selection, but defer remote catalogs and effective-store materialization.
+pub fn prepare_workspace(
+    user_path: Option<&Path>,
+    cwd: &Path,
+    profile: Option<&str>,
+) -> Result<Option<WorkspaceDeclarations>> {
+    let mode = if user_path.is_some() {
+        SelectionRequestMode::Explicit
+    } else {
+        SelectionRequestMode::Discover
+    };
+    let default = if user_path.is_none() {
+        default_user_path().ok()
+    } else {
+        None
+    };
+    prepare_request(&make_request(
+        mode,
+        user_path.or(default.as_deref()),
+        cwd,
+        profile,
+    )?)
+}
+/// Finish from a native receipt already published by the client. No remote
+/// I/O occurs here, including when verifying the pinned receipt.
+pub fn finish_workspace(
+    prepared: WorkspaceDeclarations,
+    receipt: Option<(&DiscoveryReceipt, DiscoveryBinding)>,
+) -> Result<SelectionSnapshot> {
+    let (config, witness, project_roots) = if let Some((receipt, binding)) = receipt {
+        if !prepared.has_discovery() {
+            return Err(error(
+                "discovery receipt supplied without a local discovery opt-in",
+            ));
+        }
+        receipt.validate()?;
+        let boundary_sha256 = prepared.boundary_sha256()?;
+        // Acquisition may have taken time. Do not publish a fresh selection from
+        // stale local privacy metadata merely because its receipt matches the old
+        // preparation. This recheck is metadata-only and cannot refresh catalogs.
+        let current = prepare_request(&prepared.request)?
+            .ok_or_else(|| error("local configuration disappeared during discovery"))?;
+        if current.boundary_sha256()? != boundary_sha256 {
+            return Err(error(
+                "local discovery boundary changed during acquisition; reselect",
+            ));
+        }
+        if receipt.boundary_sha256 != boundary_sha256 {
+            return Err(error(
+                "discovery receipt belongs to a different local boundary; refresh configuration",
+            ));
+        }
+        prepared.validate_frozen_graph(&receipt.graph)?;
+        if binding.load()? != *receipt {
+            return Err(error("discovery receipt changed before selection; retry"));
+        }
+        let resolved = prepared.resolve_graph(&receipt.graph)?;
+        (
+            resolved.config,
+            Some(DiscoveryWitness {
+                binding,
+                boundary_sha256,
+            }),
+            resolved.project_roots,
+        )
+    } else {
+        if prepared.has_discovery() {
+            return Err(error(
+                "discovery configuration requires native client acquisition or a pinned receipt",
+            ));
+        }
+        (prepared.local.materialize()?, None, Vec::new())
+    };
+    let mut context = prepared.context;
+    for root in project_roots {
+        if crate::selection::path_match(&context.origins, std::slice::from_ref(&root))? {
+            // An unresolved/conflicted project owner still proves configured
+            // project presence. Dropping its route cannot authorize misc fallback.
+            context.project.configured = true;
+            if context.project.root.is_none() {
+                context.project.root = Some(root);
+            }
+        }
+    }
+    let mut snapshot = if witness.is_some() {
+        crate::selection::select_resolved(&config, &context)?
+    } else {
+        select(&config, &context)?
+    };
+    snapshot.request = Some(prepared.request);
+    snapshot.discovery = witness;
+    snapshot.digest = snapshot.calculated_digest()?;
+    Ok(snapshot)
+}
+
+fn infer_project_roots(config: &mut ConfigDeclarations, root: &Path) {
+    for store in config.stores.values_mut() {
+        let active = store.active.get_or_insert_default();
+        if active.workspace.unwrap_or_default() == WorkspaceKind::Project
+            && active.roots.as_ref().is_none_or(Vec::is_empty)
+            && active.subtree_roots.as_ref().is_none_or(Vec::is_empty)
+        {
+            active.roots = Some(vec![root.to_owned()]);
+        }
+    }
+}
+fn merge_project_declarations(
+    mut user: ConfigDeclarations,
+    mut project: ConfigDeclarations,
+    root: &Path,
+) -> Result<ConfigDeclarations> {
+    validate_path(root)?;
+    for (overlay_value, user_value, default) in [
+        (
+            project.background.as_ref().and_then(|v| v.model.as_ref()),
+            user.background.as_ref().and_then(|v| v.model.as_ref()),
+            crate::default_model(),
+        ),
+        (
+            project.background.as_ref().and_then(|v| v.effort.as_ref()),
+            user.background.as_ref().and_then(|v| v.effort.as_ref()),
+            crate::default_effort(),
+        ),
+    ] {
+        if let Some(value) = overlay_value
+            && Some(value) != default.as_ref()
+            && Some(value) != user_value.or(default.as_ref())
+        {
+            return Err(error(
+                "project overlay cannot replace user model/effort or read_default",
+            ));
+        }
+    }
+    if project
+        .read_default
+        .as_deref()
+        .is_some_and(|v| v != default_rule())
+    {
+        return Err(error(
+            "project overlay cannot replace user model/effort or read_default",
+        ));
+    }
+    if project.device.is_some() && project.device != user.device {
+        return Err(error(
+            "project overlay cannot replace the client device binding",
+        ));
+    }
+    if project.background.as_ref().and_then(|v| v.enabled) == Some(false) {
+        user.background.get_or_insert_default().enabled = Some(false);
+    }
+    infer_project_roots(&mut project, root);
+    let ids: BTreeSet<_> = user.stores.values().map(|s| s.id.clone()).collect();
+    for (name, store) in project.stores {
+        if ids.contains(&store.id) || user.stores.insert(name, store).is_some() {
+            return Err(error(
+                "project overlay duplicates a user store name or canonical identity",
+            ));
+        }
+    }
+    for (name, library) in project.libraries {
+        if user.libraries.insert(name, library).is_some() {
+            return Err(error("project overlay duplicates a user library name"));
+        }
+    }
+    user.workspace.profile = crate::privacy::narrow_unvalidated_profiles(
+        user.workspace.profile,
+        project.workspace.profile,
+    );
+    fn narrow(old: Option<Vec<String>>, new: Option<Vec<String>>) -> Option<Vec<String>> {
+        match (old, new) {
+            (Some(old), Some(new)) => Some(old.into_iter().filter(|v| new.contains(v)).collect()),
+            (old, None) => old,
+            (None, new) => new,
+        }
+    }
+    user.workspace.allow_stores =
+        narrow(user.workspace.allow_stores, project.workspace.allow_stores);
+    user.workspace.allow_libraries = narrow(
+        user.workspace.allow_libraries,
+        project.workspace.allow_libraries,
+    );
+    user.validate()?;
+    Ok(user)
+}
+
 fn has_native_overlay(origins: &[PathBuf]) -> Result<bool> {
     let mut seen = BTreeSet::new();
     for origin in origins {

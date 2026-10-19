@@ -269,6 +269,7 @@ async fn mutation_dispatch_rejects_omitted_and_misspelled_database_selectors() {
 async fn typed_request_boundary_rejects_invalid_lossy_integer_and_irrelevant_values_before_checkout()
  {
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: crate::activity::ActivityRing::default(),
         dbs: BTreeMap::new(),
     };
@@ -441,6 +442,7 @@ async fn typed_request_boundary_rejects_invalid_lossy_integer_and_irrelevant_val
 #[tokio::test]
 async fn remote_cursor_binding_and_weight_fail_before_database_checkout() {
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: crate::activity::ActivityRing::default(),
         dbs: BTreeMap::new(),
     };
@@ -963,6 +965,7 @@ fn remote_edge_page_limits_fail_closed() {
 #[tokio::test]
 async fn admission_errors_precede_authority_cold_work_and_checkout() {
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: activity::ActivityRing::default(),
         dbs: BTreeMap::new(),
     };

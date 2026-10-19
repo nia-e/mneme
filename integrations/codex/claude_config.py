@@ -52,7 +52,13 @@ def validate_static(value):
     return dict(value)
 
 
-def load_config(path, *, cwd):
+def load_config(path, *, cwd, expected_selection_digest=None):
+    from store_registry import native_selection_budget
+    with native_selection_budget(3):
+        return _load_config(path, cwd=cwd, expected_selection_digest=expected_selection_digest)
+
+
+def _load_config(path, *, cwd, expected_selection_digest):
     path = canonical_path(path)
     raw = read_regular(path, MAX_CONFIG)
     if len(raw) > MAX_CONFIG:
@@ -66,7 +72,9 @@ def load_config(path, *, cwd):
     if root.resolve(strict=True) != root or not root.is_dir():
         raise ValueError("explicit transcripts_root must be a real directory")
     from registry_runtime import native_capture_selection
-    config = native_capture_selection(value, path, raw, cwd=cwd, capture_only=True)
+    replay = ({"expected_selection_digest": expected_selection_digest}
+              if expected_selection_digest is not None else {})
+    config = native_capture_selection(value, path, raw, cwd=cwd, capture_only=True, **replay)
     # Machinery is not policy: don't silently substitute the native Codex model.
     config.update(reader_model=value["reader_model"], librarian_effort=value["librarian_effort"],
                   source_host="claude_code", assessor="claude_code", recall_mode="off", _background_maintenance=False)

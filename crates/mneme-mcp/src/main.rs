@@ -15,6 +15,7 @@ mod capture;
 mod concern;
 mod configured_server;
 mod context_observation;
+mod discovery_catalog;
 mod edit_body;
 mod edit_summary;
 mod episode;
@@ -204,6 +205,7 @@ fn metered_cold_tool(name: &str) -> bool {
 const HOME_DB: &str = "user";
 
 struct Registry {
+    discovery_catalogs: BTreeMap<String, discovery_catalog::Source>,
     dbs: BTreeMap<String, std::sync::Arc<DatabaseSlot>>,
     activity: activity::ActivityRing,
 }
@@ -357,6 +359,7 @@ impl Server {
     fn coordinator(coordinator: Coordinator) -> Self {
         Self {
             registry: Registry {
+                discovery_catalogs: Default::default(),
                 activity: activity::ActivityRing::default(),
                 dbs: BTreeMap::new(),
             },
@@ -379,15 +382,25 @@ async fn main() -> Result<(), AnyErr> {
         } => {
             let coordinator = if let Some(name) = library {
                 let client = mneme_store_client::ConfiguredClient::new(
-                    mneme_config::select_workspace(&config, &cwd, None)?,
+                    mneme_store_client::discovery::select_workspace(
+                        &config,
+                        &cwd,
+                        None,
+                        mneme_store_client::discovery::ResolveOptions::default(),
+                        &mneme_store_client::OperationBudget::new(
+                            1024 * 1024,
+                            Duration::from_secs(15),
+                        )?,
+                    )
+                    .await?,
                 )?;
                 Coordinator::Library(library_server::LibraryServer::from_runtime(
                     client.library(&name)?,
                 ))
             } else {
-                Coordinator::Configured(configured_server::ConfiguredServer::from_path(
-                    &config, &cwd,
-                )?)
+                Coordinator::Configured(
+                    configured_server::ConfiguredServer::from_path(&config, &cwd).await?,
+                )
             };
             serve_selected_transport(
                 Server::coordinator(coordinator),
@@ -418,7 +431,7 @@ async fn main() -> Result<(), AnyErr> {
                 CapabilityPolicy::new(options.profile(), options.direct_feedback().enabled());
             let direct_feedback = options.direct_feedback();
             let mut sessions = SessionState::default();
-            let registry = build_registry(options.into_databases(), &mut sessions)?;
+            let registry = build_owner_registry(options, &mut sessions)?;
             let server = Server {
                 registry,
                 sessions: std::sync::Arc::new(Mutex::new(sessions)),
@@ -515,6 +528,17 @@ fn claim_stdout() -> Box<dyn std::io::Write + Send> {
     Box::new(std::io::stdout())
 }
 
+/// Admit operator publication files before opening or creating any owner.
+fn build_owner_registry(
+    options: startup::OwnerOptions,
+    sessions: &mut SessionState,
+) -> Result<Registry, AnyErr> {
+    let catalogs = discovery_catalog::prepare_sources(options.discovery_catalogs().to_vec())?;
+    let mut registry = build_registry(options.into_databases(), sessions)?;
+    registry.discovery_catalogs = catalogs.bind(&registry)?;
+    Ok(registry)
+}
+
 /// Open each `NAME=PATH` into a releasable registry slot; with none given,
 /// exposes just the user db. All slots share one lazy inference runtime.
 fn build_registry(
@@ -538,6 +562,7 @@ fn build_registry(
         dbs.insert(name, slot);
     }
     Ok(Registry {
+        discovery_catalogs: Default::default(),
         dbs,
         activity: activity::ActivityRing::default(),
     })
@@ -804,6 +829,7 @@ async fn call_tool_authorized(
         AdmittedOperation::Activity { after, limit } => {
             Ok(serde_json::to_value(reg.activity.page(after, limit))?)
         }
+        AdmittedOperation::DiscoveryCatalog(request) => discovery_catalog::read(reg, request),
         AdmittedOperation::Databases => Ok(json!(
             reg.catalog()?
                 .into_iter()
@@ -2181,6 +2207,7 @@ impl<'a> ValidatedToolArguments<'a> {
 /// exhaustive: a new operation needs both dispatch and an explicit policy kind.
 enum AdmittedOperation {
     Databases,
+    DiscoveryCatalog(discovery_catalog::Request),
     Activity { after: u64, limit: usize },
     DatabaseControl(DatabaseControlRequest),
     SnapshotCreate,
@@ -2221,6 +2248,7 @@ impl AdmittedOperation {
     fn kind(&self) -> ToolRequestKind {
         match self {
             Self::Databases => ToolRequestKind::Databases,
+            Self::DiscoveryCatalog(_) => ToolRequestKind::DiscoveryCatalog,
             Self::Activity { after, limit } => ToolRequestKind::Activity {
                 after: *after,
                 limit: *limit,
@@ -2324,6 +2352,7 @@ enum IngestRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolRequestKind {
     Databases,
+    DiscoveryCatalog,
     Activity {
         after: u64,
         limit: usize,
@@ -2370,6 +2399,7 @@ impl ToolRequestKind {
     const fn tool_name(self) -> &'static str {
         match self {
             Self::Databases => "databases",
+            Self::DiscoveryCatalog => "discovery_catalog",
             Self::Activity { .. } => "activity",
             Self::DatabaseControl(_) => "database_control",
             Self::SnapshotCreate => "snapshot_create",
@@ -2410,6 +2440,7 @@ impl ToolRequestKind {
     const fn capability_class(self) -> CapabilityClass {
         match self {
             Self::Databases
+            | Self::DiscoveryCatalog
             | Self::Activity { .. }
             | Self::Status
             | Self::Query
@@ -2496,7 +2527,10 @@ impl ToolRequestKind {
     const fn requires_explicit_db(self) -> bool {
         matches!(
             self,
-            Self::DatabaseControl(DatabaseControlRequest::Release | DatabaseControlRequest::Resume)
+            Self::DiscoveryCatalog
+                | Self::DatabaseControl(
+                    DatabaseControlRequest::Release | DatabaseControlRequest::Resume
+                )
                 | Self::SnapshotCreate
                 | Self::Ingest(_)
                 | Self::Capture(_)
@@ -3358,6 +3392,9 @@ fn validate_advertised_value(key: &str, value: &Value, schema: &Value) -> Result
 fn admit_tool_operation(name: &str, arguments: &Value) -> Result<AdmittedOperation, AnyErr> {
     match name {
         "databases" => Ok(AdmittedOperation::Databases),
+        "discovery_catalog" => {
+            discovery_catalog::Request::parse(arguments).map(AdmittedOperation::DiscoveryCatalog)
+        }
         "activity" => Ok(AdmittedOperation::Activity {
             after: arguments.get("after").map_or(Ok(0), |value| {
                 value
@@ -3733,6 +3770,7 @@ fn graph_tool_schema() -> Value {
 
 fn unfiltered_tool_schemas() -> Vec<Value> {
     let mut tools = vec![
+        discovery_catalog::tool_schema(),
         tool(
             "databases",
             "List registered databases with stable id, resolved path, lease state, and in-flight MCP checkout count.",
@@ -3989,11 +4027,10 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
 /// makes an accidentally unclassified schema a test failure.
 fn catalog_minimum_capability(name: &str) -> Option<CapabilityClass> {
     match name {
-        "databases" | "activity" | "database_control" | "status" | "query" | "recall_context"
-        | "recall" | "get" | "list" | "graph" | "neighbors" | "remote_edges" | "core"
-        | "contradictions" | "merges" | "walk" | "episode" | "concern" => {
-            Some(CapabilityClass::ReadOnly)
-        }
+        "databases" | "discovery_catalog" | "activity" | "database_control" | "status"
+        | "query" | "recall_context" | "recall" | "get" | "list" | "graph" | "neighbors"
+        | "remote_edges" | "core" | "contradictions" | "merges" | "walk" | "episode"
+        | "concern" => Some(CapabilityClass::ReadOnly),
         "reflect" => Some(CapabilityClass::ReceiptGrounded),
         "snapshot_create" => Some(CapabilityClass::Operator),
         "retag" | "edit_body" | "edit_summary" | "ingest" | "capture" | "save" | "link"

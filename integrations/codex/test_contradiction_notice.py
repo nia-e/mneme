@@ -50,7 +50,7 @@ class ContradictionNoticeTests(unittest.TestCase):
         self.core_error = None
         self.check_lock = True
         self.selected = self.selection()
-        self.native = patch("store_registry.native_select", side_effect=lambda *_: self.selected)
+        self.native = patch("store_registry.native_select", side_effect=lambda *_, **__: self.selected)
         self.native.start()
         self.addCleanup(self.native.stop)
         outer = self
@@ -296,15 +296,15 @@ class ContradictionNoticeTests(unittest.TestCase):
         self.assertNotIn("contradiction_summary", values[0])
 
     def test_parent_child_wire_roundtrip_keeps_state_claim_and_notice(self):
-        def subprocess(_command, *, input, **_options):
+        def subprocess(_command, input, _timeout):
             request = json.loads(input)
             self.assertEqual(request["notice_state"], self.notice_state)
             lines = []
             with patch("core_hook.sys.stdin", SimpleNamespace(buffer=io.BytesIO(input))), \
                  patch("builtins.print", side_effect=lambda line, **_: lines.append(line)):
                 self.assertEqual(core_hook._registry_child_main(), 0)
-            return SimpleNamespace(stdout=("\n".join(lines) + "\n").encode())
-        with patch("core_hook.subprocess.run", side_effect=subprocess):
+            return ("\n".join(lines) + "\n").encode()
+        with patch("core_hook._run_registry_collector", side_effect=subprocess):
             first = core_hook.collect_registry_core(self.selected, notice_state=self.notice_state)
             second = core_hook.collect_registry_core(self.selected, notice_state=self.notice_state)
         self.assertIn("contradiction_summary", first[0])

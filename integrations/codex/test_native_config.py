@@ -44,7 +44,7 @@ class NativeHookConfigTests(unittest.TestCase):
         self.write()
         self.raw_snapshot = snapshot(self.root)
         self.selected = registry.NativeSelection(self.raw_snapshot, self.value["memory_config"], self.value["native_cli"], str(self.root))
-        self.select_patch = patch("store_registry.native_select", side_effect=lambda *_: self.selected)
+        self.select_patch = patch("store_registry.native_select", side_effect=lambda *_, **__: self.selected)
         self.select_patch.start()
 
     def tearDown(self):
@@ -188,7 +188,7 @@ class NativeHookConfigTests(unittest.TestCase):
             target.write_text('schema = "mneme.config.v1"\n')
         logical.symlink_to(targets[0])
 
-        def select(path, *_):
+        def select(path, *_, **__):
             self.assertEqual(str(path), str(logical))
             value = copy.deepcopy(self.raw_snapshot)
             value["sources"] = [{"role": "user", "path": str(logical.resolve(strict=True)),
@@ -437,7 +437,264 @@ class NativeHookConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError): registry.NativeSelection(value, self.value["memory_config"], self.value["native_cli"])
 
 
+class NativeDiscoveryReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.config = str(self.root / "memory.toml")
+        self.binary = str(self.root / "mnemed")
+        Path(self.binary).write_bytes(b"native selection identity witness")
+        self.pin = registry.native_binary_identity(self.binary)
+        self.value = snapshot(self.root)
+        self.value["discovery"] = {
+            "binding": {"path": str(self.root / "discovery-receipt.json"), "sha256": "c" * 64},
+            "boundary_sha256": "d" * 64,
+        }
+
+    def selected(self, value=None):
+        return registry.NativeSelection(self.value if value is None else value, self.config,
+                                        self.binary, str(self.root), self.pin)
+
+    def select_arguments(self, digest=None):
+        arguments = ["select", "--config", self.config, "--cwd", str(self.root)]
+        if digest is not None:
+            arguments.extend(["--expected-selection-digest", digest])
+        return arguments
+
+    def test_discovery_frozen_replay_requests_exact_selection_without_plain_retry(self):
+        selected = self.selected()
+        frozen = copy.deepcopy(selected.to_dict())
+        for route in ("revalidate", "from_dict"):
+            with self.subTest(route=route), \
+                 patch("store_registry.native_select", wraps=registry.native_select) as select, \
+                 patch("store_registry.native_bridge", return_value=copy.deepcopy(self.value)) as bridge:
+                current = (selected.revalidate(operation="read", store_name="named")
+                           if route == "revalidate" else registry.NativeSelection.from_dict(frozen))
+                self.assertEqual(current.to_dict(), frozen)
+                select.assert_called_once_with(self.config, self.binary, str(self.root),
+                                               expected_selection_digest=selected.digest)
+                bridge.assert_called_once()
+                self.assertEqual(bridge.call_args.args,
+                                 (self.binary, self.select_arguments(selected.digest)))
+                self.assertEqual(bridge.call_args.kwargs["timeout"], 3)
+        self.assertEqual(selected.to_dict(), frozen)
+
+    def test_native_receipt_refusal_propagates_without_refresh_or_fallback(self):
+        selected = self.selected()
+        frozen = copy.deepcopy(selected.to_dict())
+        for cause in ("missing", "stale", "malformed"):
+            for route in ("revalidate", "from_dict"):
+                refusal = ValueError(f"native configuration refused: {cause} discovery receipt")
+                with self.subTest(cause=cause, route=route), \
+                     patch("store_registry.native_bridge", side_effect=[refusal, self.value]) as bridge:
+                    with self.assertRaises(ValueError) as caught:
+                        if route == "revalidate":
+                            selected.revalidate(operation="record", store_name="named")
+                        else:
+                            registry.NativeSelection.from_dict(frozen)
+                    self.assertIs(caught.exception, refusal)
+                    bridge.assert_called_once()
+                    self.assertEqual(bridge.call_args.args,
+                                     (self.binary, self.select_arguments(selected.digest)))
+        self.assertEqual(selected.to_dict(), frozen)
+
+    def test_no_discovery_frozen_replay_is_offline_too(self):
+        value = copy.deepcopy(self.value)
+        del value["discovery"]
+        selected = self.selected(value)
+        for route in ("revalidate", "from_dict"):
+            with self.subTest(route=route), \
+                 patch("store_registry.native_select", wraps=registry.native_select) as select, \
+                 patch("store_registry.native_bridge", return_value=value) as bridge:
+                current = (selected.revalidate() if route == "revalidate"
+                           else registry.NativeSelection.from_dict(selected.to_dict()))
+                self.assertEqual(current.to_dict(), selected.to_dict())
+                select.assert_called_once_with(self.config, self.binary, str(self.root),
+                                               expected_selection_digest=selected.digest)
+                bridge.assert_called_once_with(self.binary, self.select_arguments(selected.digest), timeout=3)
+
+    def test_frozen_discovery_reply_cannot_change_snapshot_even_with_same_digest(self):
+        selected = self.selected()
+        changes = [
+            {"binding": {**self.value["discovery"]["binding"], "sha256": "e" * 64}},
+            {"boundary_sha256": "e" * 64},
+        ]
+        for change in changes:
+            value = copy.deepcopy(self.value)
+            value["discovery"].update(change)
+            with self.subTest(change=change), \
+                 patch("store_registry.native_bridge", return_value=value) as bridge:
+                with self.assertRaisesRegex(ValueError, "configuration changed"):
+                    selected.revalidate()
+                bridge.assert_called_once()
+                self.assertEqual(bridge.call_args.args,
+                                 (self.binary, self.select_arguments(selected.digest)))
+
+    def test_native_frozen_selection_preserves_explicit_timeout(self):
+        with patch("store_registry.native_bridge", return_value=self.value) as bridge:
+            selected = registry.native_select(self.config, self.binary, str(self.root),
+                                              expected_selection_digest=self.value["digest"], timeout=.25)
+        self.assertEqual(selected.snapshot, self.value)
+        bridge.assert_called_once_with(self.binary, self.select_arguments(self.value["digest"]), timeout=.25)
+
+    def test_native_acquisition_gets_clipped_process_local_deadline_hint(self):
+        import os
+        process, pipe = MagicMock(), MagicMock()
+        process.returncode = 0
+        pipe.read.side_effect = [json.dumps(self.value).encode(), b""]
+        with patch.dict(os.environ, {"MNEME_DISCOVERY_TIMEOUT_MS": "30000"}), \
+             patch("store_registry.time.monotonic", return_value=100), \
+             patch("host_process.spawn", return_value=process) as spawn, \
+             patch("host_process.BoundedPipe", return_value=pipe), \
+             patch("host_process.terminate_tree"):
+            with registry.native_selection_budget(.5), registry.native_subprocess_group():
+                registry.native_bridge(self.binary, self.select_arguments(), timeout=15)
+            self.assertEqual(spawn.call_args.kwargs["env"]["MNEME_DISCOVERY_TIMEOUT_MS"], "450")
+            self.assertEqual(os.environ["MNEME_DISCOVERY_TIMEOUT_MS"], "30000")
+            self.assertFalse(spawn.call_args.kwargs["tree"])
+            self.assertEqual(pipe.read.call_args.args[1], 100.5)
+
+    def test_nested_selection_budget_cannot_extend_or_restart_expired_work(self):
+        selected = self.selected()
+        with patch("store_registry.time.monotonic", return_value=100) as clock, \
+             patch("store_registry.native_bridge", return_value=self.value) as bridge:
+            with registry.native_selection_budget(5):
+                registry.native_select(self.config, self.binary, str(self.root))
+                clock.return_value = 101
+                with registry.native_selection_budget(15):
+                    selected.revalidate()
+                    clock.return_value = 104
+                    registry.native_select(self.config, self.binary, str(self.root))
+                    clock.return_value = 105
+                    with self.assertRaisesRegex(ValueError, "deadline exhausted"):
+                        selected.revalidate()
+                    self.assertEqual(bridge.call_count, 3)
+                with self.assertRaisesRegex(ValueError, "deadline exhausted"):
+                    registry.native_select(self.config, self.binary, str(self.root))
+                self.assertEqual(bridge.call_count, 3)
+            # Leaving the owning operation restores the caller's prior context,
+            # not the shorter nested budget or an exhausted global deadline.
+            registry.native_select(self.config, self.binary, str(self.root))
+        self.assertEqual([call.kwargs["timeout"] for call in bridge.call_args_list], [5, 3, 1, 15])
+
+    def test_malformed_optional_discovery_snapshot_is_not_legacy_selection(self):
+        discovery = self.value["discovery"]
+        invalid = [None, False, [], {},
+                   {**discovery, "binding": None},
+                   {**discovery, "binding": {**discovery["binding"], "path": "relative.json"}},
+                   {**discovery, "binding": {**discovery["binding"], "sha256": "not-a-hash"}},
+                   {**discovery, "boundary_sha256": "not-a-hash"},
+                   {**discovery, "report": []}]
+        for changed in invalid:
+            with self.subTest(discovery=changed), patch("store_registry.native_bridge") as bridge:
+                with self.assertRaises(ValueError):
+                    self.selected({**self.value, "discovery": changed})
+                bridge.assert_not_called()
+
+
 class NativeCoreWireTests(unittest.TestCase):
+    def discovered(self, *, empty=False):
+        value = snapshot(Path("/tmp"))
+        value["discovery"] = {"binding": {"path": "/tmp/discovery-receipt.json", "sha256": "b" * 64},
+                              "boundary_sha256": "c" * 64}
+        if empty:
+            value.update(active=[], stores=[], read_default=None)
+        return registry.NativeSelection(value, "/tmp/memory.toml", "/tmp/mnemed")
+
+    def test_core_invalid_deadline_refuses_before_initial_selection(self):
+        import core_hook
+        import io
+        from types import SimpleNamespace
+        event = {"hook_event_name": "SessionStart", "source": "startup", "cwd": "/tmp"}
+        with patch("core_hook.sys.stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(event).encode()))), \
+             patch("core_hook._hook_config") as load, patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(core_hook.main(["--hook-config", "/tmp/hooks.json", "--timeout", "13"]), 0)
+        load.assert_not_called()
+
+    def test_discovery_core_child_receives_only_compact_offline_witness(self):
+        import core_hook
+        import io
+        from types import SimpleNamespace
+        selected = self.discovered()
+        calls = []
+        section = {"scope": "named", "db": "project", "outcome": "empty", "cards": [], "total": 0}
+
+        def child(command, input, timeout):
+            self.assertEqual(command[-1:], ["--collect-registry"])
+            witness = json.loads(input)["selection"]
+            self.assertEqual(set(witness), {"schema", "config_path", "native_cli", "cwd", "digest", "binary_pin"})
+            self.assertNotIn(b"discovery-receipt", input)
+            with patch("core_hook.sys.stdin", SimpleNamespace(buffer=io.BytesIO(input))), \
+                 patch("store_registry.native_select", return_value=selected) as replay, \
+                 patch("core_hook._collect_registry_scope", return_value=section), \
+                 patch("builtins.print", side_effect=lambda line, **_: calls.append(line)):
+                self.assertEqual(core_hook.main(command[-1:]), 0)
+                replay.assert_called_once_with(Path(selected.registry_path), Path(selected.native_cli), Path(selected.cwd),
+                                              expected_selection_digest=selected.digest)
+            return ("\n".join(calls) + "\n").encode()
+
+        with patch("core_hook._run_registry_collector", side_effect=child):
+            self.assertEqual(core_hook.collect_registry_core(selected), [section])
+
+    def test_discovery_child_refusal_has_no_plain_retry_or_owner_read(self):
+        import core_hook
+        import io
+        from types import SimpleNamespace
+        selected = self.discovered()
+        witness = {"schema": "mneme.native-core-selection.v1", "config_path": selected.registry_path,
+                   "native_cli": selected.native_cli, "cwd": selected.cwd,
+                   "digest": selected.digest, "binary_pin": selected.binary_pin}
+        for cause in ("missing", "malformed", "stale"):
+            request = json.dumps({"selection": witness, "timeout": 2}).encode()
+            with self.subTest(cause=cause), \
+                 patch("core_hook.sys.stdin", SimpleNamespace(buffer=io.BytesIO(request))), \
+                 patch("store_registry.native_select", side_effect=ValueError(cause)) as replay, \
+                 patch("core_hook._collect_registry_scope") as read:
+                self.assertEqual(core_hook._registry_child_main(), 1)
+                replay.assert_called_once_with(Path(selected.registry_path), Path(selected.native_cli), Path(selected.cwd),
+                                              expected_selection_digest=selected.digest)
+                read.assert_not_called()
+        with patch("core_hook._run_registry_collector", return_value=b""):
+            section, = core_hook.collect_registry_core(selected)
+        self.assertEqual((section["outcome"], section["total"]), ("unavailable", None))
+
+    def test_discovery_child_cannot_accept_a_full_snapshot(self):
+        import core_hook
+        import io
+        from types import SimpleNamespace
+        request = json.dumps({"selection": self.discovered().to_dict(), "timeout": 2}).encode()
+        with patch("core_hook.sys.stdin", SimpleNamespace(buffer=io.BytesIO(request))), \
+             patch("store_registry.native_select") as replay, \
+             patch("core_hook._collect_registry_scope") as read:
+            self.assertEqual(core_hook._registry_child_main(), 1)
+            replay.assert_not_called()
+            read.assert_not_called()
+
+    def test_discovery_without_default_or_active_store_is_not_empty_memory(self):
+        import core_hook
+        selected = self.discovered(empty=True)
+        text = core_hook._registry_context(selected, [])["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Missing or unavailable publishers do not mean empty memory", text)
+        self.assertIn("no memory content was read", text)
+        self.assertNotIn("no memory service was contacted", text)
+
+    def test_core_collection_uses_only_remaining_selection_deadline(self):
+        import core_hook
+        from types import SimpleNamespace
+        selected = self.discovered()
+        clock = [0.0]
+        def revalidate(*args, **kwargs):
+            clock[0] += .4
+            return selected
+        with patch("store_registry.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("store_registry.revalidate", side_effect=revalidate), \
+             patch("core_hook._run_registry_collector", return_value=b"") as run:
+            core_hook.handle_selection({"hook_event_name": "SessionStart", "source": "startup", "cwd": "/tmp"},
+                                       selected, timeout=1)
+        self.assertAlmostEqual(run.call_args.args[2], .6)
+        self.assertAlmostEqual(json.loads(run.call_args.args[1])["timeout"], .6)
+
     def test_large_native_snapshot_uses_small_frozen_core_reference(self):
         import core_hook
         from types import SimpleNamespace
@@ -445,13 +702,14 @@ class NativeCoreWireTests(unittest.TestCase):
         value["config"]["padding"] = "x" * (core_hook.MAX_REGISTRY_REQUEST + 1)
         selected = registry.NativeSelection(value, "/tmp/memory.toml", "/tmp/mnemed")
         section = {"scope": "named", "db": "project", "outcome": "empty", "cards": [], "total": 0}
-        with patch("core_hook.subprocess.run", return_value=SimpleNamespace(stdout=(json.dumps(section)+"\n").encode())) as run:
+        with patch("core_hook._run_registry_collector", return_value=(json.dumps(section)+"\n").encode()) as run:
             self.assertEqual(core_hook.collect_registry_core(selected), [section])
-        payload = run.call_args.kwargs["input"]
+        payload = run.call_args.args[1]
         self.assertLess(len(payload), core_hook.MAX_REGISTRY_REQUEST)
         witness = json.loads(payload)["selection"]
         self.assertEqual(witness["digest"], selected.digest)
         self.assertNotIn("snapshot", witness)
+        self.assertNotIn("--frozen-discovery", run.call_args.args[0])
 
     def test_known_optional_owner_failure_does_not_poison_later_core(self):
         import core_hook

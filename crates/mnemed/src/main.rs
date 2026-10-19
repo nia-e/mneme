@@ -989,7 +989,7 @@ async fn main() -> Result<(), AnyErr> {
     if let Command::Stores(args) = &cli.command {
         if args.config.is_none() && cli.connection.remote.is_none() && cli.db.is_none() {
             if let Some(snapshot) =
-                cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref())?
+                cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref()).await?
             {
                 return cli_config::render_selection(&snapshot, json);
             }
@@ -1005,7 +1005,7 @@ async fn main() -> Result<(), AnyErr> {
         }
         if args.config.is_none() {
             if let Some(snapshot) =
-                cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref())?
+                cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref()).await?
             {
                 return cli_library::run_configured(args, snapshot, json).await;
             }
@@ -1033,7 +1033,7 @@ async fn main() -> Result<(), AnyErr> {
     if cli.db.is_none() && cli.connection.remote.is_none() && !cli_config::independent(&cli.command)
     {
         if let Some(snapshot) =
-            cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref())?
+            cli_config::discover(cli.memory_config.as_deref(), cli.profile.as_deref()).await?
         {
             return cli_config::run_command(
                 &cli.command,

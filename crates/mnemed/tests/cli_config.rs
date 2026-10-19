@@ -52,6 +52,7 @@ permissions = {{ read = true, write = {write} }}
             .current_dir(&self.root)
             .env("HOME", &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env("XDG_CACHE_HOME", self.root.join("cache"))
             .env_remove("MNEME_DB");
         command
     }
@@ -172,5 +173,164 @@ fn bridge_denied_write_and_stale_digest_are_precontact_with_known_zero_work() {
             .contains("digest changed")
     );
     assert_eq!(stale["work"]["decoded_bytes"], 0);
+    fixture.no_contact();
+}
+
+#[test]
+fn local_inspection_reports_policy_and_provenance_without_owner_contact() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .args(["--json", "config", "inspect", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "mneme.config-inspection.v1");
+    assert_eq!(report["configured"], true);
+    assert_eq!(report["cache_status"], "local-only");
+    assert_eq!(report["stores"][0]["name"], "renamed");
+    assert_eq!(report["stores"][0]["id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    assert_eq!(report["stores"][0]["active"], true);
+    assert_eq!(report["stores"][0]["eligible"]["write"], false);
+    assert!(report["error"].is_null());
+    assert!(
+        !report["report"].is_null(),
+        "local provenance should remain inspectable"
+    );
+    let human = fixture
+        .command()
+        .args(["config", "inspect", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    for evidence in [
+        "renamed",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "active=true",
+        "local-only",
+    ] {
+        assert!(human.contains(evidence), "missing {evidence}: {human}");
+    }
+    fixture.no_contact();
+    assert!(
+        !fixture.root.join("cache").exists(),
+        "local-only inspection must not create a cache"
+    );
+}
+
+#[test]
+fn malformed_inspection_is_diagnostic_not_empty_successful_selection() {
+    let fixture = Fixture::new();
+    const SECRET: &str = "do-not-echo-this-broken-config-value";
+    std::fs::write(&fixture.config, format!("schema = \"{SECRET}\n")).unwrap();
+    let output = fixture
+        .command()
+        .args(["--json", "config", "inspect", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "inspect succeeds in reporting a diagnostic"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "mneme.config-inspection.v1");
+    assert!(
+        report["configured"].is_null(),
+        "unknown is not unconfigured"
+    );
+    assert!(report["selection_digest"].is_null());
+    assert!(
+        report["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
+    fixture.no_contact();
+}
+
+#[test]
+fn expected_digest_select_replays_offline_and_refuses_local_change() {
+    let fixture = Fixture::new();
+    let selected = fixture.select();
+    let digest = selected["digest"].as_str().unwrap();
+    let run = || {
+        fixture
+            .command()
+            .args(["--json", "config", "select", "--config"])
+            .arg(&fixture.config)
+            .args(["--expected-selection-digest", digest])
+            .output()
+            .unwrap()
+    };
+    let replayed = run();
+    assert!(
+        replayed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&replayed.stdout).unwrap(),
+        selected
+    );
+    fixture.write(true);
+    let changed = run();
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("digest changed"));
+    fixture.no_contact();
+}
+
+#[test]
+fn frozen_selection_cannot_be_combined_with_refresh() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .args(["config", "select", "--config"])
+        .arg(&fixture.config)
+        .args(["--refresh", "--expected-selection-digest", &"0".repeat(64)])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+    fixture.no_contact();
+}
+
+#[test]
+fn offline_discovery_inspection_does_not_fetch_missing_catalog() {
+    let fixture = Fixture::new();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("[stores.renamed]", "[stores.renamed]\ndiscovery = true"),
+    )
+    .unwrap();
+    let output = fixture
+        .command()
+        .args(["--json", "config", "inspect", "--offline", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["selection_digest"].is_null());
+    assert!(
+        report["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
+    assert_ne!(report["cache_status"], "cached");
     fixture.no_contact();
 }

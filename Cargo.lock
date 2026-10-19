@@ -2384,6 +2384,7 @@ dependencies = [
 name = "mneme-store-client"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mneme-app",
  "mneme-config",
  "mneme-core",

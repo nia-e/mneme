@@ -9,7 +9,9 @@ selection. Generated adapter JSON is machinery, not another store-policy file.
 
 The names `global`, `project` and `misc` are ordinary entries, not reserved database
 classes. Replace the example IDs/endpoints with verified native owner bindings.
-Loading or selecting this configuration does not start or contact owners.
+Loading or selecting this local-only recipe does not start or contact owners.
+Opt-in [store discovery](discovery.md) can instead acquire bounded configuration
+catalogs from explicitly delegated owners; it still never starts them.
 
 ```toml
 schema = "mneme.config.v1"
@@ -241,6 +243,7 @@ or unavailable tag guidance defers dependent tagging/upkeep, not ordinary reads.
 
 ```sh
 mnemed --json config select --config /absolute/memory.toml --cwd /absolute/project
+mnemed config inspect --config /absolute/memory.toml --cwd /absolute/project --offline
 mneme-mcp --memory-config /absolute/memory.toml
 ```
 
@@ -250,7 +253,10 @@ including an inactive one, without changing automatic activation. Profile and
 exclusion boundaries still apply. `--user` refuses under declarative configuration:
 store names are not hard-coded global/project roles.
 
-Selection is metadata-only, bounded and digest-qualified. It reports configured
+Selection is metadata-only, bounded and digest-qualified. With discovery enabled,
+initial acquisition may contact catalog publishers; retained selection and exact
+revalidation use frozen receipts without refetching. See [store discovery](discovery.md)
+for recursive precedence, explicit refresh and failure handling. It reports configured
 inventory separately from active stores and operation eligibility. A configured
 MCP process captures its startup working directory when `--cwd` is omitted. Its
 selection stays bound to that workspace and is exactly revalidated on subsequent

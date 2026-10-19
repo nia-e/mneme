@@ -10,7 +10,12 @@ const KEY_ZOOM_STEP: f64 = 1.2;
 const WHEEL_ZOOM_STEP: f64 = 1.1;
 
 pub(crate) fn map_key(app: &mut App, key: KeyEvent) -> bool {
-    if app.view != View::Map || app.editing || app.show_help || app.source_menu.is_some() {
+    if app.view != View::Map
+        || app.editing
+        || app.show_help
+        || app.source_menu.is_some()
+        || app.config_inspector.is_some()
+    {
         return false;
     }
     if matches!(key.code, KeyCode::Char('+' | '=' | '-' | '0' | 'f')) && !map_viewport_ready(app) {
@@ -230,7 +235,12 @@ pub(crate) fn mouse_with_wheel_reports(app: &mut App, event: MouseEvent, reports
     if crate::detail_scroll::mouse(app, event, reports.max(1)) {
         return;
     }
-    if app.view != View::Map || app.editing || app.show_help || app.source_menu.is_some() {
+    if app.view != View::Map
+        || app.editing
+        || app.show_help
+        || app.source_menu.is_some()
+        || app.config_inspector.is_some()
+    {
         app.layout.borrow_mut().cancel_drag();
         return;
     }

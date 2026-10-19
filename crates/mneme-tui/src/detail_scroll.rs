@@ -21,6 +21,7 @@ fn active(app: &App) -> bool {
     !app.editing
         && !app.show_help
         && app.source_menu.is_none()
+        && app.config_inspector.is_none()
         && (app.show_details || app.edge_lens.is_some())
 }
 

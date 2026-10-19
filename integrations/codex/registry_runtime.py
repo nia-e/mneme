@@ -1,8 +1,10 @@
-"""Bind one v12 hook session to a checked named-store selection.
+"""Bind one hook session to a checked named-store selection.
 
 Static authoring, workspace admission and durable session fencing are separate:
-none of these functions contacts an owner, opens a database or invents a primary
-store for unconfigured work. Existing ledgers are retained, never reset on upgrade.
+legacy selection is filesystem-only; initial native selection may acquire bounded
+owner metadata, while every frozen native replay is offline. Neither path starts an
+owner, opens a database or invents a primary store for unconfigured work. Existing
+ledgers are retained, never reset on upgrade.
 """
 from pathlib import Path
 import hashlib
@@ -65,8 +67,10 @@ def _project(config, cwd):
                      "tag_guide_id": config.get("tag_guide_id")})
 
 
-def load(value, path, raw, *, workspace_binding=None, cwd=None):
+def load(value, path, raw, *, workspace_binding=None, cwd=None, expected_selection_digest=None):
     """Freeze one config/selection witness for the existing single worker."""
+    if expected_selection_digest is not None:
+        raise ValueError("frozen selection replay requires native hook configuration")
     from hooks import MAX_CONFIG, _bounded_json
     config = validate_static(value)
     scope = config.get("memory_scope", "project")
@@ -220,7 +224,7 @@ def validate_native_static(value):
     return dict(value)
 
 
-def load_native(value, path, raw, *, cwd=None, workspace_binding=None):
+def load_native(value, path, raw, *, cwd=None, workspace_binding=None, expected_selection_digest=None):
     if workspace_binding is not None or cwd is None:
         raise ValueError("native hook selection requires event workspace, not legacy binding")
     config = validate_native_static(value)
@@ -231,21 +235,60 @@ def load_native(value, path, raw, *, cwd=None, workspace_binding=None):
     if matching:
         adapter = max(matching, key=lambda row: len(Path(row["root"]).parts))
         config.update({key: adapter[key] for key in ("state_dir", "reader_codex", "reader_codex_sha256")})
-    return native_capture_selection(config, path, raw, cwd=current)
+    replay = ({"expected_selection_digest": expected_selection_digest}
+              if expected_selection_digest is not None else {})
+    return native_capture_selection(config, path, raw, cwd=current, **replay)
 
 
-def native_capture_selection(config, path, raw, *, cwd, capture_only=False):
+def native_selection_digest(config):
+    """Carry only a checked native digest, without replaying while launching.
+
+    All native selections replay offline, including local-only configurations:
+    a child must not acquire discovery policy added since the original selection.
+    Legacy registry selections keep their existing child arguments.
+    """
+    from store_registry import NativeSelection, NATIVE_SELECTION_SCHEMA
+    frozen = config.get("frozen_selection")
+    if not isinstance(frozen, dict):
+        if "frozen_selection" in config:
+            raise ValueError("invalid frozen selection")
+        return None
+    if frozen.get("schema") != NATIVE_SELECTION_SCHEMA:
+        if "snapshot" in frozen:
+            raise ValueError("invalid native frozen selection")
+        return None
+    if set(frozen) != {"schema", "config_path", "native_cli", "snapshot", "digest", "cwd", "binary_pin"}:
+        raise ValueError("invalid native frozen selection")
+    selected = NativeSelection(frozen["snapshot"], frozen["config_path"], frozen["native_cli"],
+                               frozen["cwd"], frozen["binary_pin"])
+    if selected.digest != frozen["digest"] or selected.cwd != str(config["selection_cwd"]):
+        raise ValueError("native frozen selection differs")
+    return selected.digest
+
+
+def native_capture_selection(config, path, raw, *, cwd, capture_only=False, expected_selection_digest=None):
     """Freeze native owner policy for a validated host recipe, without forging one.
 
     Transport/model validation belongs to its host loader. Native policy, exact
     source bytes and owner bindings remain authoritative for both frontends.
     """
+    from store_registry import native_selection_budget, NATIVE_SELECTION_TIMEOUT
+    with native_selection_budget(NATIVE_SELECTION_TIMEOUT):
+        return _native_capture_selection(config, path, raw, cwd=cwd, capture_only=capture_only,
+                                         expected_selection_digest=expected_selection_digest)
+
+
+def _native_capture_selection(config, path, raw, *, cwd, capture_only, expected_selection_digest):
     from store_registry import native_select
     from rollout_primitives import read_regular
     current = Path(cwd).absolute()
     if not current.resolve(strict=True).is_dir():
         raise ValueError("native hook workspace must be a directory")
-    selected = native_select(config["memory_config"], config["native_cli"], current)
+    replay = ({"expected_selection_digest": expected_selection_digest}
+              if expected_selection_digest is not None else {})
+    selected = native_select(config["memory_config"], config["native_cli"], current, **replay)
+    if expected_selection_digest is not None and selected.digest != expected_selection_digest:
+        raise ValueError("frozen native selection changed; reprepare before work")
     background = selected.snapshot["config"]["background"]
     if not capture_only:
         config.update(reader_model=background.get("model") or "gpt-6.1-sol",

@@ -208,6 +208,16 @@ Installed helpers use their sibling `bin/mnemed`. Updating a binary elsewhere on
 PATH does not update the copied integration. Use a matching native pair; builds
 with different embedders are not interchangeable on an existing store.
 
+Native declarative hooks also require a matching helper/CLI bundle. Initial
+selection may acquire bounded discovery metadata; every later native selection
+check, core collector, reader child, checkpoint and reviewed install-plan check
+uses `config select --expected-selection-digest` for offline replay—even when
+the original configuration did not enable discovery. An older CLI that lacks
+this flag refuses; the helpers never retry with fresh selection. Update the
+matching bundle and start a fresh session after an intentional configuration or
+discovery-receipt change. Do not reset an existing session ledger to bypass its
+selection fence.
+
 A managed-local service config uses absolute paths:
 
 ```json

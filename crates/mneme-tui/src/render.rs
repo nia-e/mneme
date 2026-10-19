@@ -64,6 +64,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         Block::default().style(Style::default().bg(NIGHT).fg(INK)),
         screen,
     );
+    if app.config_inspector.is_some() {
+        crate::config_inspector::draw(frame, screen, app);
+        app.layout.borrow_mut().cancel_drag();
+        return;
+    }
     if screen.width < 24 || screen.height < 9 {
         app.layout.borrow_mut().cancel_drag();
         frame.render_widget(

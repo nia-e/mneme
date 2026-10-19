@@ -1,15 +1,21 @@
-"""Bounded, filesystem-only selection of explicitly configured memory owners.
+"""Bounded selection of explicitly configured memory owners.
 
 Names describe policy, aliases route requests, and native IDs identify owners.
-Parsing and admission never start an owner or open its database. Legacy config is
+Legacy selection is filesystem-only; native initial selection may acquire bounded
+discovery metadata, while frozen replay never does. Neither starts an owner or
+opens its database. Legacy config is
 not a fallback: callers opt into this registry or retain their legacy adapter.
 """
 from dataclasses import asdict, dataclass, field, replace
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import time
 
 from host_files import open_regular
 from host_platform import default_config_dir
@@ -556,6 +562,43 @@ def selection_from_dict(value):
 # parses TOML or repeats native activation/project/profile policy.
 NATIVE_SELECTION_SCHEMA = "mneme.native-store-selection.v1"
 MAX_NATIVE_SNAPSHOT_BYTES = 512 * 1024
+NATIVE_SELECTION_TIMEOUT = 15.0
+_native_selection_deadline = ContextVar("mneme_native_selection_deadline", default=None)
+_native_inherited_process_group = ContextVar("mneme_native_inherited_process_group", default=False)
+
+
+def native_selection_remaining(default=NATIVE_SELECTION_TIMEOUT):
+    """Clip native selection work to the original caller's wall-clock allowance."""
+    if type(default) not in (int, float) or not math.isfinite(default) or not 0 < default <= 30:
+        raise ValueError("invalid native selection timeout")
+    deadline = _native_selection_deadline.get()
+    remaining = default if deadline is None else min(default, deadline - time.monotonic())
+    if remaining <= 0:
+        raise ValueError("native selection deadline exhausted; reselect before work")
+    return remaining
+
+
+@contextmanager
+def native_selection_budget(seconds):
+    """Nested loads/replays share a deadline; a retry cannot buy another budget."""
+    remaining = native_selection_remaining(seconds)
+    deadline = time.monotonic() + remaining
+    previous = _native_selection_deadline.get()
+    token = _native_selection_deadline.set(min(previous, deadline) if previous is not None else deadline)
+    try:
+        yield
+    finally:
+        _native_selection_deadline.reset(token)
+
+
+@contextmanager
+def native_subprocess_group():
+    """Keep native grandchildren in the collector's parent-owned process tree."""
+    token = _native_inherited_process_group.set(True)
+    try:
+        yield
+    finally:
+        _native_inherited_process_group.reset(token)
 
 
 class _NativeBridgeResponse(dict):
@@ -577,9 +620,16 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
     raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode() if payload is not None else b""
     if len(raw) > 128 * 1024:
         raise ValueError("native config request exceeds byte limit")
+    options = {}
+    if arguments and arguments[0] == "select":
+        timeout = native_selection_remaining(timeout)
+        # Give native acquisition its actual remaining allowance, with a small
+        # reply/cleanup reserve. This is process-local, never an ambient config
+        # mutation, and older binaries can only refuse the frozen CLI flag.
+        options["env"] = {**os.environ, "MNEME_DISCOVERY_TIMEOUT_MS": str(max(1, int(timeout * 1000) - 50))}
     deadline = time.monotonic() + timeout
-    process = host_process.spawn([str(binary), "--json", "config", *arguments], tree=True,
-                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    process = host_process.spawn([str(binary), "--json", "config", *arguments], tree=not _native_inherited_process_group.get(),
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **options)
     pipe = host_process.BoundedPipe(process, max_read_bytes=min(limit + 1, 16384))
     try:
         pipe.write(raw, deadline)
@@ -594,7 +644,7 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
                 raise ValueError("native config response exceeds byte limit")
         process.wait(timeout=max(.001, deadline - time.monotonic()))
         if process.returncode:
-            raise ValueError("native configuration refused; reselect before work")
+            raise ValueError("native configuration refused; check the matching helper/CLI bundle and reselect before work")
         value = json.loads(output, object_pairs_hook=_unique)
         if not isinstance(value, dict):
             raise ValueError("invalid native configuration response")
@@ -610,13 +660,50 @@ def native_binary_identity(binary):
             "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns}
 
 
-def native_select(config_path, binary, cwd):
+def _native_binary_pin(pin):
+    if (pin is not None and (not isinstance(pin, dict)
+            or set(pin) != {"device", "inode", "size", "mtime_ns", "ctime_ns"}
+            or any(type(value) is not int for value in pin.values()) or pin["size"] < 0)):
+        raise ValueError("invalid native binary pin")
+
+
+def native_validate_binary_pin(binary, pin):
+    _native_binary_pin(pin)
+    if pin is not None and native_binary_identity(binary) != pin:
+        raise ValueError("native binary changed; use a fresh session")
+
+
+def native_select(config_path, binary, cwd, *, expected_selection_digest=None, timeout=None):
     config_path, binary, cwd = str(_path(config_path)), str(_path(binary)), str(_path(cwd))
+    arguments = ["select", "--config", config_path, "--cwd", cwd]
+    if expected_selection_digest is not None:
+        if not isinstance(expected_selection_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_selection_digest):
+            raise ValueError("invalid native frozen selection digest")
+        # Only native code reads the receipt or replays discovery policy. Never
+        # retry a refused frozen selection through the acquiring path.
+        arguments.extend(["--expected-selection-digest", expected_selection_digest])
+    allowance = native_selection_remaining(timeout if timeout is not None else
+                                           3.0 if expected_selection_digest is not None else NATIVE_SELECTION_TIMEOUT)
     pin = native_binary_identity(binary)
-    snapshot = native_bridge(binary, ["select", "--config", config_path, "--cwd", cwd])
+    snapshot = native_bridge(binary, arguments, timeout=allowance)
     if native_binary_identity(binary) != pin:
         raise ValueError("native binary changed during selection; use a fresh session")
-    return NativeSelection(snapshot, config_path, binary, cwd, pin)
+    selected = NativeSelection(snapshot, config_path, binary, cwd, pin)
+    if expected_selection_digest is not None and selected.digest != expected_selection_digest:
+        raise ValueError("native selected configuration changed; use a fresh session")
+    return selected
+
+
+def _native_discovery_witness(value):
+    # This validates only the bounded bridge shape, not resolver policy or the
+    # receipt itself. The native replay command is the sole authority for both.
+    if (not isinstance(value, dict) or set(value) != {"binding", "boundary_sha256"}
+            or not isinstance(value["binding"], dict) or set(value["binding"]) != {"path", "sha256"}
+            or not isinstance(value["binding"]["path"], str)
+            or any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                   for digest in (value["boundary_sha256"], value["binding"]["sha256"]))):
+        raise ValueError("invalid native discovery witness")
+    _path(value["binding"]["path"])
 
 
 def _native_record_policy(entry, eligible):
@@ -656,6 +743,7 @@ class NativeSelection:
     binary_pin: dict | None = None
 
     def __post_init__(self):
+        _native_binary_pin(self.binary_pin)
         value = self.snapshot
         if (not isinstance(value, dict) or value.get("schema") != "mneme.config-selection.v1"
                 or not isinstance(value.get("digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", value["digest"])
@@ -663,6 +751,8 @@ class NativeSelection:
                 or not isinstance(value.get("config"), dict) or not isinstance(value.get("cwd"), str)
                 or not Path(value["cwd"]).is_absolute()):
             raise ValueError("invalid native selection snapshot")
+        if "discovery" in value:
+            _native_discovery_witness(value["discovery"])
         names, owners = set(), set()
         for row in value["active"]:
             if (not isinstance(row, dict) or not isinstance(row.get("name"), str) or not NAME.fullmatch(row["name"])
@@ -684,6 +774,8 @@ class NativeSelection:
 
     @property
     def digest(self): return self.snapshot["digest"]
+    @property
+    def has_discovery(self): return "discovery" in self.snapshot
     @property
     def cwd(self): return self.requested_cwd or self.snapshot["cwd"]
     @property
@@ -737,7 +829,8 @@ class NativeSelection:
             raise ValueError("native frozen selection differs")
         return frozen.revalidate()
     def revalidate(self, *, operation=None, store_name=None):
-        current = native_select(self.registry_path, self.native_cli, self.cwd)
+        native_validate_binary_pin(self.native_cli, self.binary_pin)
+        current = native_select(self.registry_path, self.native_cli, self.cwd, expected_selection_digest=self.digest)
         if current.snapshot != self.snapshot or current.binary_pin != self.binary_pin:
             raise ValueError("native selected configuration changed; use a fresh session")
         if operation is not None:

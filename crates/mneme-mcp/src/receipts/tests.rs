@@ -19,6 +19,7 @@ async fn maintenance_release_requires_session_quiescence_and_rotates_only_its_ep
     let mut initial_sessions = SessionState::default();
     let initial_epoch = initial_sessions.feedback_epoch("fixture");
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: crate::activity::ActivityRing::default(),
         dbs: BTreeMap::from([(
             "fixture".into(),
@@ -816,6 +817,7 @@ fn receipt_full_done_failure_leaves_walk_resumable() {
 #[tokio::test]
 async fn abort_remains_available_after_action_exhaustion() {
     let registry = Registry {
+        discovery_catalogs: Default::default(),
         activity: crate::activity::ActivityRing::default(),
         dbs: BTreeMap::new(),
     };

@@ -1,5 +1,6 @@
-//! Native declarative selection and bounded bridge. No metadata operation opens
-//! storage, starts an owner, or interprets a configured remote path locally.
+//! Native declarative selection and bounded bridge. Discovery may read explicitly
+//! delegated owner catalogs; frozen replay never contacts a publisher. Neither
+//! path opens storage, starts an owner, or interprets a remote path locally.
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -7,12 +8,19 @@ use std::time::Duration;
 use crate::{AnyErr, Command, remote_commands};
 use clap::{Args, Subcommand, ValueEnum};
 use mneme_config::{Operation, SelectionSnapshot};
+use mneme_store_client::discovery::{ResolutionOutcome, ResolveOptions};
 use mneme_store_client::{ConfiguredClient, OperationBudget};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 const MAX_REQUEST: usize = 128 * 1024;
 const MAX_RESULT: usize = 512 * 1024;
+// Explicit inspection can carry the separately bounded 1 MiB provenance report
+// plus local-source and store-admission summaries. Ordinary bridge/selection
+// output retains its smaller envelope and never embeds the report.
+const MAX_INSPECTION_RESULT: usize = 2 * 1024 * 1024;
+const DISCOVERY_TIMEOUT_MS: u64 = 15_000;
+const DISCOVERY_NATIVE_BYTES: usize = 1024 * 1024;
 
 #[derive(Args)]
 pub(crate) struct ConfigArgs {
@@ -26,8 +34,12 @@ impl ConfigArgs {
 }
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Freeze metadata-only store selection; never contacts or starts an owner.
-    Select(SelectionArgs),
+    /// Freeze store selection; opt-in discovery may fetch bounded owner catalogs.
+    /// An expected digest requests offline replay instead of acquisition.
+    Select(SelectArgs),
+    /// Explain effective configuration, sources, conflicts and unavailable imports.
+    /// Reports are useful even when no store can be activated.
+    Inspect(InspectArgs),
     /// Make one checked native call under an exact selection digest. JSON stdin:
     /// {"tool":"get","arguments":{"id":"..."}}. Never retries uncertain writes.
     Call(CallArgs),
@@ -38,6 +50,39 @@ struct SelectionArgs {
     config: Option<PathBuf>,
     #[arg(long)]
     cwd: Option<PathBuf>,
+}
+#[derive(Args)]
+struct DiscoveryArgs {
+    /// Refresh delegated catalogs explicitly. Failed refresh retains the last
+    /// usable receipt and reports stale coverage; it never deletes known stores.
+    #[arg(long)]
+    refresh: bool,
+    /// Use only retained local metadata; never contact discovery publishers.
+    #[arg(long, conflicts_with = "refresh")]
+    offline: bool,
+    /// Aggregate discovery deadline, including initialization and failed reads.
+    #[arg(long, env = "MNEME_DISCOVERY_TIMEOUT_MS", default_value = "15000", value_parser = clap::value_parser!(u32).range(1..=30_000))]
+    timeout_ms: u32,
+    /// Aggregate decoded discovery bytes, including tool and identity catalogs.
+    #[arg(long, default_value = "1048576", value_parser = clap::value_parser!(u32).range(1..=16_777_216))]
+    max_native_bytes: u32,
+}
+#[derive(Args)]
+struct SelectArgs {
+    #[command(flatten)]
+    selection: SelectionArgs,
+    #[command(flatten)]
+    discovery: DiscoveryArgs,
+    /// Replay this exact selection offline. Never refreshes or adopts new grants.
+    #[arg(long, conflicts_with = "refresh")]
+    expected_selection_digest: Option<String>,
+}
+#[derive(Args)]
+struct InspectArgs {
+    #[command(flatten)]
+    selection: SelectionArgs,
+    #[command(flatten)]
+    discovery: DiscoveryArgs,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum BridgeOperation {
@@ -75,7 +120,7 @@ struct BridgeRequest {
     arguments: Value,
 }
 
-fn select(args: &SelectionArgs, profile: Option<&str>) -> Result<SelectionSnapshot, AnyErr> {
+fn selection_paths(args: &SelectionArgs) -> Result<(PathBuf, PathBuf), AnyErr> {
     let cwd = args
         .cwd
         .clone()
@@ -86,14 +131,63 @@ fn select(args: &SelectionArgs, profile: Option<&str>) -> Result<SelectionSnapsh
         .clone()
         .map(Ok)
         .unwrap_or_else(mneme_config::default_user_path)?;
-    Ok(mneme_config::select_workspace(&config, &cwd, profile)?)
+    Ok((config, cwd))
 }
-pub(crate) fn discover(
+fn replay(
+    args: &SelectionArgs,
+    profile: Option<&str>,
+    digest: &str,
+) -> Result<SelectionSnapshot, AnyErr> {
+    let (config, cwd) = selection_paths(args)?;
+    mneme_store_client::discovery::replay_workspace(Some(&config), &cwd, profile, digest)
+        .map_err(|error| -> AnyErr { error })?
+        .ok_or_else(|| {
+            "configuration is unavailable; reselect and reassess before submitting".into()
+        })
+}
+async fn resolve(
+    args: &SelectionArgs,
+    discovery: &DiscoveryArgs,
+    profile: Option<&str>,
+) -> Result<Option<ResolutionOutcome>, AnyErr> {
+    let (config, cwd) = selection_paths(args)?;
+    let budget = OperationBudget::new(
+        discovery.max_native_bytes as usize,
+        Duration::from_millis(discovery.timeout_ms.into()),
+    )
+    .map_err(|error| -> AnyErr { error })?;
+    mneme_store_client::discovery::resolve_workspace(
+        Some(&config),
+        &cwd,
+        profile,
+        ResolveOptions {
+            refresh: discovery.refresh,
+            offline: discovery.offline,
+        },
+        &budget,
+    )
+    .await
+    .map_err(|error| -> AnyErr { error })
+}
+pub(crate) async fn discover(
     path: Option<&Path>,
     profile: Option<&str>,
 ) -> Result<Option<SelectionSnapshot>, AnyErr> {
-    mneme_config::discover_workspace(path, &std::env::current_dir()?, profile)
-        .map_err(|error| format!("shared configuration/profile selection refused: {error}; repair the workspace metadata or use an explicit configuration (no fallback attempted)").into())
+    let budget = OperationBudget::new(
+        DISCOVERY_NATIVE_BYTES,
+        Duration::from_millis(DISCOVERY_TIMEOUT_MS),
+    )
+    .map_err(|error| -> AnyErr { error })?;
+    let outcome = mneme_store_client::discovery::resolve_workspace(
+        path, &std::env::current_dir()?, profile, ResolveOptions::default(), &budget,
+    ).await.map_err(|error| format!("shared configuration/profile selection refused: {error}; repair the workspace metadata or use an explicit configuration (no fallback attempted)"))?;
+    let Some(outcome) = outcome else {
+        return Ok(None);
+    };
+    outcome.selection.map(Some).ok_or_else(|| format!(
+        "shared configuration selection unresolved: {}; use config inspect to review sources and conflicts (no fallback attempted)",
+        outcome.error.as_deref().unwrap_or("discovery did not produce an admissible selection"),
+    ).into())
 }
 pub(crate) fn independent(command: &Command) -> bool {
     matches!(
@@ -133,6 +227,192 @@ pub(crate) fn render_selection(
     }
     Ok(())
 }
+
+/// Inspection has a diagnostic success contract: a well-formed invocation can
+/// describe an unavailable configuration without claiming selection succeeded.
+/// In particular, an error is not an empty store list or permission to fall back.
+fn inspection_value(outcome: Option<&ResolutionOutcome>, error: Option<&str>) -> Value {
+    let selection = outcome.and_then(|outcome| outcome.selection.as_ref());
+    let stores: Vec<_> = selection
+        .into_iter()
+        .flat_map(|selection| &selection.stores)
+        .map(|row| {
+            json!({
+                "name": row.name,
+                "id": row.store.id,
+                "admitted": row.admitted,
+                "active": row.active,
+                "eligible": row.eligible,
+                "reason": row.reason,
+            })
+        })
+        .collect();
+    json!({
+        "schema": "mneme.config-inspection.v1",
+        "configured": if error.is_some() { Value::Null } else { json!(outcome.is_some()) },
+        "cache_status": outcome.map(|outcome| &outcome.cache_status),
+        "selection_digest": selection.map(|selection| &selection.digest),
+        "profile": selection.map(|selection| &selection.profile),
+        "read_default": selection.and_then(|selection| selection.read_default.as_ref()),
+        "sources": selection.map(|selection| &selection.sources),
+        "stores": stores,
+        "report": outcome.and_then(|outcome| outcome.report.as_ref()),
+        "attempt": outcome.and_then(|outcome| outcome.attempt.as_ref()),
+        "error": error.or_else(|| outcome.and_then(|outcome| outcome.error.as_deref())),
+    })
+}
+
+fn report_value(value: Option<&Value>) -> String {
+    value
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "<not present in report>".into())
+}
+
+fn inspection_diagnostic_label(value: &Value) -> &'static str {
+    if value["selection_digest"].is_string() {
+        "warning"
+    } else {
+        "unavailable"
+    }
+}
+
+fn render_inspection(value: &Value, json_output: bool) -> Result<(), AnyErr> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() > MAX_INSPECTION_RESULT {
+        return Err("configuration inspection exceeds its 2 MiB report envelope; reduce imported catalog/provenance size before retrying".into());
+    }
+    if json_output {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&bytes)?;
+        stdout.write_all(b"\n")?;
+    } else {
+        println!("configuration inspection");
+        if let Some(error) = value["error"].as_str() {
+            println!("{}: {error}", inspection_diagnostic_label(value));
+        }
+        if value["configured"] == false {
+            println!("No declarative configuration was selected.");
+        }
+        if let Some(cache) = value["cache_status"].as_str() {
+            println!("catalogs: {cache}");
+        }
+        if let Some(digest) = value["selection_digest"].as_str() {
+            println!("selection: {digest}");
+        }
+        if let Some(stores) = value["stores"].as_array() {
+            for row in stores {
+                println!(
+                    "{}\t{}\tadmitted={} active={}{}",
+                    row["name"].as_str().unwrap_or("?"),
+                    row["id"].as_str().unwrap_or("?"),
+                    row["admitted"],
+                    row["active"],
+                    row["reason"]
+                        .as_str()
+                        .map(|reason| format!(" — {reason}"))
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        if let Some(attempt) = value["attempt"].as_object() {
+            if let Some(reason) = attempt.get("incomplete").and_then(Value::as_str) {
+                println!("acquisition incomplete: {reason}");
+            }
+            if let Some(unavailable) = attempt.get("unavailable").and_then(Value::as_object) {
+                for (publisher, reason) in unavailable {
+                    println!(
+                        "acquisition unavailable: {publisher}: {}",
+                        reason.as_str().unwrap_or("unavailable")
+                    );
+                }
+            }
+        }
+        if let Some(report) = value["report"].as_object() {
+            println!("\nProvenance:");
+            if let Some(stores) = report.get("stores").and_then(Value::as_object) {
+                for (id, store) in stores {
+                    println!(
+                        "{} [{id}]{}",
+                        store["label"].as_str().unwrap_or("unnamed"),
+                        if store["blocked"] == true {
+                            " — unresolved"
+                        } else {
+                            ""
+                        }
+                    );
+                    if let Some(fields) = store["fields"].as_object() {
+                        for (name, field) in fields {
+                            let status = if field["local_override"] == true {
+                                "local override"
+                            } else if field["conflict"] == true {
+                                "conflict"
+                            } else {
+                                "inherited/default"
+                            };
+                            println!(
+                                "  {name} = {} ({status})",
+                                report_value(field.get("effective"))
+                            );
+                            for (kind, key) in [("from", "contributors"), ("shadowed", "shadowed")]
+                            {
+                                if let Some(witnesses) = field[key].as_array() {
+                                    for witness in witnesses {
+                                        let branch = witness["witness"]
+                                            .as_array()
+                                            .into_iter()
+                                            .flatten()
+                                            .filter_map(Value::as_str)
+                                            .collect::<Vec<_>>()
+                                            .join(" -> ");
+                                        let branch = if branch.is_empty() {
+                                            "<branch not present in report>"
+                                        } else {
+                                            &branch
+                                        };
+                                        println!(
+                                            "    {kind} {} via {branch}: {}",
+                                            witness["publisher_db_id"].as_str().unwrap_or("?"),
+                                            report_value(witness.get("value"))
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(conflicts) = report.get("conflicts").and_then(Value::as_array) {
+                for conflict in conflicts {
+                    println!(
+                        "conflict: {} / {}: {}",
+                        conflict["store_id"].as_str().unwrap_or("?"),
+                        conflict["field"].as_str().unwrap_or("?"),
+                        conflict["reason"].as_str().unwrap_or("unresolved")
+                    );
+                }
+            }
+            if let Some(unavailable) = report.get("unavailable").and_then(Value::as_object) {
+                for (publisher, reason) in unavailable {
+                    println!(
+                        "unavailable: {publisher}: {}",
+                        reason.as_str().unwrap_or("unavailable")
+                    );
+                }
+            }
+            if let Some(reason) = report.get("incomplete").and_then(Value::as_str) {
+                println!("incomplete: {reason}");
+            }
+            if let Some(omitted) = report
+                .get("omitted_details")
+                .and_then(Value::as_u64)
+                .filter(|count| *count > 0)
+            {
+                println!("{omitted} provenance details omitted by the report byte bound");
+            }
+        }
+    }
+    Ok(())
+}
 fn read_request(mut input: impl Read) -> Result<BridgeRequest, AnyErr> {
     let mut bytes = Vec::new();
     input
@@ -164,7 +444,33 @@ pub(crate) async fn run(
     json_output: bool,
 ) -> Result<(), AnyErr> {
     match &args.action {
-        ConfigAction::Select(args) => render_selection(&select(args, profile)?, json_output),
+        ConfigAction::Select(args) => {
+            let snapshot = if let Some(expected) = &args.expected_selection_digest {
+                replay(&args.selection, profile, expected)?
+            } else {
+                let outcome = resolve(&args.selection, &args.discovery, profile)
+                    .await?
+                    .ok_or("configuration is unavailable; use config inspect for diagnostics")?;
+                if args.discovery.refresh {
+                    if let Some(error) = &outcome.error {
+                        return Err(format!("{error}; use config inspect --offline to inspect the retained configuration").into());
+                    }
+                }
+                outcome.selection.ok_or_else(|| {
+                    outcome.error.unwrap_or_else(|| {
+                        "configuration is unresolved; use config inspect to review conflicts".into()
+                    })
+                })?
+            };
+            render_selection(&snapshot, json_output)
+        }
+        ConfigAction::Inspect(args) => {
+            let value = match resolve(&args.selection, &args.discovery, profile).await {
+                Ok(outcome) => inspection_value(outcome.as_ref(), None),
+                Err(error) => inspection_value(None, Some(&error.to_string())),
+            };
+            render_inspection(&value, json_output)
+        }
         ConfigAction::Call(args) => {
             if !json_output {
                 return Err("config call requires --json".into());
@@ -193,7 +499,7 @@ pub(crate) async fn run(
 
 async fn call(args: &CallArgs, profile: Option<&str>) -> Result<Value, AnyErr> {
     let request = read_request(std::io::stdin().lock())?;
-    let snapshot = select(&args.selection, profile)?;
+    let snapshot = replay(&args.selection, profile, &args.expected_selection_digest)?;
     require_digest(&snapshot, &args.expected_selection_digest)?;
     let access = match request.tool.as_str() {
         "save/verified" => {
@@ -416,6 +722,19 @@ permissions = { read = true, write = false }
             &mneme_config::SelectionContext::new(std::env::temp_dir().canonicalize().unwrap()),
         )
         .unwrap()
+    }
+    #[test]
+    fn inspection_distinguishes_missing_detail_clear_and_retained_warning() {
+        assert_eq!(report_value(None), "<not present in report>");
+        assert_eq!(report_value(Some(&Value::Null)), "null");
+        assert_eq!(
+            inspection_diagnostic_label(&json!({"selection_digest": "retained"})),
+            "warning"
+        );
+        assert_eq!(
+            inspection_diagnostic_label(&json!({"selection_digest": null})),
+            "unavailable"
+        );
     }
     #[test]
     fn stale_selection_refuses_before_native_client_creation() {

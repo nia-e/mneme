@@ -9,6 +9,7 @@ mnemed --store global tui          # deliberate named-store selection
 mnemed --store mneme tui           # project store, even from another workspace
 mnemed tui --view scenes
 mnemed tui --view touchstones
+mnemed tui --view config          # configuration/provenance, no automatic memory reads
 mnemed tui --demo                  # no service needed
 mnemed --remote URL tui            # existing HTTP or SSH owner
 mnemed tui --config library.json   # explicit multi-source library view
@@ -18,6 +19,20 @@ The viewer opens no database files and makes no memory changes. Your selected
 server must support identity-guarded graph reads; unsupported views show an error,
 not an empty store. `--db` and JSON output are unsupported; use CLI/MCP readers
 for scripts.
+
+## Configuration inspector
+
+`--view config` works with zero stores, a missing default, blocked stores or
+malformed configuration. It shows the shared effective settings, local overrides,
+publishers/branch witnesses, conflicts and admission separately from activation.
+Left/right or Tab selects a store; arrows, Page Up/Down and Home/End scroll its
+details. Esc closes the startup inspector to the source picker; Enter explicitly
+opens the chosen source, including the first one.
+
+Opening this modal does not admit new memory reads. Already in-flight work may
+finish. Initial opt-in [discovery](discovery.md) can fetch bounded catalog metadata;
+retained receipts need no publisher contact. Explicit remote/library/demo targets
+stay isolated from ambient configuration discovery.
 
 ## Controls
 
@@ -35,6 +50,7 @@ for scripts.
 | `n` / `m` | Continue paused Map loading; `n` pages Touchstones |
 | `r` | Refresh the current view |
 | Tab | Choose among Known sources |
+| `C` (or `c` in the picker) | Inspect configuration and discovery provenance |
 | `?` | Help |
 | Esc | Close detail/help/focus, pause loading, or go back |
 | Backspace / `b` | Go back |

@@ -490,6 +490,31 @@ fn edit_summary_advertised(tool: &Value) -> bool {
         && props["summary"]["minLength"] == 1
 }
 
+/// The optional owner catalog is a checked read, not a fallback to arbitrary
+/// files or an older peer's similarly named operation.
+fn discovery_catalog_advertised(tool: &Value) -> bool {
+    let schema = &tool["inputSchema"];
+    let props = &schema["properties"];
+    let digest = &props["expected_catalog_sha256"];
+    schema["type"] == "object"
+        && schema["additionalProperties"] == false
+        && schema_requires(schema, "db")
+        && schema_requires(schema, "expected_db_id")
+        && schema["required"].as_array().is_some_and(|required| {
+            required
+                .iter()
+                .all(|field| field == "db" || field == "expected_db_id")
+        })
+        && props["db"]["type"] == "string"
+        && props["db"]["minLength"] == 1
+        && props["db"]["maxLength"] == 256
+        && expected_db_id_schema_supported(schema)
+        && digest["type"] == "string"
+        && digest["minLength"] == 64
+        && digest["maxLength"] == 64
+        && digest["pattern"] == "^[0-9a-f]{64}$"
+}
+
 /// A guard is effective only if the peer advertises the complete canonical
 /// database-ID contract. A field name alone may be silently ignored by old peers.
 fn expected_db_id_schema_supported(schema: &Value) -> bool {
@@ -621,6 +646,12 @@ impl CatalogView<'_> {
             .any(|tool| tool["name"] == "edit_summary" && edit_summary_advertised(tool))
     }
 
+    pub fn supports_discovery_catalog(&self) -> bool {
+        self.0
+            .iter()
+            .any(|tool| tool["name"] == "discovery_catalog" && discovery_catalog_advertised(tool))
+    }
+
     /// Discover a canonical identity precondition on a known DB-scoped tool.
     /// Union branches may inherit a root guard; without a root, every branch
     /// must advertise it. Episode retains its stronger per-action contract.
@@ -633,6 +664,7 @@ impl CatalogView<'_> {
             ("retag", None) if self.supports_retag() => {}
             ("edit_body", None) if self.supports_edit_body() => {}
             ("edit_summary", None) if self.supports_edit_summary() => {}
+            ("discovery_catalog", None) if self.supports_discovery_catalog() => {}
             (
                 "walk",
                 Some("start" | "look" | "edges" | "body" | "go" | "back" | "done" | "abort"),
@@ -727,6 +759,9 @@ impl RemoteClient {
     }
     pub fn supports_edit_summary(&self) -> bool {
         CatalogView(&self.catalog).supports_edit_summary()
+    }
+    pub fn supports_discovery_catalog(&self) -> bool {
+        CatalogView(&self.catalog).supports_discovery_catalog()
     }
     pub fn supports_expected_db_id(&self, name: &str, action: Option<&str>) -> bool {
         CatalogView(&self.catalog).supports_expected_db_id(name, action)
@@ -1106,6 +1141,22 @@ impl RemoteClient {
         }
         if name == "capture" && args.get("links").is_some() && !self.capture_links_supported {
             return Err("remote MCP capture.links is not advertised in the tool schema".into());
+        }
+        if name == "discovery_catalog" {
+            if !self.supports_discovery_catalog() {
+                return Err("remote MCP discovery_catalog checked contract is not advertised; no operation was sent, no legacy fallback".into());
+            }
+            if args
+                .get("db")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+                || args
+                    .get("expected_db_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err("remote MCP discovery_catalog requires explicit db and expected_db_id; no operation was sent".into());
+            }
         }
         if name == "episode"
             && !args
@@ -1934,6 +1985,198 @@ mod tests {
         missing_weight["inputSchema"]["properties"]["links"]["items"]["properties"]["weight"] =
             json!({"type":"number"});
         assert!(capture_links_schema_supported(&missing_weight));
+    }
+
+    fn discovery_catalog() -> Value {
+        json!([{"name":"discovery_catalog","inputSchema":{"type":"object","additionalProperties":false,
+            "required":["db","expected_db_id"],"properties":{
+                "db":{"type":"string","minLength":1,"maxLength":256},
+                "expected_db_id":{"type":"string","minLength":26,"maxLength":26,"pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"},
+                "expected_catalog_sha256":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"}}}}])
+    }
+
+    #[test]
+    fn discovery_catalog_contract_is_optional_closed_and_structural() {
+        let catalog = discovery_catalog();
+        let client = catalog_client(&catalog);
+        assert!(client.supports_discovery_catalog());
+        assert!(client.supports_expected_db_id("discovery_catalog", None));
+        assert!(!client.supports_expected_db_id("discovery_catalog", Some("get")));
+        assert!(!known_native_read("discovery_catalog", &json!({})));
+        assert!(!catalog_client(&json!([])).supports_discovery_catalog());
+        assert!(
+            catalog_client(&json!([{"name":"discovery_catalog"}])).advertises("discovery_catalog")
+        );
+        assert!(
+            !catalog_client(&json!([{"name":"discovery_catalog"}])).supports_discovery_catalog()
+        );
+        for (pointer, replacement) in [
+            ("/0/inputSchema/type", json!("array")),
+            ("/0/inputSchema/additionalProperties", json!(true)),
+            ("/0/inputSchema/required", json!(["db"])),
+            ("/0/inputSchema/required", json!(["expected_db_id"])),
+            (
+                "/0/inputSchema/required",
+                json!(["db", "expected_db_id", "expected_catalog_sha256"]),
+            ),
+            ("/0/inputSchema/properties/db/type", json!("integer")),
+            ("/0/inputSchema/properties/db/minLength", json!(0)),
+            ("/0/inputSchema/properties/db/maxLength", json!(257)),
+            (
+                "/0/inputSchema/properties/expected_db_id/type",
+                json!("integer"),
+            ),
+            (
+                "/0/inputSchema/properties/expected_db_id/minLength",
+                json!(25),
+            ),
+            (
+                "/0/inputSchema/properties/expected_db_id/maxLength",
+                json!(27),
+            ),
+            (
+                "/0/inputSchema/properties/expected_db_id/pattern",
+                json!(".*"),
+            ),
+            (
+                "/0/inputSchema/properties/expected_catalog_sha256/type",
+                json!("integer"),
+            ),
+            (
+                "/0/inputSchema/properties/expected_catalog_sha256/minLength",
+                json!(63),
+            ),
+            (
+                "/0/inputSchema/properties/expected_catalog_sha256/maxLength",
+                json!(65),
+            ),
+            (
+                "/0/inputSchema/properties/expected_catalog_sha256/pattern",
+                json!(".*"),
+            ),
+            (
+                "/0/inputSchema/properties/expected_catalog_sha256",
+                Value::Null,
+            ),
+        ] {
+            let mut malformed = catalog.clone();
+            *malformed.pointer_mut(pointer).unwrap() = replacement;
+            let client = catalog_client(&malformed);
+            assert!(!client.supports_discovery_catalog(), "{pointer}");
+            assert!(
+                !client.supports_expected_db_id("discovery_catalog", None),
+                "{pointer}"
+            );
+            assert!(client.validate_tool_call(&json!({"name":"discovery_catalog","arguments":{"db":"project","expected_db_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}})).is_err(), "{pointer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_catalog_requires_advertised_contract_and_owner_before_send() {
+        let args = json!({"db":"project","expected_db_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"});
+        let mut cases = vec![
+            (json!([]), args.clone()),
+            (json!([{"name":"discovery_catalog"}]), args.clone()),
+        ];
+        for field in ["db", "expected_db_id"] {
+            for value in [None, Some(Value::Null), Some(json!(""))] {
+                let mut malformed = args.clone();
+                if let Some(value) = value {
+                    malformed[field] = value;
+                } else {
+                    malformed.as_object_mut().unwrap().remove(field);
+                }
+                cases.push((discovery_catalog(), malformed));
+            }
+        }
+        for (catalog, args) in cases {
+            let (options, server) = fixture_server_with_catalog("mneme-mcp", catalog, Some(vec![]));
+            let mut client = RemoteClient::connect_local(
+                &options,
+                ClientTimeouts {
+                    connect: Duration::from_secs(2),
+                    request: Duration::from_secs(2),
+                },
+                "mneme-mcp",
+            )
+            .await
+            .unwrap();
+            let before = client.next_id;
+            for raw in [false, true] {
+                let result = if raw {
+                    client
+                        .raw_rpc(
+                            "tools/call",
+                            json!({"name":"discovery_catalog","arguments":args}),
+                        )
+                        .await
+                } else {
+                    client.call_tool("discovery_catalog", args.clone()).await
+                };
+                assert!(result.is_err());
+                assert_eq!(client.next_id, before);
+                assert!(client.session.is_some());
+            }
+            client.close().await;
+            server.join().unwrap();
+        }
+
+        let mut lazy_client = catalog_client(&json!([]));
+        lazy_client.lazy_native = true;
+        lazy_client.initialize_result = json!({"capabilityProfile":"read-only"});
+        let before = lazy_client.next_id;
+        assert!(
+            lazy_client
+                .call_native_read("discovery_catalog", args)
+                .await
+                .is_err()
+        );
+        assert_eq!(lazy_client.next_id, before);
+    }
+
+    #[tokio::test]
+    async fn discovery_catalog_forwards_exact_pins_through_raw_and_parsed_calls() {
+        let base = json!({"db":"project","expected_db_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"});
+        let mut pinned = base.clone();
+        pinned["expected_catalog_sha256"] = json!("a".repeat(64));
+        let calls: Vec<_> = [base, pinned]
+            .into_iter()
+            .flat_map(|args| {
+                [
+                    ("discovery_catalog", args.clone()),
+                    ("discovery_catalog", args),
+                ]
+            })
+            .collect();
+        let (options, server) =
+            fixture_server_with_catalog("mneme-mcp", discovery_catalog(), Some(calls.clone()));
+        let mut client = RemoteClient::connect_local(
+            &options,
+            ClientTimeouts {
+                connect: Duration::from_secs(2),
+                request: Duration::from_secs(2),
+            },
+            "mneme-mcp",
+        )
+        .await
+        .unwrap();
+        assert!(client.supports_discovery_catalog());
+        for (index, (tool, args)) in calls.into_iter().enumerate() {
+            let received = if index % 2 == 0 {
+                client.call_tool(tool, args.clone()).await.unwrap()
+            } else {
+                decode_tool_result(
+                    &client
+                        .raw_rpc("tools/call", json!({"name":tool,"arguments":args}))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap()
+            };
+            assert_eq!(received, args);
+        }
+        client.close().await;
+        server.join().unwrap();
     }
 
     fn edit_body_catalog() -> Value {

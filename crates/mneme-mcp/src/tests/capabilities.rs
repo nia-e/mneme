@@ -337,6 +337,7 @@ fn golden_tool_catalogs_match_capability_profiles() {
         (
             CapabilityProfile::ReadOnly,
             &[
+                "discovery_catalog",
                 "databases",
                 "activity",
                 "database_control",
@@ -360,6 +361,7 @@ fn golden_tool_catalogs_match_capability_profiles() {
         (
             CapabilityProfile::ReceiptGrounded,
             &[
+                "discovery_catalog",
                 "databases",
                 "activity",
                 "database_control",
@@ -384,6 +386,7 @@ fn golden_tool_catalogs_match_capability_profiles() {
         (
             CapabilityProfile::Curator,
             &[
+                "discovery_catalog",
                 "databases",
                 "activity",
                 "database_control",
@@ -416,6 +419,7 @@ fn golden_tool_catalogs_match_capability_profiles() {
         (
             CapabilityProfile::Operator,
             &[
+                "discovery_catalog",
                 "databases",
                 "activity",
                 "database_control",

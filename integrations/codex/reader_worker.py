@@ -561,6 +561,10 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
                     command.extend(["--workspace-binding", binding])
                 if "frozen_selection" in config:
                     command.extend(["--selection-cwd", str(config["selection_cwd"])])
+                    from registry_runtime import native_selection_digest
+                    selection_digest = native_selection_digest(config)
+                    if selection_digest is not None:
+                        command.extend(["--expected-selection-digest", selection_digest])
                 child = host_process.spawn(command, detached=True,
                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                          stderr=subprocess.DEVNULL, close_fds=True)
@@ -1471,6 +1475,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--workspace-binding")
     parser.add_argument("--selection-cwd", type=Path)
+    parser.add_argument("--expected-selection-digest")
     parser.add_argument("--source-host", choices=capture_source.HOSTS, default="codex")
     args = parser.parse_args(argv)
     if not args.serve:
@@ -1493,6 +1498,10 @@ def main(argv: list[str] | None = None) -> int:
             if not args.selection_cwd.is_absolute():
                 return 2
             kwargs["cwd"] = args.selection_cwd
+        if args.expected_selection_digest is not None:
+            if args.selection_cwd is None:
+                return 2
+            kwargs["expected_selection_digest"] = args.expected_selection_digest
         config = _config(args.config, **kwargs)
         if capture_source.source_host(config) != args.source_host:
             return 2

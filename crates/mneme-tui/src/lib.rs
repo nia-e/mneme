@@ -1,5 +1,6 @@
 //! A read-only, bounded observatory; rendering never waits for network work.
 mod clusters;
+mod config_inspector;
 mod data;
 mod detail_scroll;
 mod input;
@@ -153,6 +154,12 @@ pub struct Options {
     pub view: View,
     /// Nonfatal source-discovery problems, shown inside the first rendered view.
     pub startup_warnings: Vec<String>,
+    /// Shared bounded evidence; a denied or unresolved store remains inspectable.
+    pub config_report: Option<std::sync::Arc<mneme_config::DiscoveryReport>>,
+    /// Workspace admission/activation computed by the shared selector.
+    pub config_selection: Option<std::sync::Arc<mneme_config::SelectionSnapshot>>,
+    /// Metadata-only startup: no memory worker until a source is explicitly opened.
+    pub inspect_config: bool,
 }
 
 fn apply_startup_warnings(app: &mut App, warnings: Vec<String>) {
@@ -188,6 +195,18 @@ pub fn preview_view(width: u16, height: u16, view: View) -> io::Result<String> {
     render::preview(width, height, &app)
 }
 
+/// Synthetic evidence for the explicit offline configuration preview.
+pub fn demo_config_report() -> mneme_config::DiscoveryReport {
+    config_inspector::demo_report()
+}
+
+pub fn preview_config(width: u16, height: u16) -> io::Result<String> {
+    let mut app = App::new(vec![], String::new(), true);
+    app.config_report = Some(std::sync::Arc::new(demo_config_report()));
+    config_inspector::open(&mut app);
+    render::preview(width, height, &app)
+}
+
 fn worker(
     target: Target,
 ) -> (
@@ -199,8 +218,26 @@ fn worker(
     let (reply, answers) = mpsc::channel(4);
     (tx, answers, tokio::spawn(data::serve(target, rx, reply)))
 }
+
+fn initial_worker(
+    app: &App,
+) -> Option<(
+    mpsc::Sender<Request>,
+    mpsc::Receiver<Response>,
+    tokio::task::JoinHandle<()>,
+)> {
+    if app.demo || app.config_inspector.is_some() {
+        None
+    } else {
+        app.targets.first().cloned().map(worker)
+    }
+}
+
+fn source_connection_required(app: &App, index: usize, connected: bool) -> bool {
+    index != app.target || !connected
+}
 fn request(app: &mut App, tx: &mpsc::Sender<Request>, req: Request) -> bool {
-    if app.busy {
+    if app.busy || app.config_inspector.is_some() {
         return false;
     }
     let fetching = !matches!(req, Request::Poll);
@@ -361,10 +398,23 @@ fn open_source_picker(
     source_picker::open(app);
 }
 
+fn open_config_inspector(
+    app: &mut App,
+    queued_user_key: &mut Option<(event::KeyEvent, Option<String>)>,
+) {
+    // A pre-modal read intent cannot become an inspector action after cancellation.
+    *queued_user_key = None;
+    config_inspector::open(app);
+}
+
+fn memory_reads_visible(app: &App) -> bool {
+    !app.show_help && app.source_menu.is_none() && app.config_inspector.is_none()
+}
+
 fn reset_source(app: &mut App, pending: &mut Option<PendingRead>) {
     *pending = None;
     app.close_edge_lens();
-    app.target = (app.target + 1) % app.targets.len();
+    app.target = (app.target + 1) % app.targets.len().max(1);
     app.source_menu = None;
     app.source_menu_hits.borrow_mut().clear();
     app.graph = Graph::default();
@@ -583,7 +633,7 @@ fn queued_input(
     cancel_barrier: bool,
     queued: &mut Option<(crossterm::event::KeyEvent, Option<String>)>,
 ) -> Option<Event> {
-    if cancel_barrier || app.show_help || app.source_menu.is_some() {
+    if cancel_barrier || !memory_reads_visible(app) {
         return None;
     }
     queued.take().map(|(key, selected_id)| {
@@ -620,12 +670,18 @@ pub async fn run(options: Options) -> Result<(), Error> {
             })
         })
         .collect();
-    if !options.demo && options.sources.is_empty() {
+    if !options.demo && options.sources.is_empty() && !options.inspect_config {
         return Err("no memory sources available".into());
     }
     let mut app = App::new(targets, options.query, options.demo);
     app.sources = options.sources;
     app.view = options.view;
+    app.config_report = options.config_report;
+    app.config_selection = options.config_selection;
+    // The transient activity strip retains only three events. Keep the bounded
+    // configuration diagnostics intact for inspection, including failed refresh
+    // coverage that must remain distinct from the retained receipt's report.
+    app.config_diagnostics = options.startup_warnings.clone();
     let mut startup_warnings = Some(options.startup_warnings);
     if app.demo {
         app.graph = demo_graph();
@@ -635,17 +691,22 @@ pub async fn run(options: Options) -> Result<(), Error> {
         app.cabinet.loaded = true;
         app.event("Demo only · synthetic memories, no traffic");
     }
-    if !app.demo && app.targets.is_empty() {
+    if !app.demo && app.targets.is_empty() && !options.inspect_config {
         app.error = Some(
             "Known sources have no configured live owner route · Tab shows their metadata".into(),
         );
         source_picker::open(&mut app);
     }
-    let mut channel = if app.demo || app.targets.is_empty() {
-        None
-    } else {
-        Some(worker(app.targets[0].clone()))
-    };
+    if options.inspect_config {
+        // Closing the inspector returns to a metadata picker, not an implicit
+        // default read. This also works for zero stores or denied defaults.
+        source_picker::open(&mut app);
+        // CLI ordering puts an explicitly named metadata row first, even when
+        // it is denied. There is no connected target to preserve at startup.
+        app.source_menu = Some(0);
+        config_inspector::open(&mut app);
+    }
+    let mut channel = initial_worker(&app);
     let mut pending = None;
     let mut cancel_barrier = false;
     let mut queued_user_key = None;
@@ -682,7 +743,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
                     poll_at = Instant::now() + Duration::from_secs(2);
                 }
             }
-            if app.deferred_view_read && !app.busy && !app.show_help {
+            if app.deferred_view_read && !app.busy && memory_reads_visible(&app) {
                 app.deferred_view_read = false;
                 if view_is_unread(&app) {
                     if let Some((tx, _, _)) = &channel { initial_read(&mut app, tx, &mut pending); }
@@ -698,6 +759,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
             terminal.draw(|frame| render::draw(frame, &app))?;
             detail_scroll::clamp(&mut app);
             render::help::clamp(&mut app);
+            config_inspector::clamp(&mut app);
             let queued_event = queued_input(&mut app, cancel_barrier, &mut queued_user_key);
             let input_event = match queued_event {
                 Some(event) => Some(event),
@@ -708,6 +770,17 @@ pub async fn run(options: Options) -> Result<(), Error> {
             });
             let mut chosen_source = None;
             if let Some(event) = input_event {
+                match config_inspector::input(&mut app, &event, input_pump.wheel_reports) {
+                    config_inspector::Input::Quit => break,
+                    config_inspector::Input::Consumed => continue,
+                    config_inspector::Input::Pass => {}
+                }
+                // This key is metadata-only, including from the source picker
+                // and help. Do not let a queued underlying read survive it.
+                if !app.editing && matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('C')) {
+                    open_config_inspector(&mut app, &mut queued_user_key);
+                    continue;
+                }
                 match render::help::input(&mut app, &event, input_pump.wheel_reports) {
                     render::help::Input::Quit => break,
                     render::help::Input::Consumed => continue,
@@ -722,7 +795,11 @@ pub async fn run(options: Options) -> Result<(), Error> {
                             break;
                         }
                         if app.source_menu.is_some() {
-                            chosen_source = source_picker::key(&mut app, key.code);
+                            if key.code == KeyCode::Char('c') {
+                                open_config_inspector(&mut app, &mut queued_user_key);
+                            } else {
+                                chosen_source = source_picker::key(&mut app, key.code);
+                            }
                         } else if app.editing {
                             match key.code {
                                 KeyCode::Esc => app.editing = false,
@@ -891,7 +968,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
                     _ => {}
                 }
             }
-            if let Some(index) = chosen_source.filter(|index| *index != app.target) {
+            if let Some(index) = chosen_source.filter(|index| source_connection_required(&app, *index, channel.is_some())) {
                 cancel_barrier = false;
                 queued_user_key = None;
                 // Discard the old answer channel before admitting a new source.
@@ -911,7 +988,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
             // An ignored-only drain must not starve background work forever.
             // A pending actionable burst gets priority; noise does not create
             // a new request per report or enlarge the one-operation queue.
-            let background_allowed = !app.show_help && app.source_menu.is_none() && (!input_waiting || !discrete_input);
+            let background_allowed = memory_reads_visible(&app) && (!input_waiting || !discrete_input);
             if !cancel_barrier && background_allowed {
                 if let Some((tx, _, _)) = &channel {
                     advance_inventory(&mut app, tx, &mut pending);
@@ -958,6 +1035,8 @@ pub async fn run(options: Options) -> Result<(), Error> {
     result
 }
 
+#[cfg(test)]
+mod config_inspector_tests;
 #[cfg(test)]
 mod input_runtime_tests;
 #[cfg(test)]

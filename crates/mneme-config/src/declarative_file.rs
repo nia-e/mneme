@@ -6,7 +6,7 @@ use crate::{MAX_CONFIG_BYTES, Result, error};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-const READ_ERROR: &str = "cannot read configuration: use a readable regular file of at most 65536 bytes; repair broken or looping symlinks";
+const READ_ERROR: &str = "cannot read configuration: use a readable regular file within its configured byte bound; repair broken or looping symlinks";
 
 pub(crate) struct SourceFile {
     pub path: PathBuf,
@@ -46,12 +46,15 @@ pub(crate) fn present(path: &Path) -> Result<bool> {
 }
 
 pub(crate) fn read(path: &Path) -> Result<Option<SourceFile>> {
+    read_bounded(path, MAX_CONFIG_BYTES)
+}
+
+pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<SourceFile>> {
     let Some(path) = resolve(path)? else {
         return Ok(None);
     };
-    let valid = |metadata: &std::fs::Metadata| {
-        metadata.is_file() && metadata.len() <= MAX_CONFIG_BYTES as u64
-    };
+    let valid =
+        |metadata: &std::fs::Metadata| metadata.is_file() && metadata.len() <= max_bytes as u64;
     let metadata = std::fs::symlink_metadata(&path).map_err(|_| error(READ_ERROR))?;
     if !valid(&metadata) {
         return Err(error(READ_ERROR));
@@ -70,10 +73,10 @@ pub(crate) fn read(path: &Path) -> Result<Option<SourceFile>> {
         return Err(error(READ_ERROR));
     }
     let mut bytes = Vec::new();
-    file.take(MAX_CONFIG_BYTES as u64 + 1)
+    file.take(max_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| error(READ_ERROR))?;
-    if bytes.len() > MAX_CONFIG_BYTES {
+    if bytes.len() > max_bytes {
         return Err(error(READ_ERROR));
     }
     Ok(Some(SourceFile { path, bytes }))

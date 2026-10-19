@@ -55,6 +55,8 @@ pub struct SelectionSnapshot {
     #[serde(default)]
     pub request: Option<SelectionRequest>,
     pub sources: Vec<ConfigSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<crate::DiscoveryWitness>,
     pub config: Config,
     pub cwd: PathBuf,
     pub origins: Vec<PathBuf>,
@@ -223,9 +225,10 @@ impl SelectionSnapshot {
     pub fn revalidate_exact(&self) -> Result<()> {
         self.verify_digest()?;
         if let Some(request) = &self.request {
-            let current = crate::workspace::resolve_request(request)?.ok_or_else(|| {
-                error("native selection no longer configured; reselect and reassess")
-            })?;
+            let current = crate::workspace::replay_request(request, self.discovery.as_ref())?
+                .ok_or_else(|| {
+                    error("native selection no longer configured; reselect and reassess")
+                })?;
             if current.digest != self.digest {
                 return Err(error(
                     "selection metadata changed; reselect and reassess the original operation",
@@ -246,7 +249,7 @@ impl SelectionSnapshot {
         Ok(sha256(&bytes))
     }
 }
-fn path_match(origins: &[PathBuf], roots: &[PathBuf]) -> Result<bool> {
+pub(crate) fn path_match(origins: &[PathBuf], roots: &[PathBuf]) -> Result<bool> {
     for root in roots {
         let canonical = match root.canonicalize() {
             Ok(root) => Some(root),
@@ -332,6 +335,16 @@ fn scope_match(
 }
 pub fn select(config: &Config, context: &SelectionContext) -> Result<SelectionSnapshot> {
     config.validate()?;
+    select_resolved(config, context)
+}
+
+/// Discovery can retain unresolved named defaults and allowlists. They remain
+/// unavailable, not rewritten into a fallback or a broader allowlist.
+pub(crate) fn select_resolved(
+    config: &Config,
+    context: &SelectionContext,
+) -> Result<SelectionSnapshot> {
+    config.validate_inner(false)?;
     validate_path(&context.cwd)?;
     let context_profile = PrivacyProfile::parse(&context.profile)?;
     if context.origins.len() > 3 {
@@ -523,6 +536,7 @@ pub fn select(config: &Config, context: &SelectionContext) -> Result<SelectionSn
         digest: String::new(),
         request: None,
         sources: context.sources.clone(),
+        discovery: None,
         config: config.clone(),
         cwd: context.cwd.clone(),
         origins,

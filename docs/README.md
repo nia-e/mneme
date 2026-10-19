@@ -20,6 +20,7 @@ New to Mneme? Start with [installation and a first session](../README.md).
 | [Claude Code capture](../integrations/claude/README.md) | Prepare and review optional capture-only hooks; retain external recall/core wiring |
 | [Nix client package](nix.md) | Build remote clients and use per-user Home Manager configuration |
 | [Declarative configuration](declarative-config.md) | Select existing owners and separate activation, grants and delivery while retaining background instructions |
+| [Store discovery](discovery.md) | Load store configuration recursively from a verified seed and inspect its provenance |
 | [Remote CLI](remote-cli.md) | Connect to an existing memory server over HTTP or SSH |
 | [Memory libraries](memory-libraries.md) | Read across enrolled projects and read-only snapshots |
 | [Store separation](store-separation.md) | Keep project, company and personal memory distinct while selecting shared reads |

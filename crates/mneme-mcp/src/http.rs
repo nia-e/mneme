@@ -693,6 +693,7 @@ mod tests {
         let shared = Arc::new(Shared {
             server: crate::Server {
                 registry: crate::Registry {
+                    discovery_catalogs: Default::default(),
                     activity: crate::activity::ActivityRing::default(),
                     dbs: std::collections::BTreeMap::new(),
                 },
@@ -791,6 +792,111 @@ mod tests {
             http_sessions: Mutex::new(HashMap::new()),
         });
         (root, shared)
+    }
+
+    #[tokio::test]
+    async fn discovery_catalog_http_and_stdio_share_profiles_bounds_and_released_identity() {
+        for profile in [
+            crate::CapabilityProfile::ReadOnly,
+            crate::CapabilityProfile::ReceiptGrounded,
+            crate::CapabilityProfile::Curator,
+            crate::CapabilityProfile::Operator,
+        ] {
+            let (root, mut shared) = shutdown_fixture();
+            let server = &mut Arc::get_mut(&mut shared).unwrap().server;
+            server.capability = crate::CapabilityPolicy::new(profile, false);
+            let id = server
+                .registry
+                .slot("a")
+                .unwrap()
+                .status()
+                .unwrap()
+                .db_id
+                .to_string();
+            let path = root.join("catalog.toml");
+            std::fs::write(&path, "schema = 'mneme.discovery-catalog.v1'\n[stores]\n").unwrap();
+            server.registry.discovery_catalogs =
+                crate::discovery_catalog::prepare_sources(vec![("a".into(), path)])
+                    .unwrap()
+                    .bind(&server.registry)
+                    .unwrap();
+            server
+                .registry
+                .slot("a")
+                .unwrap()
+                .begin_release()
+                .unwrap()
+                .finish()
+                .unwrap();
+            let _cold = server.cold_work.admit("unrelated-work").unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::ACCEPT,
+                HeaderValue::from_static("application/json, text/event-stream"),
+            );
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            let init = post_handler(State(shared.clone()), headers.clone(), Body::from(serde_json::to_vec(&serde_json::json!({
+                "jsonrpc":"2.0", "id":"init", "method":"initialize", "params":{"protocolVersion":crate::PROTOCOL_VERSION}
+            })).unwrap())).await;
+            assert_eq!(init.status(), StatusCode::OK);
+            headers.insert(
+                "mcp-session-id",
+                init.headers().get("mcp-session-id").unwrap().clone(),
+            );
+            headers.insert(
+                "mcp-protocol-version",
+                HeaderValue::from_static(crate::PROTOCOL_VERSION),
+            );
+            for params in [
+                serde_json::json!({"name":"discovery_catalog","arguments":{"db":"a","expected_db_id":id}}),
+                serde_json::json!({"name":"discovery_catalog","arguments":{"db":"a"}}),
+                serde_json::json!({"name":"discovery_catalog","arguments":{"db":"a","expected_db_id":ulid::Ulid::new().to_string()}}),
+                serde_json::json!({"name":"discovery_catalog","arguments":{"db":"a","expected_db_id":id,"expected_catalog_sha256":"a".repeat(64)}}),
+            ] {
+                let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params});
+                let stdio = shared.server.handle(request.clone()).await.unwrap();
+                let http = post_handler(
+                    State(shared.clone()),
+                    headers.clone(),
+                    Body::from(serde_json::to_vec(&request).unwrap()),
+                )
+                .await;
+                assert_eq!(http.status(), StatusCode::OK);
+                assert_eq!(
+                    response_json(http).await,
+                    serde_json::from_slice::<Value>(stdio.bytes()).unwrap()
+                );
+            }
+            let catalog = shared
+                .server
+                .dispatch("tools/list", serde_json::json!({}))
+                .await
+                .unwrap();
+            assert!(
+                catalog["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == "discovery_catalog")
+            );
+            assert_eq!(
+                shared
+                    .server
+                    .registry
+                    .slot("a")
+                    .unwrap()
+                    .status()
+                    .unwrap()
+                    .in_flight,
+                0
+            );
+            drop(_cold);
+            drop(shared);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1091,6 +1197,7 @@ mod tests {
         let shared = Arc::new(Shared {
             server: crate::Server {
                 registry: crate::Registry {
+                    discovery_catalogs: Default::default(),
                     activity: crate::activity::ActivityRing::default(),
                     dbs: std::collections::BTreeMap::new(),
                 },

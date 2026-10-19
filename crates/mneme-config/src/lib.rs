@@ -2,13 +2,18 @@
 //! Activation, authority, delivery and authored guidance selectors are independent.
 
 mod declarative_file;
+mod discovery;
+mod discovery_receipt;
+pub use discovery::*;
+pub use discovery_receipt::*;
 mod legacy_workspace;
 mod privacy;
 mod selection;
 mod workspace;
 pub use selection::*;
 pub use workspace::{
-    SelectionRequest, SelectionRequestMode, default_user_path, discover_workspace, select_workspace,
+    SelectionRequest, SelectionRequestMode, WorkspaceDeclarations, default_user_path,
+    discover_workspace, finish_workspace, prepare_workspace, select_workspace,
 };
 
 use privacy::PrivacyProfile;
@@ -503,7 +508,10 @@ impl Config {
         if self.stores.len() > MAX_STORES || self.libraries.len() > MAX_LIBRARIES {
             return Err(error("configuration exceeds store/library count bound"));
         }
-        if self.read_default != default_rule() && !self.stores.contains_key(&self.read_default) {
+        if complete
+            && self.read_default != default_rule()
+            && !self.stores.contains_key(&self.read_default)
+        {
             return Err(error(
                 "read_default must be project-or-misc or a configured store name",
             ));
