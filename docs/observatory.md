@@ -50,7 +50,7 @@ stay isolated from ambient configuration discovery.
 | `n` / `m` | Continue paused Map loading; `n` pages Touchstones |
 | `r` | Refresh the current view |
 | Tab | Choose among Known sources |
-| `C` (or `c` in the picker) | Inspect configuration and discovery provenance |
+| `C` (or `c` in the picker) | Inspect configuration, discovery and displayed read provenance |
 | `?` | Help |
 | Esc | Close detail/help/focus, pause loading, or go back |
 | Backspace / `b` | Go back |
@@ -168,7 +168,7 @@ mnemed --remote URL list --touchstones --limit 2
 
 Add `--user` when inspecting user memory. See [touchstones](touchstones.md).
 
-## Live, but not a snapshot
+## Activity and read sources
 
 Activity glows mean a node was returned in a prepared read response, including
 this viewer's own reads. They do not prove that a client received or used the
@@ -195,12 +195,19 @@ is inactive for the current workspace. This deliberate read does not activate
 background recall, recording or context delivery. Disabled stores, denied read
 permissions, profile restrictions and workspace exclusions still apply.
 
+Configured owner-first caches can supply a read-only snapshot when the canonical
+owner is unavailable. A persistent **SNAPSHOT · read-only** header stays with that
+content, including history and failed refreshes; wider terminals also show its age,
+device and generation. `C` shows the exact capture time and canonical identity.
+Compositions containing both live/unknown reads and a snapshot are marked mixed,
+not passed off as one coherent capture. See [on-use caches](../integrations/library/CACHE.md).
+
 Without declarative configuration, default selection follows
 [legacy CLI owner selection](remote-cli.md#default-project-and-user-owners),
 including `--user` for the private user owner. `tui --config PATH` instead shows
 that library's descriptors, `--remote` one explicit route and `--demo` synthetic
 sources; these explicit modes cannot be mixed with declarative selectors. There
-is no cross-source graph traversal or automatic snapshot fallback.
+is no cross-source graph traversal or automatic snapshot fallback in these explicit modes.
 
 `mnemed stores [--json]` lists the same metadata without opening the viewer.
 

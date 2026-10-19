@@ -361,6 +361,7 @@ mod tests {
         detail.references[0].summary = "Historical\x1b summary".into();
         app.cabinet.detail = Some(detail);
         app.cabinet.current = Some(crate::touchstones::ExactTarget {
+            read_source: Default::default(),
             db_id: "owner".into(),
             node: Some(crate::model::Node {
                 summary: "Current target".into(),
@@ -393,6 +394,7 @@ mod tests {
         detail.summary_partial = true;
         app.cabinet.detail = Some(detail);
         app.cabinet.current = Some(crate::touchstones::ExactTarget {
+            read_source: Default::default(),
             db_id: "owner".into(),
             node: Some(crate::model::Node {
                 summary: "A cropped summary".into(),

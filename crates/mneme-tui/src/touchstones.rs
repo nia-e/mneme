@@ -14,12 +14,14 @@ pub struct TouchstoneCard {
 }
 #[derive(Clone, Debug, Default)]
 pub struct TouchstonePage {
+    pub read_source: crate::read_source::ReadProvenance,
     pub items: Vec<TouchstoneCard>,
     pub next: Option<String>,
     pub partial: bool,
 }
 #[derive(Clone, Debug)]
 pub struct TouchstoneDetail {
+    pub read_source: crate::read_source::ReadProvenance,
     pub node: Node,
     pub owner: String,
     pub subject: String,
@@ -46,6 +48,7 @@ pub enum ReferenceResolution {
 }
 #[derive(Clone, Debug)]
 pub struct ExactTarget {
+    pub read_source: crate::read_source::ReadProvenance,
     pub db_id: String,
     pub node: Option<Node>,
     pub body_partial: bool,
@@ -132,6 +135,7 @@ pub(crate) fn parse_page(v: &Value, db: &str) -> Result<TouchstonePage, Error> {
         });
     }
     Ok(TouchstonePage {
+        read_source: Default::default(),
         items,
         partial: next.is_some(),
         next,
@@ -219,6 +223,7 @@ pub(crate) fn parse_detail(
         });
     }
     Ok(TouchstoneDetail {
+        read_source: Default::default(),
         node,
         owner,
         subject: subject(record)?,
@@ -282,6 +287,7 @@ pub fn demo_detail(card: &TouchstoneCard) -> TouchstoneDetail {
         ),
     };
     TouchstoneDetail {
+        read_source: Default::default(),
         node: Node {
             id: card.id.clone(),
             summary: card.summary.clone(),

@@ -7,6 +7,7 @@ mod input;
 mod inventory_actions;
 mod layout;
 pub mod model;
+pub mod read_source;
 mod render;
 mod scene_actions;
 pub mod scenes;
@@ -453,14 +454,19 @@ fn apply_response(app: &mut App, pending: &mut Option<PendingRead>, response: Re
                     // viewport cards hydrate. Duplicate base IDs own rendering;
                     // update only admitted known status, never overwrite their
                     // body/card cache with partial neighbor placeholders.
+                    let mut updated_base = false;
                     for fresh in &graph.nodes {
                         if matches!(fresh.status.as_str(), "active" | "archived") {
                             if let Some(base) =
                                 app.graph.nodes.iter_mut().find(|node| node.id == fresh.id)
                             {
                                 base.status.clone_from(&fresh.status);
+                                updated_base = true;
                             }
                         }
+                    }
+                    if updated_base {
+                        app.graph.read_source.merge(&graph.read_source);
                     }
                     lens.merge_graph(graph);
                     app.error = None;
@@ -1041,3 +1047,5 @@ mod config_inspector_tests;
 mod input_runtime_tests;
 #[cfg(test)]
 mod navigation_tests;
+#[cfg(test)]
+mod provenance_ui_tests;

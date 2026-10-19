@@ -8,6 +8,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+impl SelectionRequest {
+    /// Replay this exact frozen request using only local declarations and an
+    /// optional pinned discovery receipt. In particular, an absent default
+    /// configuration stays a discover request, not an explicit-file request.
+    /// No publisher or memory owner is contacted and no grant is refreshed.
+    pub fn replay_offline(
+        &self,
+        witness: Option<&crate::DiscoveryWitness>,
+    ) -> Result<Option<SelectionSnapshot>> {
+        crate::workspace::replay_request(self, witness)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectState {

@@ -136,7 +136,7 @@ fn lines(view: View) -> Vec<Line<'static>> {
     }
     result.extend([
         Line::raw("tab            choose source"),
-        Line::raw("C              inspect configuration (no memory read)"),
+        Line::raw("C              configuration / read-source details (no read)"),
         Line::raw("↑↓ / j k       scroll an opened inspector"),
         Line::raw("wheel / PgUp/Dn scroll / page"),
         Line::raw("Home / End     first / last line"),

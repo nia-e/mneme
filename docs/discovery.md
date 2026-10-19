@@ -118,10 +118,29 @@ contributor; unresolved required device scope still blocks activation. Ordinary
 local path overrides need no device qualifier.
 
 A remote route is a coherent bundle, not a bag of interchangeable fragments.
+Publish different complete routes for clients on different devices when necessary:
+
+```toml
+[stores.project.devices.laptop]
+owner = { url = "http://127.0.0.1:18767/", db = "project" }
+
+[stores.project.devices.desktop]
+owner = { url = "ssh://operator@owner.example.test", db = "project", ssh_mcp_port = 18766 }
+```
+
+The selected device's `owner` replaces the whole shared `stores.project.owner`
+bundle before branch merging; omitted optional fields do not leak in from the
+shared route. Without a matching device route, the shared route remains the
+default. A device-only route has no off-device fallback. Device routes require
+both `url` and `db`, and SSH still requires `ssh_mcp_port`. Explicit local owner
+overrides remain stronger than imported device routes. Local device routes can
+also supply a discovery seed.
+
 Local route fields may refine an unambiguous imported route. Catalogs cannot name
-`token_env` or contain credentials; a local secret reference needs a complete
-local route/identity binding. An owner-side `path` is identity evidence, never a
-local-open instruction. Discovery imports no executable configuration.
+`token_env` or contain credentials, including in off-device routes; a local secret
+reference needs a complete local route/identity binding. An owner-side `path` is
+identity evidence, never a local-open instruction. Discovery imports no executable
+configuration.
 
 ## Branches, conflicts and cycles
 

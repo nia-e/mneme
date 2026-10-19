@@ -1,6 +1,7 @@
 //! Checked access to configured native owners and retained read-only editions.
 //! No store opener, service launcher or mutation replay lives here.
 mod admission;
+pub mod demand;
 pub mod discovery;
 use mneme_config::{ActiveStore, SelectionSnapshot};
 use mneme_library::{Endpoint, LibraryRuntime, ReplicaPin, ReplicaRoute};
@@ -779,6 +780,9 @@ impl ConfiguredClient {
             }
             .await;
             if operation.is_ok() {
+                if route.is_none() && demand::payload_read(tool, &admitted_args, access) {
+                    demand::record(&self.snapshot, selected);
+                }
                 self.sessions
                     .lock()
                     .await

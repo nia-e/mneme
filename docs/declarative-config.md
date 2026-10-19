@@ -277,6 +277,12 @@ Preserve existing catalogs, publication state and immutable snapshot identities
 when adopting configuration; a snapshot witness cannot become a live-owner write
 guard.
 
+Opt-in [on-use cache population](../integrations/library/CACHE.md) adds
+`cache.populate` to this owner-first policy. Successful canonical payload reads
+record demand; configuration inspection does not. The separate local worker copies
+verified nodes and portable bodies with their binding, without following file links.
+CLI/TUI/MCP reads preserve snapshot provenance; automatic hooks remain canonical-only.
+
 For Codex, one global registration can consume the one native configuration:
 
 ```toml

@@ -52,6 +52,11 @@ fn advertised_catalog() -> Value {
         branch["properties"]["expected_db_id"] = guard.clone();
     }
     let mut tools = json!([{"name":"databases","inputSchema":{"type":"object","properties":{}}},{"name":"get","inputSchema":{"type":"object","properties":{"db":{"type":"string"},"expected_db_id":guard,"id":{"type":"string"}}}},{"name":"forget","inputSchema":{"type":"object","properties":{"db":{"type":"string"},"expected_db_id":guard,"id":{"type":"string"}}}},{"name":"episode","inputSchema":episode}]);
+    tools.as_array_mut().unwrap().push(json!({
+        "name":"status", "inputSchema":{"type":"object","properties":{
+            "db":{"type":"string"}, "expected_db_id":guard.clone()
+        }}
+    }));
     for (name, mut schema) in [
         ("retag", mneme_app::retag::input_schema()),
         ("edit_body", mneme_app::edit_body::input_schema()),
@@ -76,6 +81,7 @@ struct CoreFixture {
     catalog_field: Option<Value>,
     notice: Option<Value>,
     wrong_result_identity: bool,
+    replica: bool,
 }
 fn fixture(profile: &'static str, wrong_identity: bool, http_denied: bool) -> Fixture {
     fixture_with_core(profile, wrong_identity, http_denied, CoreFixture::default())
@@ -168,7 +174,7 @@ fn fixture_with_core(
                 Some("tools/call") => {
                     server_requests.lock().unwrap().push(msg["params"].clone());
                     let name = msg["params"]["name"].as_str().unwrap();
-                    let value = if name == "databases" {
+                    let mut value = if name == "databases" {
                         json!([{"db":"project","db_id":if wrong_identity{NODE}else{DB},"state":"open","resolved_path":"/fixture/project.db"}])
                     } else {
                         server_calls.fetch_add(1, Ordering::Relaxed);
@@ -197,6 +203,16 @@ fn fixture_with_core(
                             }
                         }
                     };
+                    if core.replica {
+                        if let Some(rows) = value.as_array_mut() {
+                            for row in rows {
+                                row["db"] = json!("project_g1");
+                                row["resolved_path"] = json!("/fixture/g1/database.db");
+                            }
+                        } else {
+                            value["db"] = json!("project_g1");
+                        }
+                    }
                     Some(
                         json!({"jsonrpc":"2.0","id":msg["id"],"result":{"content":[{"type":"text","text":serde_json::to_string(&value).unwrap()}]}}),
                     )
@@ -305,6 +321,7 @@ async fn wrong_identity_and_auth_denial_never_fall_back() {
         snapshot.config.stores.get_mut("alpha").unwrap().cache = Some(mneme_config::Cache {
             library: "missing".into(),
             mode: mneme_config::CacheMode::OwnerFirst,
+            populate: None,
         });
         // Keep original checked snapshot; mutate through fresh selection so digest is genuine.
         snapshot.config.libraries.insert(
@@ -1019,4 +1036,210 @@ async fn optional_core_notice_failures_do_not_erase_cards_or_bypass_identity() {
         assert_eq!(server.catalog_calls.load(Ordering::Relaxed), 0);
         client.close().await;
     }
+}
+
+#[cfg(unix)]
+struct DemandFixture {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+    snapshot: SelectionSnapshot,
+}
+#[cfg(unix)]
+impl DemandFixture {
+    fn new(url: &str, read: bool, write: bool) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("mneme-actual-demand-{}", ulid::Ulid::new()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = dir.join("memory.toml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"schema="mneme.config.v1"
+[stores.alpha]
+id="{DB}"
+owner={{url="{url}",db="project"}}
+active={{workspace="any"}}
+permissions={{read={read},write={write}}}
+cache={{library="offline",populate={{}}}}
+[libraries.offline]
+catalog="{}"
+"#,
+                dir.join("catalog.json").display()
+            ),
+        )
+        .unwrap();
+        let request = mneme_config::SelectionRequest {
+            mode: mneme_config::SelectionRequestMode::Explicit,
+            user_path: Some(config),
+            cwd: dir.clone(),
+            requested_profile: None,
+            lexical_pwd: Some(dir.clone()),
+            user_codex_dir: Some(dir.join("codex-home")),
+        };
+        let snapshot = request.replay_offline(None).unwrap().unwrap();
+        let path = dir.join("cache-demand").join(format!("{DB}.json"));
+        Self {
+            dir,
+            path,
+            snapshot,
+        }
+    }
+}
+#[cfg(unix)]
+impl Drop for DemandFixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.dir).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn demand_records_actual_verified_owner_read_not_selection_catalog_or_inventory() {
+    let server = fixture("read-only", false, false);
+    let demand = DemandFixture::new(&server.url, true, false);
+    let client = ConfiguredClient::new(demand.snapshot.clone()).unwrap();
+    client.selected("alpha").unwrap();
+    assert_eq!(client.databases()[0]["db"], "alpha");
+    client.catalog("alpha").await.unwrap();
+    client.call("alpha", "databases", json!({})).await.unwrap();
+    client.call("alpha", "status", json!({})).await.unwrap();
+    assert!(!demand.path.exists());
+    client
+        .call("alpha", "get", json!({"id":NODE}))
+        .await
+        .unwrap();
+    let plan = demand::plan(&demand.path).unwrap();
+    assert_eq!(plan.db_id, DB);
+    assert_eq!(plan.selection_digest, demand.snapshot.digest);
+    assert!(!demand.dir.join("catalog.json").exists());
+    client.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn demand_never_records_denied_invalid_or_write_calls() {
+    let server = fixture("operator", false, false);
+    for (read, write) in [(false, false), (true, true)] {
+        let demand = DemandFixture::new(&server.url, read, write);
+        let client = ConfiguredClient::new(demand.snapshot.clone()).unwrap();
+        if !read {
+            assert!(
+                client
+                    .call("alpha", "get", json!({"id":NODE}))
+                    .await
+                    .is_err()
+            );
+        } else {
+            assert!(
+                client
+                    .call("alpha", "get", json!({"id":"invalid"}))
+                    .await
+                    .is_err()
+            );
+            client
+                .call("alpha", "forget", json!({"id":NODE}))
+                .await
+                .unwrap();
+        }
+        assert!(!demand.path.exists());
+        client.close().await;
+    }
+    let wrong = fixture_with_core(
+        "read-only",
+        false,
+        false,
+        CoreFixture {
+            wrong_result_identity: true,
+            ..CoreFixture::default()
+        },
+    );
+    let demand = DemandFixture::new(&wrong.url, true, false);
+    let client = ConfiguredClient::new(demand.snapshot.clone()).unwrap();
+    assert!(client.call("alpha", "core", json!({})).await.is_err());
+    assert!(!demand.path.exists());
+    client.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn optional_demand_file_failure_does_not_fail_successful_owner_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = fixture("read-only", false, false);
+    let demand = DemandFixture::new(&server.url, true, false);
+    let directory = demand.path.parent().unwrap();
+    std::fs::create_dir(directory).unwrap();
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let client = ConfiguredClient::new(demand.snapshot.clone()).unwrap();
+    let result = client
+        .call("alpha", "get", json!({"id":NODE}))
+        .await
+        .unwrap();
+    assert_eq!(result["id"], NODE);
+    assert!(!demand.path.exists());
+    client.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn demand_never_records_fallback_or_exact_pinned_snapshot_reads() {
+    let server = fixture_with_core(
+        "read-only",
+        false,
+        false,
+        CoreFixture {
+            replica: true,
+            ..CoreFixture::default()
+        },
+    );
+    let mut demand = DemandFixture::new("http://127.0.0.1:1/mcp", true, false);
+    let mut config = demand.snapshot.config.clone();
+    config
+        .libraries
+        .get_mut("offline")
+        .unwrap()
+        .replicas
+        .insert(
+            "mirror".into(),
+            mneme_config::Replica {
+                url: server.url.clone(),
+                ssh_mcp_port: None,
+                token_env: None,
+            },
+        );
+    let request = demand.snapshot.request.clone().unwrap();
+    std::fs::write(
+        request.user_path.as_ref().unwrap(),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    demand.snapshot = request.replay_offline(None).unwrap().unwrap();
+    std::fs::write(demand.dir.join("catalog.json"), serde_json::to_vec(&json!({
+        "schema":"mneme.library.catalog.v1", "library_id":"offline", "revision":1,
+        "entries":[{"project_id":"store-fixture", "db_id":DB, "owner_device_id":"owner",
+            "display_name":"fixture", "database":"project", "revision":1,
+            "replicas":[{"source_device_id":"mirror", "database":"project_g1",
+                "resolved_path":"/fixture/g1/database.db", "generation":"g1", "captured_at":1_800_000_000_u64}]}]
+    })).unwrap()).unwrap();
+    let client = ConfiguredClient::new(demand.snapshot.clone()).unwrap();
+    let reply = client
+        .call("alpha", "get", json!({"id":NODE}))
+        .await
+        .unwrap();
+    assert_eq!(reply["_mneme_source"]["generation"], "g1");
+    assert!(!demand.path.exists());
+    client
+        .call(
+            "alpha",
+            "get",
+            json!({"id":NODE,"_mneme_source":reply["_mneme_source"]}),
+        )
+        .await
+        .unwrap();
+    assert!(!demand.path.exists());
+    assert_eq!(server.calls.load(Ordering::Relaxed), 2);
+    client.close().await;
 }

@@ -229,6 +229,7 @@ pub(super) fn open_exact_target(
             app,
             pending,
             ExactTarget {
+                read_source: Default::default(),
                 db_id: reference.db_id,
                 node,
                 body_partial: false,
@@ -521,6 +522,7 @@ mod tests {
                     &mut app,
                     &mut pending,
                     Response::TouchstoneTarget(ExactTarget {
+                        read_source: Default::default(),
                         db_id: reference.db_id,
                         node: None,
                         body_partial: false,

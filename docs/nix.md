@@ -1,6 +1,6 @@
-# Nix client package
+# Nix client and replica packages
 
-The flake currently packages **remote clients**, not a local memory server:
+The default package remains the lightweight **remote client**:
 
 - `packages.<system>.client` (also `default`): `mnemed` and `mneme-mcp`, built
   together with `--no-default-features` from `Cargo.lock`;
@@ -10,6 +10,11 @@ The flake currently packages **remote clients**, not a local memory server:
   disposable synthetic loopback owner;
 - `homeManagerModules.default`: an opt-in per-user package/configuration adapter.
 
+On `x86_64-linux`, `packages.<system>.replica` separately provides the persistent
+`mneme-mcp` runtime used to serve verified local snapshots. It includes Cozo,
+FastEmbed and the HTTP listener; it does not replace the default client. See
+[Replica runtime](#replica-runtime) below.
+
 Outbound HTTP and SSH clients work without the local Cozo/SQLite backend,
 FastEmbed/ONNX, model downloads, or the MCP HTTP **listener** feature. That last
 omission does not disable outbound HTTP. Operations requiring the omitted
@@ -18,8 +23,7 @@ Cozo backend fail rather than creating an alternative persistent store.
 This is a lightweight **feature profile, not a client-only authority sandbox**:
 existing explicit offline lexical/JSON/reference and inspection paths remain.
 Use configured remote owners for ordinary work; do not treat this package as a
-production local owner. A full server package/service module
-and ONNX/model-cache policy are deliberately deferred. This flake does not enable
+production local owner. Neither package enables
 services, enroll stores, install hooks, or enable background recording.
 
 Outputs are declared for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
@@ -40,7 +44,79 @@ cargo build --locked --no-default-features -p mnemed -p mneme-mcp
 ```
 
 The development shell covers the remote-client feature set. It is not a promise
-that default-feature ONNX/server builds work offline in a Nix sandbox.
+that an arbitrary Cargo default-feature build downloads no dependencies. The
+separate replica derivation supplies its ONNX dependency explicitly.
+
+## Replica runtime
+
+```sh
+nix build .#replica
+./result/bin/mneme-mcp --help
+nix build --no-link .#checks.x86_64-linux.replica-smoke
+```
+
+The serving output contains only `mneme-mcp`, with explicit
+`cozo,fastembed,http` features and default features disabled. A separate
+`testTools` output contains a matched native `mnemed` fixture generator; it is not
+part of the default installed replica output or a second CLI on the user's PATH.
+Keep normal configured CLI/MCP clients on the lightweight `client` package.
+
+This is a **feature profile, not read-only authority by itself**. A replica host
+must be launched with `--capability-profile read-only` and generation-specific
+aliases, normally by `integrations/library/library.py serve`. That launcher opens
+separate serving copies, never an immutable bundle or an already-owned live store.
+Configuration, authenticated loopback binding, snapshot receipt/publication and
+service lifecycle remain explicit device deployment work; the flake starts none
+of them. On a shared machine, loopback alone does not prevent another local user
+from reading a private replica: configure bearer authentication and keep its
+credential outside the Nix store.
+
+### ONNX and offline models
+
+The replica derivation links the CPU-only ONNX Runtime from the pinned Nixpkgs,
+without Python bindings, OpenVINO or GPU providers. `ORT_LIB_LOCATION` and
+`ORT_PREFER_DYNAMIC_LINK=1` avoid the locked `ort-sys` build script's implicit
+runtime download. Cargo's `--offline` flag alone does **not** prevent that download.
+OpenSSL/native-TLS and SQLite are explicit build/link dependencies too. The
+artifact manifest records the ONNX library path/version, requested C API version,
+source/lock identities, feature set and post-fixup executable hashes.
+
+An existing BGE snapshot cannot be served with the hashing-only embedder, even
+for `list` or `get`: opening verifies the full embedding fingerprint. A matching
+FastEmbed build loads model weights lazily, so model-free metadata browsing and
+semantic search have different validation requirements.
+
+Models are not downloaded during package build or bundled implicitly. For
+offline semantic queries, provision and verify the complete public BGE cache,
+then set `FASTEMBED_CACHE_DIR` in the replica service's environment. Unset `HF_HOME`
+or point it to that same intended root; the locked FastEmbed version gives
+`HF_HOME` precedence and treats it as the cache root. Required files are:
+
+```text
+models--Xenova--bge-base-en-v1.5/
+  refs/main
+  snapshots/<revision>/onnx/model.onnx
+  snapshots/<revision>/tokenizer.json
+  snapshots/<revision>/config.json
+  snapshots/<revision>/special_tokens_map.json
+  snapshots/<revision>/tokenizer_config.json
+```
+
+Check resolved paths, lengths and content hashes, not only an ONNX filename or
+cache directory. Missing tokenizer files can still trigger a download. Leave
+`MNEME_RERANK` unset unless separately provisioning and validating the reranker
+model. Do not put private models, tokens or memory contents into a Nix input.
+
+The finite default replica smoke uses a synthetic current-format BGE-fingerprint
+fixture and native migration/snapshot operations, with no model download or
+inference. It checks both transports, bounded reads, explicit write refusal,
+snapshot bodies, artifact identity, shutdown and lease release. That establishes
+the installed serving path, **not offline semantic-query quality**. Validate an
+actual query separately with the reviewed model cache and networking unavailable
+before claiming an offline semantic deployment.
+
+The replica output is declared only for `x86_64-linux`; AArch64 replica builds are
+not claimed by this package. Remote clients retain their existing platform matrix.
 
 ### Private checkout boundary
 
@@ -166,12 +242,14 @@ mnemed --json config select --config "${XDG_CONFIG_HOME:-$HOME/.config}/mneme/me
 mneme-mcp --memory-config "${XDG_CONFIG_HOME:-$HOME/.config}/mneme/memory.toml"
 ```
 
-Selection itself is metadata-only and does not contact owners. This package does
-not move databases to the build machine or start another writer.
+Selection is metadata-only, but discovery-enabled configurations may contact
+catalog publishers and retain local discovery receipts. Use `config inspect
+--offline` to inspect retained discovery without contacting publishers. Neither
+package moves live databases to the build machine or starts another writer.
 
 ## Checks and artifact identity
 
-The package builds only the two client binaries with default features disabled.
+The client package builds only the two client binaries with default features disabled.
 Its build phase runs focused, explicit no-default-feature tests for
 `mneme-config`, `mneme-store-client`, CLI configuration routing, and configured
 MCP. The separate installed-artifact smoke exercises symlinked configuration,

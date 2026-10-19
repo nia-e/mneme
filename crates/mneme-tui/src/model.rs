@@ -78,6 +78,7 @@ pub struct Edge {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Graph {
+    pub read_source: crate::read_source::ReadProvenance,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub partial: bool,
@@ -106,6 +107,7 @@ pub struct InventoryPage {
 }
 #[derive(Clone, Debug, Default)]
 pub struct InventorySummaries {
+    pub read_source: crate::read_source::ReadProvenance,
     pub nodes: Vec<Node>,
     pub missing: Vec<String>,
     pub bytes: usize,
@@ -264,6 +266,21 @@ impl EdgeLens {
         // Every admitted edge is incident to the anchor: 32 edges require at
         // most the anchor plus 32 other cards, even across relation kinds.
         debug_assert!(nodes.len() <= 33);
+        // Merely having an earlier lens is not a mixed read: every admitted
+        // value may have been replaced. Merge its witness only for old cards
+        // or edges that actually survived this bounded composition.
+        let retained_known = nodes
+            .iter()
+            .any(|node| !fresh.nodes.iter().any(|candidate| candidate.id == node.id))
+            || edges.iter().any(|edge| {
+                !fresh
+                    .edges
+                    .iter()
+                    .any(|candidate| same_edge(candidate, edge))
+            });
+        if retained_known {
+            fresh.read_source.merge(&known.read_source);
+        }
         fresh.nodes = nodes;
         fresh.edges = edges;
         fresh.partial = partial;
@@ -406,6 +423,66 @@ impl App {
     }
     pub fn selected_scene(&self) -> Option<&Scene> {
         self.scenes.items.get(self.scene_selected)
+    }
+    /// Provenance belongs to retained content, never the most recent activity
+    /// response or route selection. Empty, unread placeholders do not dilute a
+    /// witness; successfully loaded empty pages still carry their own source.
+    pub(crate) fn displayed_read_source(&self) -> crate::read_source::ReadProvenance {
+        use crate::read_source::ReadProvenance;
+        let mut shown: Option<ReadProvenance> = None;
+        let mut include = |source: &ReadProvenance| {
+            if let Some(shown) = &mut shown {
+                shown.merge(source);
+            } else {
+                shown = Some(source.clone());
+            }
+        };
+        match self.view {
+            View::Map => {
+                let graph_present = |graph: &Graph| {
+                    !graph.nodes.is_empty()
+                        || !graph.edges.is_empty()
+                        || graph.inventory.is_some()
+                        || graph.focus.is_some()
+                        || !graph.note.is_empty()
+                        || graph.read_source.snapshot.is_some()
+                };
+                if self.last_refresh.is_some() || graph_present(&self.graph) {
+                    include(&self.graph.read_source);
+                }
+                if let Some(lens) = &self.edge_lens
+                    && (lens.state == LensState::Ready || graph_present(&lens.graph))
+                {
+                    include(&lens.graph.read_source);
+                }
+            }
+            View::Scenes => {
+                if self.scenes_loaded
+                    || !self.scenes.items.is_empty()
+                    || self.scenes.read_source.snapshot.is_some()
+                {
+                    include(&self.scenes.read_source);
+                }
+                if let Some(scene) = &self.scene_detail {
+                    include(&scene.read_source);
+                }
+            }
+            View::Touchstones => {
+                if self.cabinet.loaded
+                    || !self.cabinet.page.items.is_empty()
+                    || self.cabinet.page.read_source.snapshot.is_some()
+                {
+                    include(&self.cabinet.page.read_source);
+                }
+                if let Some(detail) = &self.cabinet.detail {
+                    include(&detail.read_source);
+                }
+                if let Some(target) = &self.cabinet.current {
+                    include(&target.read_source);
+                }
+            }
+        }
+        shown.unwrap_or_default()
     }
     pub(crate) fn node_selectable(&self, node: &Node) -> bool {
         !self.hide_archived || node.status != "archived"
@@ -680,6 +757,7 @@ pub fn demo_graph() -> Graph {
         });
     }
     Graph {
+        read_source: Default::default(),
         nodes,
         edges,
         focus: Some("demo-00".into()),

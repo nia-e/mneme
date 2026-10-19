@@ -173,6 +173,70 @@ fn timestamp(ms: u64) -> String {
 }
 
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let read_source = app.displayed_read_source();
+    if let Some(snapshot) = &read_source.snapshot {
+        // Content origin outranks source aliases, activity and transient errors.
+        // This complete warning fits the 22-column interior of a 24x9 terminal.
+        let mut spans = vec![s("SNAPSHOT · read-only", GOLD).add_modifier(Modifier::BOLD)];
+        if read_source.mixed && area.width >= 30 {
+            spans.push(s(" · mixed", GOLD));
+        }
+        if area.width >= 60 {
+            let age = format!(
+                " · {}",
+                crate::config_inspector::snapshot_age(snapshot.captured_at)
+            );
+            let used = Line::from(spans.clone()).width() + Line::raw(&age).width();
+            let available = usize::from(area.width).saturating_sub(used + 17);
+            spans.extend([
+                s(age, DIM),
+                s(" · device ", DIM),
+                s(short(&snapshot.source_device_id, available / 2), INK),
+                s(" · gen ", DIM),
+                s(short(&snapshot.generation, available - available / 2), INK),
+            ]);
+        } else if area.width >= 40 {
+            spans.push(s(" · C details", DIM));
+        }
+        text_line(frame, area, Line::from(spans));
+    } else {
+        source_header(frame, area, app);
+    }
+    // A fine instrument rule, not another dashboard box.
+    if area.height > 1 {
+        let mut tabs = Vec::new();
+        if read_source.snapshot.is_some() && read_source.mixed && area.width < 30 {
+            tabs.push(s("mixed · ", GOLD));
+        }
+        tabs.extend([
+            s("  map", if app.view == View::Map { MINT } else { DIM }),
+            s("   /   ", GRID),
+            s("scenes", if app.view == View::Scenes { MINT } else { DIM }),
+            s("   /   ", GRID),
+            s(
+                "touchstones",
+                if app.view == View::Touchstones {
+                    MINT
+                } else {
+                    DIM
+                },
+            ),
+            s("  ", GRID),
+        ]);
+        let used = Line::from(tabs.clone()).width();
+        tabs.push(s(
+            "─".repeat(usize::from(area.width).saturating_sub(used)),
+            GRID,
+        ));
+        text_line(
+            frame,
+            Rect::new(area.x, area.y + 1, area.width, 1),
+            Line::from(tabs),
+        );
+    }
+}
+
+fn source_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let source = app
         .targets
         .get(app.target)
@@ -223,35 +287,6 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 1,
             ),
             Line::from(s(badge, if app.busy { MINT } else { GRID })),
-        );
-    }
-    // A fine instrument rule, not another dashboard box.
-    if area.height > 1 {
-        let tabs = vec![
-            s("  map", if app.view == View::Map { MINT } else { DIM }),
-            s("   /   ", GRID),
-            s("scenes", if app.view == View::Scenes { MINT } else { DIM }),
-            s("   /   ", GRID),
-            s(
-                "touchstones",
-                if app.view == View::Touchstones {
-                    MINT
-                } else {
-                    DIM
-                },
-            ),
-            s("  ", GRID),
-        ];
-        let used = Line::from(tabs.clone()).width();
-        let mut tabs = tabs;
-        tabs.push(s(
-            "─".repeat(usize::from(area.width).saturating_sub(used)),
-            GRID,
-        ));
-        text_line(
-            frame,
-            Rect::new(area.x, area.y + 1, area.width, 1),
-            Line::from(tabs),
         );
     }
 }

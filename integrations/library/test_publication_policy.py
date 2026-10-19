@@ -591,7 +591,8 @@ class PublisherPolicyIntegrationTests(PublicationFixtures):
             self.assertEqual(library._snapshot(self.owner_config, entry["project_id"], policy=self.policy), bundle)
         run.assert_called_once_with(
             ["/old-pinned-runtime/bin/mnemed", "--json", "--remote", "http://127.0.0.1:18001",
-             "--remote-token-env", "OWNER_TOKEN", "--remote-db", "project", "snapshot", "create"],
+             "--remote-token-env", "OWNER_TOKEN", "--remote-db", "project", "snapshot", "create",
+             "--expected-db-id", DB],
             capture_output=True, timeout=120, check=False)
         self.assertEqual(self._publisher()["snapshot"], publisher["snapshot"])
         self.assertEqual(library._replica_path(self.owner_config, "a", entry["project_id"], "GEN1"), replica_before)

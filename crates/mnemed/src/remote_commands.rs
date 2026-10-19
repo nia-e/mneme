@@ -89,7 +89,10 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
         return Err("remote database name must not be empty".into());
     }
     let (operation, arguments) = match command {
-        Command::Config(_) | Command::Client(_) | Command::TagFormatMigration(_) => {
+        Command::Config(_)
+        | Command::Cache(_)
+        | Command::Client(_)
+        | Command::TagFormatMigration(_) => {
             return Err("client is a standalone local process, not a remote CLI operation".into());
         }
         Command::Stores(_) => {
@@ -102,8 +105,14 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
             return Err("tui has its own remote session; not a one-call command".into());
         }
         Command::Snapshot {
-            action: crate::SnapshotAction::Create,
-        } => (PreparedOperation::SnapshotCreate, json!({})),
+            action: crate::SnapshotAction::Create { expected_db_id },
+        } => (
+            PreparedOperation::SnapshotCreate,
+            match expected_db_id {
+                Some(expected) => json!({"expected_db_id": id(expected)?}),
+                None => json!({}),
+            },
+        ),
         Command::Library(_) => {
             return Err("library reads require --config PATH and cannot use --remote".into());
         }
@@ -418,7 +427,56 @@ fn rank_evidence(hit: &Value) -> String {
     .join(",")
 }
 
+/// Display the native client's exact cache witness, never infer a live source
+/// from missing or malformed fields. Routing and pin validation stay with the
+/// configured client; this renderer makes no additional owner requests.
+fn snapshot_notice(result: &Value, now: Option<u64>) -> Result<Option<String>, AnyErr> {
+    let Some(witness) = result.get("_mneme_source") else {
+        return Ok(None);
+    };
+    let source: mneme_store_client::ReadSource = serde_json::from_value(witness.clone()).map_err(
+        |_| "invalid read-only snapshot provenance; refusing unlabelled output (inspect --json)",
+    )?;
+    let captured = mneme_present::format_timestamp_millis(u128::from(source.captured_at) * 1000);
+    let age = match now {
+        Some(now) if source.captured_at <= now => {
+            format!("{}s old", now - source.captured_at)
+        }
+        Some(now) => format!(
+            "capture is {}s in the future; check clock",
+            source.captured_at - now
+        ),
+        None => "age unavailable; check clock".to_owned(),
+    };
+    // Provenance is data, not terminal control sequences. Keep even a malformed
+    // peer's identifiers bounded without inventing a second route validator.
+    let label = |value: &str| {
+        let mut bounded: String = value.chars().take(128).collect();
+        if bounded.len() < value.len() {
+            bounded.push('…');
+        }
+        format!("{bounded:?}")
+    };
+    Ok(Some(format!(
+        "[mnemed: READ-ONLY SNAPSHOT; captured {captured} ({age}); generation={}; device={}; owner={}]",
+        label(&source.generation),
+        label(&source.source_device_id),
+        label(&source.owner_db_id),
+    )))
+}
+
 pub(crate) fn render(command: &Command, result: &Value, json_output: bool) -> Result<(), AnyErr> {
+    if !json_output {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|elapsed| elapsed.as_secs());
+        if let Some(notice) = snapshot_notice(result, now)? {
+            // Shared before specialized renderers so list/episode/core/etc.
+            // cannot silently drop provenance; stdout and JSON remain native.
+            eprintln!("{notice}");
+        }
+    }
     if matches!(command, Command::List(_)) {
         return crate::cli_list::render(result, json_output);
     }
@@ -456,21 +514,33 @@ pub(crate) fn render(command: &Command, result: &Value, json_output: bool) -> Re
         if let Command::Neighbors(a) = command {
             crate::print_json(&limited_neighbors(result, a.limit)?);
         } else if let Command::Body(_) = command {
-            crate::print_json(&json!({
+            let mut body = json!({
                 "body": result["body"],
                 "source_start": result["body_range"]["source_start"],
                 "source_end": result["body_range"]["source_end"],
                 "next_offset": result["body_range"]["next_offset"],
                 "has_more": result["body_range"]["has_more"],
-            }));
+            });
+            if let Some(source) = result.get("_mneme_source") {
+                body["_mneme_source"] = source.clone();
+            }
+            crate::print_json(&body);
         } else {
             crate::print_json(result);
         }
         return Ok(());
     }
+    // Non-object native results (currently merge candidates) retain their
+    // provenance in an envelope. Only human formatting consumes its payload;
+    // JSON above keeps the complete pinned response intact.
+    let result = if result.get("_mneme_source").is_some() {
+        result.get("result").unwrap_or(result)
+    } else {
+        result
+    };
     match command {
         Command::Snapshot {
-            action: crate::SnapshotAction::Create,
+            action: crate::SnapshotAction::Create { .. },
         } => {
             println!(
                 "snapshot created for {} (db {}, generation {}): {}",
@@ -856,6 +926,76 @@ mod tests {
         crate::Cli::try_parse_from(argv).unwrap().command
     }
 
+    fn snapshot_result() -> Value {
+        json!({"_mneme_source": {
+            "owner_db_id": A, "source_device_id": "workstation", "generation": "generation-1",
+            "captured_at": 1_800_000_000_u64, "database": "snapshot-1", "resolved_path": "/snapshots/one"
+        }})
+    }
+
+    #[test]
+    fn snapshot_notice_preserves_capture_time_identity_and_clock_uncertainty() {
+        let value = snapshot_result();
+        let notice = snapshot_notice(&value, Some(1_800_000_061))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            notice,
+            format!(
+                "[mnemed: READ-ONLY SNAPSHOT; captured 2027-01-15T08:00:00Z (61s old); generation=\"generation-1\"; device=\"workstation\"; owner=\"{A}\"]"
+            )
+        );
+        assert!(
+            snapshot_notice(&value, Some(1_799_999_990))
+                .unwrap()
+                .unwrap()
+                .contains("10s in the future; check clock")
+        );
+        assert!(
+            snapshot_notice(&value, None)
+                .unwrap()
+                .unwrap()
+                .contains("age unavailable")
+        );
+        let mut far_future = value;
+        far_future["_mneme_source"]["captured_at"] = json!(u64::MAX);
+        assert!(
+            snapshot_notice(&far_future, Some(1))
+                .unwrap()
+                .unwrap()
+                .contains("out of calendar range")
+        );
+        assert!(
+            snapshot_notice(&json!({"nodes": 1}), Some(1))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn snapshot_notice_rejects_malformed_witness_instead_of_presenting_live_output() {
+        for witness in [Value::Null, json!({}), json!({"captured_at": "yesterday"})] {
+            let value = json!({"_mneme_source": witness});
+            let error = snapshot_notice(&value, Some(1)).unwrap_err().to_string();
+            assert!(error.contains("invalid read-only snapshot provenance"));
+        }
+        let mut value = snapshot_result();
+        value["_mneme_source"]["extra"] = json!(true);
+        assert!(snapshot_notice(&value, Some(1)).is_err());
+    }
+
+    #[test]
+    fn snapshot_notice_bounds_and_quotes_identifier_data() {
+        let mut value = snapshot_result();
+        value["_mneme_source"]["source_device_id"] = json!("device\n\u{001b}[2J");
+        value["_mneme_source"]["generation"] = json!("雪".repeat(2000));
+        let notice = snapshot_notice(&value, Some(1)).unwrap().unwrap();
+        assert!(!notice.contains(['\n', '\u{001b}']));
+        assert!(notice.contains("device\\n\\u{1b}[2J"));
+        assert!(notice.contains('…'));
+        assert!(notice.len() < 1024);
+    }
+
     #[test]
     fn fresh_query_tags_accept_normalizable_spellings_without_touching_source_proofs() {
         let request = prepare(
@@ -1026,6 +1166,22 @@ mod tests {
         let request = prepare(&command(&["snapshot", "create"]), "workshop").unwrap();
         assert_eq!(request.tool(), "snapshot_create");
         assert_eq!(request.arguments(), &json!({"db": "workshop"}));
+        let pinned = prepare(
+            &command(&["snapshot", "create", "--expected-db-id", A]),
+            "workshop",
+        )
+        .unwrap();
+        assert_eq!(
+            pinned.arguments(),
+            &json!({"db": "workshop", "expected_db_id": A})
+        );
+        assert!(
+            prepare(
+                &command(&["snapshot", "create", "--expected-db-id", "not-an-id"]),
+                "workshop",
+            )
+            .is_err()
+        );
         assert!(
             prepare(
                 &command(&["library", "--config", "x", "catalog"]),

@@ -125,14 +125,17 @@ def _sync_dir(path):
     host_files.sync_directory(path)
 
 
-def _write_stream(path, source):
+def _write_stream(path, source, *, check=None):
     """Flush private bytes before publishing their final name, on either host."""
     path = Path(path)
     _ensure_directory(path.parent)
     temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
     try:
         with _open_file(temporary, "xb") as stream:
-            shutil.copyfileobj(source, stream, 1024 * 1024)
+            while chunk := source.read(1024 * 1024):
+                if check:
+                    check()
+                stream.write(chunk)
             stream.flush()
             os.fsync(stream.fileno())
         host_files.replace_file(temporary, path)
@@ -140,12 +143,12 @@ def _write_stream(path, source):
         temporary.unlink(missing_ok=True)
 
 
-def _copy_file(source, destination):
+def _copy_file(source, destination, *, check=None):
     with _open_file(source, "rb") as stream:
-        _write_stream(destination, stream)
+        _write_stream(destination, stream, check=check)
 
 
-def _copy_tree(source, destination):
+def _copy_tree(source, destination, *, check=None):
     for root, dirs, files in os.walk(source, followlinks=False):
         relative = Path(root).relative_to(source)
         _ensure_directory(Path(destination) / relative)
@@ -153,7 +156,7 @@ def _copy_tree(source, destination):
             fd = _open_directory(Path(root) / name)
             os.close(fd)
         for name in files:
-            _copy_file(Path(root) / name, Path(destination) / relative / name)
+            _copy_file(Path(root) / name, Path(destination) / relative / name, check=check)
 
 
 def _nonempty(value, field):
@@ -257,11 +260,22 @@ def _load(config_path):
 
 
 @contextmanager
-def _lock(config_path):
+def _lock(config_path, *, deadline=None):
     path = Path(str(config_path) + ".lock")
     _ensure_directory(path.parent)
     with _open_file(path, "a+b") as stream:
-        host_files.lock_file(stream)
+        if deadline is None:
+            host_files.lock_file(stream)
+        else:
+            import fcntl
+            while True:
+                if time.monotonic() >= deadline:
+                    raise LibraryError("library lock deadline exceeded")
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         try:
             yield stream
         finally:
@@ -766,7 +780,7 @@ def _safe_rel(value):
     return value
 
 
-def validate_bundle(bundle, db_id):
+def validate_bundle(bundle, db_id, *, check=None):
     bundle = Path(bundle)
     if bundle.is_symlink() or not bundle.is_dir():
         raise LibraryError("snapshot bundle is not a real directory")
@@ -781,6 +795,8 @@ def validate_bundle(bundle, db_id):
     expected = {"manifest.json"}
     total = 0
     for item in manifest["files"]:
+        if check:
+            check()
         if not isinstance(item, dict):
             raise LibraryError("invalid manifest file entry")
         name = _safe_rel(item.get("path"))
@@ -804,6 +820,8 @@ def validate_bundle(bundle, db_id):
         hasher = hashlib.sha256()
         with _open_file(file, "rb") as stream:
             while chunk := stream.read(1024 * 1024):
+                if check:
+                    check()
                 hasher.update(chunk)
         if hasher.hexdigest() != digest:
             raise LibraryError("snapshot checksum mismatch")
@@ -811,6 +829,8 @@ def validate_bundle(bundle, db_id):
         raise LibraryError("snapshot database missing")
     actual = set()
     for root, dirs, files in os.walk(bundle, followlinks=False):
+        if check:
+            check()
         for name in dirs + files:
             path = Path(root) / name
             if path.is_symlink():
@@ -825,17 +845,27 @@ def validate_bundle(bundle, db_id):
     return manifest
 
 
-def _message(descriptor, bundle, delivery_id=None):
+def _message(descriptor, bundle, delivery_id=None, *, check=None):
     message = {"schema": MESSAGE_SCHEMA, "descriptor": descriptor, "snapshot": None,
                "delivery_id": delivery_id or uuid.uuid4().hex}
     if bundle:
-        manifest = validate_bundle(bundle, descriptor["db_id"])
+        manifest = validate_bundle(bundle, descriptor["db_id"], check=check)
         message["snapshot"] = manifest
     return message
 
 
-def _make_archive(descriptor, bundle, delivery_id=None):
-    message = _message(descriptor, bundle, delivery_id)
+class _CheckedReader:
+    """Tar's bounded copy loop must also honor the operation deadline."""
+    def __init__(self, source, check):
+        self.source, self.check = source, check
+
+    def read(self, count=-1):
+        self.check()
+        return self.source.read(count)
+
+
+def _make_archive(descriptor, bundle, delivery_id=None, *, check=None):
+    message = _message(descriptor, bundle, delivery_id, check=check)
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w") as archive:
         payload = json.dumps(message, sort_keys=True, separators=(",", ":")).encode()
@@ -846,11 +876,13 @@ def _make_archive(descriptor, bundle, delivery_id=None):
             manifest = message["snapshot"]
             names = ["manifest.json"] + [x["path"] for x in manifest["files"]]
             for name in names:
+                if check:
+                    check()
                 with _open_file(Path(bundle) / name, "rb") as stream:
                     # Preserve the existing member metadata/bytes: pending
                     # delivery IDs must not conflict merely after an upgrade.
                     info = archive.gettarinfo(fileobj=stream, arcname="snapshot/" + name)
-                    archive.addfile(info, stream)
+                    archive.addfile(info, _CheckedReader(stream, check) if check else stream)
     data = output.getvalue()
     if len(data) > MAX_BUNDLE + MAX_JSON + 1024 * 1024:
         raise LibraryError("archive exceeds bound")
@@ -1023,33 +1055,41 @@ def _deliver_loaded(config, catalog_path, catalog, pp, publisher):
             "source_bundles_pruned": removed}
 
 
-def _extract(data, stage):
-    if len(data) > MAX_BUNDLE + MAX_JSON + 1024 * 1024:
+def _extract(data, stage, *, check=None, max_bundle_bytes=MAX_BUNDLE):
+    if len(data) > max_bundle_bytes + MAX_JSON + 1024 * 1024:
         raise LibraryError("message exceeds bound")
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
-        members = archive.getmembers()
-        if not members or len(members) > MAX_FILES + 2:
-            raise LibraryError("invalid archive inventory")
-        seen = set()
-        for member in members:
-            name = _safe_rel(member.name)
-            if name in seen or not member.isfile() or member.size > MAX_FILE:
-                raise LibraryError("unsafe archive member")
-            seen.add(name)
-            if name != "message.json" and not name.startswith("snapshot/"):
-                raise LibraryError("unexpected archive member")
-            dest = stage / name
-            with archive.extractfile(member) as source:
-                _write_stream(dest, source)
-        if "message.json" not in seen:
-            raise LibraryError("missing message")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+            seen = set()
+            total = 0
+            for member in archive:
+                if check:
+                    check()
+                if len(seen) >= MAX_FILES + 2:
+                    raise LibraryError("invalid archive inventory")
+                total += member.size
+                if total > max_bundle_bytes + MAX_JSON + 1024 * 1024:
+                    raise LibraryError("expanded archive exceeds bound")
+                name = _safe_rel(member.name)
+                if name in seen or not member.isfile() or not 0 <= member.size <= MAX_FILE:
+                    raise LibraryError("unsafe archive member")
+                seen.add(name)
+                if name != "message.json" and not name.startswith("snapshot/"):
+                    raise LibraryError("unexpected archive member")
+                dest = stage / name
+                with archive.extractfile(member) as source:
+                    _write_stream(dest, source, check=check)
+            if "message.json" not in seen:
+                raise LibraryError("missing message")
+    except (tarfile.TarError, ValueError, OverflowError) as error:
+        raise LibraryError("invalid snapshot archive") from error
     message = _read_json(stage / "message.json")
     if not isinstance(message, dict) or message.get("schema") != MESSAGE_SCHEMA:
         raise LibraryError("invalid message schema")
     return message
 
 
-def _service_command(publisher, action):
+def _service_command(publisher, action, *, deadline=None):
     serving = publisher.get("serving")
     if serving is None:
         return
@@ -1062,7 +1102,9 @@ def _service_command(publisher, action):
         raise LibraryError(f"invalid serving {action} argv")
     _path(argv[0], "serving executable")
     result = subprocess.run(argv, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, timeout=30, check=False)
+                            stderr=subprocess.DEVNULL,
+                            timeout=30 if deadline is None else max(0.001, min(30, deadline - time.monotonic())),
+                            check=False)
     if result.returncode:
         raise LibraryError(f"serving {action} failed; catalog not switched" if action == "stop"
                            else "serving restart failed; verified generation is selected")
@@ -1082,15 +1124,29 @@ def _receive_result(result, config, catalog, message, owner, project, include_ac
             "revision": descriptor["revision"], "replicas": replicas}}
 
 
-def receive(config_path, data, *, authenticated_peer, include_ack=False):
+def receive(config_path, data, *, authenticated_peer, include_ack=False,
+            expected_db_id=None, expected_delivery_id=None, before_publish=None,
+            binding=None, deadline=None, expected_project_id=None,
+            expected_database=None, require_snapshot=False, expected_catalog_path=None,
+            expected_receiver_device_id=None, max_snapshot_bytes=MAX_BUNDLE):
     """Validate privately, then activate only a coherent generation.
 
     authenticated_peer is supplied by a trusted local inbox or a fixed SSH
     receiver wrapper, never by the incoming message itself.
     """
     _require_relay_support()
-    with _lock(config_path):
+    def check():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise LibraryError("cache publication deadline exceeded")
+    if type(max_snapshot_bytes) is not int or not 1 <= max_snapshot_bytes <= MAX_BUNDLE:
+        raise LibraryError("invalid receive snapshot bound")
+    check()
+    with _lock(config_path, **({"deadline": deadline} if deadline is not None else {})):
         cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
+        if expected_catalog_path is not None and catalog_path != Path(expected_catalog_path):
+            raise LibraryError("cache receiver catalog target changed")
+        if expected_receiver_device_id is not None and config["device_id"] != expected_receiver_device_id:
+            raise LibraryError("cache receiver device identity changed")
         peer = next((p for p in publisher["peers"] if p.get("device_id") == authenticated_peer), None)
         if peer is None:
             raise LibraryError("untrusted peer")
@@ -1099,16 +1155,24 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
         stage = state / (".stage-" + uuid.uuid4().hex)
         host_files.ensure_private_directory(stage, parents=False, exist_ok=False)
         try:
-            message = _extract(data, stage)
+            message = _extract(data, stage, check=check, max_bundle_bytes=max_snapshot_bytes)
             delivery_id = message.get("delivery_id")
             if not isinstance(delivery_id, str) or not re.fullmatch(r"[0-9a-f]{32}", delivery_id):
                 raise LibraryError("invalid delivery identity")
+            if expected_delivery_id is not None and delivery_id != expected_delivery_id:
+                raise LibraryError("unexpected delivery identity")
             descriptor = message.get("descriptor")
             if not isinstance(descriptor, dict):
                 raise LibraryError("missing descriptor")
             owner = _component(descriptor.get("owner_device_id"), "owner_device_id")
             project = _component(descriptor.get("project_id"), "project_id")
+            if expected_project_id is not None and project != expected_project_id:
+                raise LibraryError("unexpected snapshot project identity")
+            if expected_database is not None and descriptor.get("database") != expected_database:
+                raise LibraryError("unexpected snapshot database alias")
             db_id = _nonempty(descriptor.get("db_id"), "db_id")
+            if expected_db_id is not None and db_id != expected_db_id:
+                raise LibraryError("unexpected snapshot database identity")
             _nonempty(descriptor.get("display_name"), "display_name")
             _component(descriptor.get("database"), "owner database alias")
             if owner != authenticated_peer:
@@ -1129,6 +1193,8 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
                         raise LibraryError("same-revision descriptor conflict")
             snapshot = message.get("snapshot")
             withdrawn = descriptor.get("withdrawn")
+            if require_snapshot and (snapshot is None or withdrawn is not False):
+                raise LibraryError("cache population requires a non-withdrawn snapshot")
             if not isinstance(withdrawn, bool):
                 raise LibraryError("invalid withdrawal flag")
             if withdrawn and snapshot is not None:
@@ -1136,9 +1202,11 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
             replicas = old.get("replicas", []) if old else []
             known_old_generations = {r.get("generation") for r in replicas}
             if snapshot is not None:
-                manifest = validate_bundle(stage / "snapshot", db_id)
+                manifest = validate_bundle(stage / "snapshot", db_id, check=check)
                 if manifest != snapshot:
                     raise LibraryError("message and bundle manifest disagree")
+                if sum(item["size"] for item in manifest["files"]) > max_snapshot_bytes:
+                    raise LibraryError("snapshot exceeds requested receive bound")
                 new_order = (manifest["captured_at"], manifest["generation"])
                 current_order = ((replicas[0]["captured_at"], replicas[0]["generation"])
                                  if replicas else None)
@@ -1154,7 +1222,7 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
                 _sync_dir(target_parent)
                 target = target_parent / generation
                 if target.exists():
-                    if validate_bundle(target / "bundle", db_id) != manifest:
+                    if validate_bundle(target / "bundle", db_id, check=check) != manifest:
                         raise LibraryError("same-generation snapshot conflict")
                 else:
                     # Native bundle has `bodies/`; Mneme's open path for
@@ -1166,11 +1234,14 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
                     host_files.rename_no_replace(incoming, prepared / "bundle")
                     serving = prepared / "serve"
                     _ensure_directory(serving)
-                    _copy_file(prepared / "bundle" / "database.db", serving / "database.db")
+                    _copy_file(prepared / "bundle" / "database.db", serving / "database.db", check=check)
                     bodies = prepared / "bundle" / "bodies"
                     if bodies.exists():
-                        _copy_tree(bodies, serving / "database.bodies")
+                        _copy_tree(bodies, serving / "database.bodies", check=check)
+                    if binding is not None:
+                        _write_json(prepared / "cache-binding.json", binding)
                     for root, dirs, files in os.walk(prepared):
+                        check()
                         for name in files:
                             # Flushing immutable evidence uses its checked
                             # existing handle, never a replacement/rewrite.
@@ -1194,14 +1265,30 @@ def receive(config_path, data, *, authenticated_peer, include_ack=False):
                 catalog["entries"].remove(old)
             catalog["entries"].append(new)
             catalog["revision"] += 1
+            check()
+            if before_publish is not None:
+                before_publish()
+            check()
             if snapshot is not None:
                 # A dedicated replica host holds its own serving copy. Stop it
                 # before changing the catalog selector, then start it against
                 # the new immutable generation; never replace an open file.
-                _service_command(publisher, "stop")
+                _service_command(publisher, "stop", **({"deadline": deadline} if deadline is not None else {}))
+                if before_publish is not None:
+                    try:
+                        # Stopping a service can take time. Do not publish a
+                        # demand that became stale while its old host drained.
+                        before_publish()
+                        check()
+                    except Exception:
+                        # The selector is still old. Attempt its idempotent
+                        # restart; a failure stays recorded by the cache worker
+                        # for a serving-only repair on a later bounded pass.
+                        _service_command(publisher, "start", **({"deadline": deadline} if deadline is not None else {}))
+                        raise
             _write_json(catalog_path, catalog)
             if snapshot is not None:
-                _service_command(publisher, "start")
+                _service_command(publisher, "start", **({"deadline": deadline} if deadline is not None else {}))
             # Prune only generations we created and no longer advertise.
             if snapshot is not None:
                 keep = {r["generation"] for r in replicas}
@@ -1245,6 +1332,49 @@ def publish(config_path, project_id, bundle, *, policy=None):
     return sync(config_path)
 
 
+def capture_snapshot(binary, endpoint, database, db_id, *, runner=None, deadline=None):
+    """Capture via the existing local owner; never open its live database here.
+
+    Cache export supplies a bounded process runner. Legacy publication retains its
+    existing runner/timeout contract; both paths share identity and bundle checks.
+    """
+    endpoint = _owner_endpoint(endpoint)
+    binary = _path(binary, "mnemed")
+    database = _component(database, "database")
+    argv = [str(binary), "--json", "--remote", endpoint["url"], "--remote-db", database,
+            "snapshot", "create", "--expected-db-id", db_id]
+    token_env = endpoint.get("token_env")
+    if token_env:
+        argv[4:4] = ["--remote-token-env", token_env]
+    try:
+        if runner is None:
+            result = subprocess.run(argv, capture_output=True, timeout=120, check=False)
+            if result.returncode:
+                raise LibraryError("snapshot unavailable or busy; no publication queued")
+            output = result.stdout
+        else:
+            output = runner(argv, b"", MAX_JSON, deadline)
+    except subprocess.TimeoutExpired as error:
+        raise LibraryError("snapshot timed out; no publication queued") from error
+    if len(output) > MAX_JSON:
+        raise LibraryError("snapshot response exceeds bound")
+    try:
+        value = json.loads(output, object_pairs_hook=_pairs)
+    except ValueError as error:
+        raise LibraryError("invalid snapshot response") from error
+    if (not isinstance(value, dict) or value.get("db_id") != db_id
+            or not isinstance(value.get("bundle"), str)):
+        raise LibraryError("snapshot response identity mismatch")
+    bundle = _path(value["bundle"], "snapshot bundle")
+    def check():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise LibraryError("snapshot deadline exceeded")
+    manifest = validate_bundle(bundle, db_id, check=check)
+    if manifest["generation"] != value.get("generation"):
+        raise LibraryError("snapshot generation mismatch")
+    return bundle, manifest
+
+
 def _snapshot(config_path, project_id, *, policy=None):
     _require_relay_support()
     cp, config, catalog_path, catalog, pp, publisher = _load(config_path)
@@ -1269,33 +1399,9 @@ def _snapshot(config_path, project_id, *, policy=None):
             or parsed.username or parsed.password or parsed.query or parsed.fragment
             or parsed.port is None):
         raise LibraryError("snapshot endpoint must be numeric loopback HTTP")
-    argv = [str(binary), "--json", "--remote", url, "--remote-db", descriptor["database"],
-            "snapshot", "create"]
     token_env = endpoint.get("token_env") if isinstance(endpoint, dict) else settings.get("token_env")
-    if token_env:
-        if not isinstance(token_env, str) or not token_env.isidentifier():
-            raise LibraryError("invalid snapshot token_env")
-        argv[4:4] = ["--remote-token-env", token_env]
-    try:
-        result = subprocess.run(argv, capture_output=True, timeout=120, check=False)
-    except subprocess.TimeoutExpired as error:
-        raise LibraryError("snapshot timed out; no publication queued") from error
-    if result.returncode:
-        # Busy refusal is best-effort. Never echo server stderr or tokens.
-        raise LibraryError("snapshot unavailable or busy; no publication queued")
-    if len(result.stdout) > MAX_JSON:
-        raise LibraryError("snapshot response exceeds bound")
-    try:
-        value = json.loads(result.stdout)
-    except ValueError as error:
-        raise LibraryError("invalid snapshot response") from error
-    if (not isinstance(value, dict) or value.get("db_id") != descriptor["db_id"]
-            or not isinstance(value.get("bundle"), str)):
-        raise LibraryError("snapshot response identity mismatch")
-    bundle = _path(value["bundle"], "snapshot bundle")
-    manifest = validate_bundle(bundle, descriptor["db_id"])
-    if manifest["generation"] != value.get("generation"):
-        raise LibraryError("snapshot generation mismatch")
+    bundle, manifest = capture_snapshot(binary, {"url": url, "token_env": token_env},
+                                        descriptor["database"], descriptor["db_id"])
     _record_native_bundle(config_path, project_id, bundle, manifest)
     return bundle
 

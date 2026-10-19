@@ -56,6 +56,7 @@ use mneme_cozo::MemStore;
 use ulid::Ulid;
 
 mod bootstrap;
+mod cli_cache;
 mod cli_capture;
 mod cli_client;
 mod cli_concern;
@@ -199,6 +200,8 @@ enum Command {
     ///
     /// Native operations are bounded and pinned to the selected stores.
     Config(cli_config::ConfigArgs),
+    /// Inspect queued offline-cache work without contacting an owner.
+    Cache(cli_cache::CacheArgs),
     /// Internal bounded local MCP client process.
     #[command(hide = true)]
     Client(cli_client::ClientArgs),
@@ -416,7 +419,11 @@ enum Command {
 #[derive(Subcommand)]
 enum SnapshotAction {
     /// Create a snapshot on the selected MCP server; requires --remote.
-    Create,
+    Create {
+        /// Require this canonical identity before snapshot admission.
+        #[arg(long)]
+        expected_db_id: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -916,6 +923,23 @@ async fn main() -> Result<(), AnyErr> {
     #[cfg(windows)]
     require_windows_offline_operation_supported(&cli.command)?;
 
+    if let Command::Cache(args) = &cli.command {
+        if cli.db.is_some()
+            || cli.user
+            || cli.memory_config.is_some()
+            || cli.store.is_some()
+            || cli.profile.is_some()
+            || cli.connection.remote.is_some()
+            || cli.connection.remote_db.is_some()
+            || cli.connection.remote_config.is_some()
+            || cli.connection.remote_mcp_port.is_some()
+            || cli.connection.remote_token_env.is_some()
+        {
+            return Err("cache commands replay the queued request; database, configuration, profile and remote overrides are not accepted".into());
+        }
+        return cli_cache::run(args, json);
+    }
+
     if let Command::Config(args) = &cli.command {
         if cli.db.is_some()
             || cli.user
@@ -1112,7 +1136,7 @@ async fn main() -> Result<(), AnyErr> {
     }
 
     match cli.command {
-        Command::Config(_) | Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) | Command::TagFormatMigration(_) => {
+        Command::Config(_) | Command::Cache(_) | Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) | Command::TagFormatMigration(_) => {
             unreachable!("library handled before connection/store admission")
         }
         Command::Snapshot { .. } => Err("snapshot create requires an existing MCP owner; omit --db and configure the owner, or select --remote URL".into()),
@@ -2375,7 +2399,7 @@ async fn dispatch(
         | Command::TagFormatMigration(_) => {
             unreachable!("handled before local store admission")
         }
-        Command::Config(_) | Command::Init(_) | Command::Client(_) => {
+        Command::Config(_) | Command::Cache(_) | Command::Init(_) | Command::Client(_) => {
             unreachable!("init/client handled before remote/store admission")
         }
         Command::BootstrapInspect(_) => unreachable!("bootstrap-inspect handled in main"),

@@ -632,7 +632,8 @@ class LibraryTests(unittest.TestCase):
             stdout=json.dumps({"bundle": str(bundle), "db_id": "DB1", "generation": "GEN1"}).encode())
         with patch.object(library.subprocess, "run", return_value=response) as run:
             self.assertEqual(library._snapshot(self.owner_config, entry["project_id"]), bundle)
-        self.assertEqual(run.call_args.args[0][-3:], ["project", "snapshot", "create"])
+        self.assertEqual(run.call_args.args[0][-5:],
+                         ["project", "snapshot", "create", "--expected-db-id", "DB1"])
         records = json.loads(sidecar.read_text())["sources"][entry["project_id"]]["native_bundles"]
         self.assertEqual(records[0]["path"], str(bundle.resolve()))
 

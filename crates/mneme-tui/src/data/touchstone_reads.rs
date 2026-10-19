@@ -83,6 +83,7 @@ pub(super) async fn exact_target(
                 return Err("cited target returned a different database or edition".into());
             }
             touchstones::ExactTarget {
+                read_source: Default::default(),
                 db_id: identity.to_owned(),
                 node: Some(found),
                 summary_partial: value["summary_truncated"] == true,
@@ -93,7 +94,9 @@ pub(super) async fn exact_target(
             }
         }
         Err(error) if error.to_string() == "remote MCP tool failed: node not found" => {
+            connection.observe_absent_target();
             touchstones::ExactTarget {
+                read_source: Default::default(),
                 db_id: identity.to_owned(),
                 node: None,
                 summary_partial: false,

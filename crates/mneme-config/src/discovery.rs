@@ -86,11 +86,14 @@ fn optional_required_tags<'de, D: serde::Deserializer<'de>>(
     deserialize_required_tags(deserializer).map(Some)
 }
 
-/// Device patches deliberately cannot carry owner routes, secret references,
-/// executable settings, local library catalogs or arbitrary local-open targets.
+/// Device owner routes are complete replacement bundles. Published patches cannot
+/// carry secret references, executable settings, local library catalogs or
+/// local-open targets.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceStoreDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Owner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,9 +299,7 @@ impl ConfigDeclarations {
             .filter(|(_, store)| store.selected_discovery(self.device.as_deref()) == Some(true))
             .filter_map(|(label, store)| {
                 store
-                    .owner
-                    .as_ref()
-                    .and_then(|o| o.materialize().ok())
+                    .selected_owner(self.device.as_deref())
                     .map(|owner| DiscoverySeed {
                         label: label.clone(),
                         id: store.id.clone(),
@@ -326,6 +327,16 @@ impl ConfigDeclarations {
 }
 
 impl StoreDeclaration {
+    fn selected_owner(&self, device: Option<&str>) -> Option<Owner> {
+        device
+            .and_then(|d| self.devices.get(d))
+            .and_then(|patch| patch.owner.clone())
+            .or_else(|| {
+                self.owner
+                    .as_ref()
+                    .and_then(|owner| owner.materialize().ok())
+            })
+    }
     pub fn selected_discovery(&self, device: Option<&str>) -> Option<bool> {
         device
             .and_then(|d| self.devices.get(d))
@@ -379,6 +390,14 @@ impl StoreDeclaration {
         validate_clears(&self.clear, &fields)?;
         for (device, patch) in &self.devices {
             validate_name(device)?;
+            if let Some(owner) = &patch.owner {
+                if imported && owner.token_env.is_some() {
+                    return Err(error(
+                        "published declarations cannot choose local secret references",
+                    ));
+                }
+                validate_owner(owner)?;
+            }
             let patch_fields = declaration_fields(patch)?;
             validate_fields(&patch_fields, true)?;
             validate_clears(&patch.clear, &patch_fields)?;
@@ -785,9 +804,7 @@ impl DiscoveryGraph {
                     !local.stores.values().any(|s| {
                         &s.id == seed
                             && s.selected_discovery(local.device.as_deref()) == Some(true)
-                            && s.owner
-                                .as_ref()
-                                .is_some_and(|owner| owner.materialize().is_ok())
+                            && s.selected_owner(local.device.as_deref()).is_some()
                     })
                 })
             {
@@ -1073,9 +1090,13 @@ pub fn resolve_discovery(
             };
             let local_value = local_fields.get(&field);
             let value = if field == "owner" {
-                let patch = local_store.and_then(|s| s.owner.as_ref());
+                let patch = local_value
+                    .cloned()
+                    .map(serde_json::from_value::<OwnerDeclaration>)
+                    .transpose()
+                    .map_err(|_| error("local owner route has invalid shape"))?;
                 field_report.local_override = patch.is_some();
-                resolve_route(patch, &imported)
+                resolve_route(patch.as_ref(), &imported)
             } else if let Some(value) = local_value {
                 field_report.local_override = true;
                 Ok(Some(value.clone()))

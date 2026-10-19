@@ -34,7 +34,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
         }
         assert_eq!(
             names.iter().filter(|name| name.as_str() != "help").count(),
-            41,
+            42,
             "review the workflow guide when commands change"
         );
         let examples = help
@@ -55,6 +55,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
         }
         for command in [
             "stores",
+            "cache",
             "edit-summary",
             "edit-body",
             "retag",

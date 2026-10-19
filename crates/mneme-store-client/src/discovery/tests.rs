@@ -1,11 +1,12 @@
 use super::{
-    acquire, fetch_catalog,
+    ResolveOptions, acquire, fetch_catalog,
     fixture::{Fixture, Options},
+    replay_prepared, resolve_prepared,
 };
 use crate::OperationBudget;
 use mneme_config::{
     ConfigDeclarations, DiscoverySeed, Owner, PublishedCatalog, SelectionContext, SelectionRequest,
-    SelectionRequestMode, WorkspaceDeclarations,
+    SelectionRequestMode, WorkspaceDeclarations, prepare_workspace,
 };
 use serde_json::{Value, json};
 use std::{
@@ -447,6 +448,106 @@ async fn selected_device_discovery_gates_seeds_referrals_and_local_overrides() {
         Some(json!(true))
     );
     local.prepared.validate_frozen_graph(&graph).unwrap();
+}
+
+#[tokio::test]
+async fn device_owner_routes_contact_only_selected_seed_and_referral_endpoints() {
+    let selected = Network::new(&[A, B]);
+    let base = Network::new(&[A, B]);
+    selected.0[A].set_document(document(
+        A,
+        &(declaration("referral", B, &base.0[B].url, true, "")
+            + &format!(
+                "[stores.referral.devices.laptop]\nowner={{url='{}',db='project'}}\n",
+                selected.0[B].url,
+            )),
+    ));
+    let local = Local::new(
+        &("device='laptop'\n".to_owned()
+            + &declaration("seed", A, &base.0[A].url, true, "")
+            + &format!(
+                "[stores.seed.devices.laptop]\nowner={{url='{}',db='project'}}\n",
+                selected.0[A].url,
+            )),
+    );
+    let graph = acquire(&local.prepared, &budget()).await.unwrap();
+    assert_eq!(graph.seeds, [A]);
+    assert_eq!(graph.edges[A], [B]);
+    assert!(graph.unavailable.is_empty());
+    assert!(graph.incomplete.is_none());
+    let resolved = local.prepared.resolve_graph(&graph).unwrap();
+    for id in [A, B] {
+        assert_eq!(resolved.routes[id].url, selected.0[id].url);
+        assert_eq!(selected.0[id].initialize_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(base.0[id].initialize_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(count(&base.0[id]), 0, "base catalog for {id}");
+        assert_eq!(base.0[id].database_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(base.0[id].catalog_calls.load(Ordering::Relaxed), 0);
+    }
+    selected.assert_once();
+    local.prepared.validate_frozen_graph(&graph).unwrap();
+}
+
+#[tokio::test]
+async fn device_or_device_route_edits_invalidate_pinned_replay_without_contact() {
+    let selected = fixture(A);
+    let base = fixture(A);
+    let local = Local::new("");
+    let config = local.root.join("memory.toml");
+    let receipt = local.root.join("cache/receipt.json");
+    let contents = |device: &str, laptop_url: &str| {
+        format!(
+            "schema='mneme.config.v1'\ndevice='{device}'\nread_default='seed'\n{}\
+             [stores.seed.devices.laptop]\nowner={{url='{laptop_url}',db='project'}}\n\
+             [stores.seed.devices.desktop]\nowner={{url='{}',db='project'}}\n",
+            declaration("seed", A, &base.url, true, "active={workspace='any'}"),
+            base.url,
+        )
+    };
+    let original = contents("laptop", &selected.url);
+    std::fs::write(&config, &original).unwrap();
+    let prepare = || {
+        prepare_workspace(Some(&config), &local.root, None)
+            .unwrap()
+            .unwrap()
+    };
+    let pinned = resolve_prepared(prepare(), ResolveOptions::default(), &budget(), &receipt)
+        .await
+        .unwrap()
+        .selection
+        .unwrap();
+    assert_eq!(pinned.config.stores["seed"].owner.url, selected.url);
+    let receipt_bytes = std::fs::read(&receipt).unwrap();
+    assert_eq!(
+        replay_prepared(prepare(), Some(&receipt), &pinned.digest)
+            .unwrap()
+            .digest,
+        pinned.digest,
+    );
+    for edited in [
+        contents("desktop", &selected.url),
+        contents("laptop", &base.url),
+    ] {
+        std::fs::write(&config, edited).unwrap();
+        assert!(pinned.revalidate_exact().is_err());
+        assert!(replay_prepared(prepare(), Some(&receipt), &pinned.digest).is_err());
+        assert_eq!(std::fs::read(&receipt).unwrap(), receipt_bytes);
+        std::fs::write(&config, &original).unwrap();
+        assert_eq!(
+            replay_prepared(prepare(), Some(&receipt), &pinned.digest)
+                .unwrap()
+                .digest,
+            pinned.digest,
+        );
+    }
+    assert_eq!(selected.initialize_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(count(&selected), 1);
+    assert_eq!(selected.database_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(selected.catalog_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(base.initialize_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(count(&base), 0);
+    assert_eq!(base.database_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(base.catalog_calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

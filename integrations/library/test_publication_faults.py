@@ -113,7 +113,6 @@ class BoundaryCuts:
 
     def __enter__(self):
         original_extract = library._extract
-        original_copyfileobj = library.shutil.copyfileobj
         original_copy2 = library._copy_file
         original_copytree = library._copy_tree
         original_fsync = library.os.fsync
@@ -135,16 +134,10 @@ class BoundaryCuts:
             finally:
                 self.phase = None
 
-        def write_stream(path, source):
+        def write_stream(path, source, **kwargs):
             if self.phase == "extract":
                 self.last_extracted = str(path)
-            return original_write_stream(path, source)
-
-        def copyfileobj(source, dest, *args, **kwargs):
-            if self.phase == "extract" and self.last_extracted.endswith("snapshot/database.db"):
-                return self.around("payload_write", original_copyfileobj,
-                                   source, dest, *args, **kwargs)
-            return original_copyfileobj(source, dest, *args, **kwargs)
+            return original_write_stream(path, source, **kwargs)
 
         def fsync(fd):
             if self.phase == "extract" and (self.last_extracted or "").endswith("snapshot/database.db"):
@@ -193,9 +186,9 @@ class BoundaryCuts:
 
         cuts = self
 
-        class CatalogFile:
-            def __init__(self, stream):
-                self.stream = stream
+        class BoundaryFile:
+            def __init__(self, stream, boundary):
+                self.stream, self.boundary = stream, boundary
 
             def __getattr__(self, name):
                 return getattr(self.stream, name)
@@ -208,12 +201,17 @@ class BoundaryCuts:
                 return self.stream.__exit__(*args)
 
             def write(self, data):
-                return cuts.around("catalog_write", self.stream.write, data)
+                return cuts.around(self.boundary, self.stream.write, data)
 
         def open_fd(fd, *args, **kwargs):
             stream = original_open(fd, *args, **kwargs)
             if self.phase == "catalog" and args and args[0] == "wb":
-                return CatalogFile(stream)
+                return BoundaryFile(stream, "catalog_write")
+            if (self.phase == "extract" and args and args[0] == "xb"
+                    and (self.last_extracted or "").endswith("snapshot/database.db")):
+                # The bounded writer uses direct chunk writes, not copyfileobj.
+                # Keep this cut on the actual payload write before its sync.
+                return BoundaryFile(stream, "payload_write")
             return stream
 
         def validate(path, *args, **kwargs):
@@ -233,8 +231,8 @@ class BoundaryCuts:
                                    source, dest, *args, **kwargs)
             return original_copytree(source, dest, *args, **kwargs)
 
-        def service(publisher, action):
-            return self.around("service_" + action, original_service, publisher, action)
+        def service(publisher, action, **kwargs):
+            return self.around("service_" + action, original_service, publisher, action, **kwargs)
 
         def rmtree(path, *args, **kwargs):
             path = Path(path)
@@ -249,7 +247,6 @@ class BoundaryCuts:
 
         for obj, name, wrapper in (
             (library, "_extract", extract),
-            (library.shutil, "copyfileobj", copyfileobj),
             (library, "_copy_file", copy2),
             (library, "_copy_tree", copytree),
             (library, "_write_stream", write_stream),

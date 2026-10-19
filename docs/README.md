@@ -23,6 +23,7 @@ New to Mneme? Start with [installation and a first session](../README.md).
 | [Store discovery](discovery.md) | Load store configuration recursively from a verified seed and inspect its provenance |
 | [Remote CLI](remote-cli.md) | Connect to an existing memory server over HTTP or SSH |
 | [Memory libraries](memory-libraries.md) | Read across enrolled projects and read-only snapshots |
+| [On-use offline caches](../integrations/library/CACHE.md) | Cache verified nodes, bodies and bindings for stores actually read; inspect freshness and recover population |
 | [Store separation](store-separation.md) | Keep project, company and personal memory distinct while selecting shared reads |
 | [Workshop](../integrations/workshop/README.md) | Configure background work and its operator controls |
 | [Maintenance handoff](maintenance-handoff.md) | Release and resume a server's exclusive store lease |

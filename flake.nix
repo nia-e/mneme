@@ -1,5 +1,5 @@
 {
-  description = "Mneme remote client and development shell";
+  description = "Mneme remote client, read-only replica runtime and development shell";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -72,7 +72,94 @@
               platforms = systems;
             };
           };
-        in { inherit client; default = client; };
+          # The replica is a separate feature profile, never an expansion of the
+          # lightweight client. ORT's Cargo build script otherwise downloads a
+          # runtime even with Cargo --offline; bind it to this CPU-only Nix input.
+          # Model weights remain explicit device-local assets, not build inputs.
+          replicaOrt = pkgs.onnxruntime.override {
+            pythonSupport = false;
+            cudaSupport = false;
+            ncclSupport = false;
+            tensorrtSupport = false;
+            openvinoSupport = false;
+            rocmSupport = false;
+            coremlSupport = false;
+          };
+          replica = pkgs.rustPlatform.buildRustPackage {
+            pname = "mneme-replica";
+            inherit version;
+            src = source;
+            cargoLock.lockFile = ./Cargo.lock;
+            # The native migration CLI is a check fixture generator, not part of
+            # the installed serving closure or a second CLI on the user's PATH.
+            outputs = [ "out" "testTools" ];
+            buildNoDefaultFeatures = true;
+            buildFeatures = [
+              "mnemed/cozo" "mnemed/fastembed"
+              "mneme-mcp/cozo" "mneme-mcp/fastembed" "mneme-mcp/http"
+            ];
+            cargoBuildFlags = [ "--package" "mnemed" "--package" "mneme-mcp" ];
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.openssl pkgs.sqlite replicaOrt ];
+            ORT_LIB_LOCATION = "${pkgs.lib.getLib replicaOrt}";
+            ORT_PREFER_DYNAMIC_LINK = "1";
+            checkPhase = ''
+              runHook preCheck
+              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} -j "$NIX_BUILD_CORES" --no-default-features --features cozo,fastembed,http -p mneme-mcp host::tests::sqlite_snapshot
+              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} -j "$NIX_BUILD_CORES" --no-default-features --features cozo,fastembed,http -p mneme-mcp host::tests::two_database_handles_share_one_inference_runtime
+              cargo test --offline --locked --release --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} -j "$NIX_BUILD_CORES" --no-default-features --features cozo,fastembed,http -p mneme-mcp host::tests::inference_admission_is_bounded_and_released_on_drop
+              runHook postCheck
+            '';
+            postInstall = ''
+              mkdir -p "$testTools/bin"
+              mv "$out/bin/mnemed" "$testTools/bin/mnemed"
+              install -Dm644 ${./LICENSE-MIT} "$out/share/licenses/mneme/LICENSE-MIT"
+              install -Dm644 ${./LICENSE-APACHE} "$out/share/licenses/mneme/LICENSE-APACHE"
+              install -Dm644 ${pkgs.writeText "mneme-replica-build-info.json" (builtins.toJSON {
+                schema = "mneme.nix-package.v1";
+                package = "replica";
+                inherit version;
+                sourceRevision = self.rev or self.dirtyRev or null;
+                sourcePath = toString source;
+                cargoLockSha256 = builtins.hashFile "sha256" ./Cargo.lock;
+                nixpkgsRevision = nixpkgs.rev or null;
+                defaultFeatures = false;
+                features = [ "cozo" "fastembed" "http" ];
+                binaries = [ "mneme-mcp" ];
+                onnxRuntime = {
+                  version = replicaOrt.version;
+                  library = "${pkgs.lib.getLib replicaOrt}/lib/libonnxruntime.so";
+                  cargoApiVersion = 20;
+                  executionProvider = "cpu";
+                };
+              })} "$out/share/mneme/build-info.json"
+              install -Dm644 ${pkgs.writeText "mneme-replica-test-tools-build-info.json" (builtins.toJSON {
+                schema = "mneme.nix-package.v1";
+                package = "replica-test-tools";
+                inherit version;
+                sourceRevision = self.rev or self.dirtyRev or null;
+                sourcePath = toString source;
+                cargoLockSha256 = builtins.hashFile "sha256" ./Cargo.lock;
+                nixpkgsRevision = nixpkgs.rev or null;
+                defaultFeatures = false;
+                features = [ "cozo" "fastembed" ];
+                binaries = [ "mnemed" ];
+              })} "$testTools/share/mneme/build-info.json"
+            '';
+            postFixup = ''
+              (cd "$out"; sha256sum bin/mneme-mcp > share/mneme/binary-sha256.txt)
+              (cd "$testTools"; sha256sum bin/mnemed > share/mneme/binary-sha256.txt)
+            '';
+            meta = {
+              description = "Mneme persistent BGE snapshot serving runtime (explicit read-only profile required)";
+              license = with pkgs.lib.licenses; [ mit asl20 ];
+              mainProgram = "mneme-mcp";
+              outputsToInstall = [ "out" ];
+              platforms = [ "x86_64-linux" ];
+            };
+          };
+        in { inherit client; default = client; }
+          // pkgs.lib.optionalAttrs (system == "x86_64-linux") { inherit replica; };
     in {
       homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
       packages = forAllSystems packagesFor;
@@ -99,6 +186,16 @@
             nativeBuildInputs = [ pkgs.python3 ];
           } ''
             python3 ${./nix/client-smoke.py} ${self.packages.${system}.client}
+            touch "$out"
+          '';
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          replica = self.packages.${system}.replica;
+          replica-smoke = pkgs.runCommand "mneme-replica-smoke" {
+            nativeBuildInputs = [ pkgs.python3 ];
+          } ''
+            python3 ${./nix/replica-smoke.py} ${self.packages.${system}.replica} \
+              --fixture-cli ${self.packages.${system}.replica.testTools}/bin/mnemed \
+              --client-prefix ${self.packages.${system}.client}
             touch "$out"
           '';
         });

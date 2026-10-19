@@ -447,6 +447,7 @@ mod tests {
 
     fn scene_app() -> App {
         let scene = Scene {
+            read_source: Default::default(),
             episode_id: "episode-root".into(),
             edition_id: "historical-edition".into(),
             current_edition_id: "current-edition".into(),
@@ -472,6 +473,7 @@ mod tests {
         app.view = View::Scenes;
         app.scenes_loaded = true;
         app.scenes = ScenePage {
+            read_source: Default::default(),
             items: vec![scene.clone()],
             axis: SceneAxis::Occurred,
             partial: true,

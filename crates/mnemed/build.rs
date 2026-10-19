@@ -19,6 +19,7 @@ fn main() {
         "codex/project_setup.py".to_owned(),
         "codex/hook_trust.py".to_owned(),
         "library/library.py".to_owned(),
+        "library/cache.py".to_owned(),
         "library/publication_policy.py".to_owned(),
         "library/host_process.py".to_owned(),
     ];

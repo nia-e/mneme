@@ -372,6 +372,7 @@ pub(crate) fn resolve(
     if matches!(
         command,
         Command::Config(_)
+            | Command::Cache(_)
             | Command::Client(_)
             | Command::Library(_)
             | Command::Tui(_)

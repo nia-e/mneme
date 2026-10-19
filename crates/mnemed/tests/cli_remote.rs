@@ -75,6 +75,8 @@ fn stdout(output: &Output) -> String {
 #[derive(Clone, Copy)]
 enum ReplyMode {
     Success,
+    Snapshot,
+    MalformedSnapshot,
     CoreNotice,
     TouchstoneList,
     CaptureOld,
@@ -221,6 +223,15 @@ fn serve_one(stream: &mut TcpStream, mode: ReplyMode, requests: &Mutex<Vec<Value
                     json!({"name":name,"inputSchema":schema})
                 })
                 .collect();
+            if matches!(mode, ReplyMode::Snapshot | ReplyMode::MalformedSnapshot) {
+                tools.push(
+                    json!({"name":"list","inputSchema":mneme_app::list::list_input_schema()}),
+                );
+                for name in ["neighbors", "merges"] {
+                    tools
+                        .push(json!({"name":name,"inputSchema":{"type":"object","properties":{}}}));
+                }
+            }
             if matches!(mode, ReplyMode::TouchstoneList) {
                 let mut schema = mneme_app::touchstone::list_input_schema();
                 schema["properties"]["db"] = json!({"type":"string"});
@@ -291,10 +302,12 @@ fn serve_one(stream: &mut TcpStream, mode: ReplyMode, requests: &Mutex<Vec<Value
         Some("tools/call") => {
             let tool = message["params"]["name"].as_str().unwrap_or("");
             let db = message["params"]["arguments"]["db"].as_str().unwrap_or("");
-            let value = match tool {
+            let mut value = match tool {
                 "list" => {
-                    json!({"db":db,"db_id":NODE,"kind":"touchstones","items":[],"next_cursor":null,"has_more":false})
+                    json!({"db":db,"db_id":NODE,"kind":message["params"]["arguments"]["kind"],"items":[],"next_cursor":null,"has_more":false})
                 }
+                "neighbors" => json!({"items":[],"has_more":false,"next_cursor":null}),
+                "merges" => json!([]),
                 "concern" => {
                     let args = &message["params"]["arguments"];
                     let owner = if matches!(mode, ReplyMode::ConcernWrongOwner) {
@@ -383,6 +396,18 @@ fn serve_one(stream: &mut TcpStream, mode: ReplyMode, requests: &Mutex<Vec<Value
                 }
                 _ => json!({"fixture_tool":tool,"fixture_db":db,"fixture_marker":"remote-only"}),
             };
+            if matches!(mode, ReplyMode::Snapshot | ReplyMode::MalformedSnapshot) {
+                let source = if matches!(mode, ReplyMode::MalformedSnapshot) {
+                    json!({"captured_at":"yesterday"})
+                } else {
+                    json!({"owner_db_id":NODE,"source_device_id":"fixture-device","generation":"fixture-generation","captured_at":1_800_000_000_u64,"database":"snapshot-1","resolved_path":"/fixture/snapshot-1"})
+                };
+                if value.is_object() {
+                    value["_mneme_source"] = source;
+                } else {
+                    value = json!({"result":value,"_mneme_source":source});
+                }
+            }
             json!({"content":[{"type":"text","text":value.to_string()}],"isError":false})
         }
         other => panic!("unexpected MCP method: {other:?}"),
@@ -671,6 +696,116 @@ fn remote_get_and_query_keep_command_arguments_and_human_output() {
 }
 
 #[test]
+fn snapshot_provenance_is_visible_across_human_read_renderers_without_extra_calls() {
+    let fixture = Fixture::new();
+    let peer = McpPeer::start(ReplyMode::Snapshot);
+    let cases: &[&[&str]] = &[
+        &["status"],
+        &["core"],
+        &["query", "needle"],
+        &["get", NODE, "--body"],
+        &["body", NODE],
+        &["list"],
+        &["episode", "list"],
+        &["neighbors", NODE],
+        &["remote", NODE],
+        &["merges"],
+        &["recall-context", "needle"],
+    ];
+    for args in cases {
+        let mut human_args = vec!["--remote", peer.url.as_str()];
+        human_args.extend_from_slice(args);
+        let human = fixture.run(&human_args);
+        assert!(human.status.success(), "{args:?}: {}", stderr(&human));
+        let notice = stderr(&human);
+        assert_eq!(
+            notice.matches("READ-ONLY SNAPSHOT").count(),
+            1,
+            "{args:?}: {notice}"
+        );
+        assert!(notice.contains("captured 2027-01-15T08:00:00Z"), "{notice}");
+        assert!(
+            notice.contains("generation=\"fixture-generation\""),
+            "{notice}"
+        );
+        assert!(notice.contains("device=\"fixture-device\""), "{notice}");
+        assert!(notice.contains(&format!("owner=\"{NODE}\"")), "{notice}");
+        assert!(!stdout(&human).contains("READ-ONLY SNAPSHOT"));
+        if args[0] == "body" {
+            assert_eq!(stdout(&human), "part");
+        }
+        if args[0] == "recall-context" {
+            let value: Value = serde_json::from_slice(&human.stdout).unwrap();
+            assert_eq!(value["_mneme_source"]["generation"], "fixture-generation");
+        }
+
+        let mut json_args = vec!["--remote", peer.url.as_str(), "--json"];
+        json_args.extend_from_slice(args);
+        let machine = fixture.run(&json_args);
+        assert!(machine.status.success(), "{args:?}: {}", stderr(&machine));
+        assert!(
+            stderr(&machine).is_empty(),
+            "{args:?}: {}",
+            stderr(&machine)
+        );
+        let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+        assert_eq!(value["_mneme_source"]["generation"], "fixture-generation");
+        if args[0] == "body" {
+            assert_eq!(
+                value,
+                json!({
+                    "body":"part", "source_start":0, "source_end":4, "next_offset":4, "has_more":true,
+                    "_mneme_source": {
+                        "owner_db_id":NODE,"source_device_id":"fixture-device","generation":"fixture-generation",
+                        "captured_at":1_800_000_000_u64,"database":"snapshot-1","resolved_path":"/fixture/snapshot-1"
+                    }
+                })
+            );
+        }
+        if args[0] == "merges" {
+            assert_eq!(value["result"], json!([]));
+            assert!(stdout(&human).contains("no open merge candidates"));
+        }
+    }
+    let calls: Vec<_> = peer
+        .calls()
+        .into_iter()
+        .filter(|request| request["message"]["method"] == "tools/call")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        cases.len() * 2,
+        "provenance rendering must not contact an owner"
+    );
+    fixture.assert_no_local_store();
+}
+
+#[test]
+fn malformed_snapshot_witness_never_becomes_unmarked_human_output() {
+    let fixture = Fixture::new();
+    let peer = McpPeer::start(ReplyMode::MalformedSnapshot);
+    for args in [vec!["status"], vec!["list"], vec!["episode", "list"]] {
+        let mut human_args = vec!["--remote", peer.url.as_str()];
+        human_args.extend_from_slice(&args);
+        let human = fixture.run(&human_args);
+        assert!(!human.status.success());
+        assert!(stdout(&human).is_empty());
+        assert!(stderr(&human).contains("invalid read-only snapshot provenance"));
+    }
+    let machine = fixture.run(&["--remote", &peer.url, "--json", "status"]);
+    assert!(machine.status.success(), "{}", stderr(&machine));
+    assert!(stderr(&machine).is_empty());
+    let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(value["_mneme_source"], json!({"captured_at":"yesterday"}));
+    let live = McpPeer::start(ReplyMode::Success);
+    let canonical = fixture.run(&["--remote", &live.url, "status"]);
+    assert!(canonical.status.success(), "{}", stderr(&canonical));
+    assert!(stderr(&canonical).is_empty());
+    assert!(stdout(&canonical).contains("nodes 1"));
+    fixture.assert_no_local_store();
+}
+
+#[test]
 fn core_and_recall_context_render_native_mcp_payloads() {
     let fixture = Fixture::new();
     let peer = McpPeer::start(ReplyMode::Success);
@@ -726,11 +861,12 @@ fn get_body_and_body_command_preserve_source_byte_continuation() {
     ]);
     assert!(resumed.status.success(), "{}", stderr(&resumed));
     let body: Value = serde_json::from_slice(&resumed.stdout).unwrap();
-    assert_eq!(body["body"], "tail");
-    assert_eq!(body["source_start"], 4);
-    assert_eq!(body["source_end"], 8);
-    assert_eq!(body["next_offset"], Value::Null);
-    assert_eq!(body["has_more"], false);
+    assert_eq!(
+        body,
+        json!({
+            "body":"tail", "source_start":4, "source_end":8, "next_offset":null, "has_more":false
+        })
+    );
 
     let get = fixture.run(&[
         "--remote",

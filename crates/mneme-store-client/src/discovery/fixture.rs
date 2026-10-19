@@ -43,6 +43,7 @@ impl Default for Options {
 
 pub(crate) struct Fixture {
     pub url: String,
+    pub initialize_calls: Arc<AtomicUsize>,
     /// Number of discovery_catalog calls, including calls whose response times out.
     pub calls: Arc<AtomicUsize>,
     pub catalog_calls: Arc<AtomicUsize>,
@@ -63,12 +64,14 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let initialize_calls = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let catalog_calls = Arc::new(AtomicUsize::new(0));
         let database_calls = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let document = Arc::new(Mutex::new(document));
         let stop = Arc::new(AtomicBool::new(false));
+        let server_initialize_calls = initialize_calls.clone();
         let server_calls = calls.clone();
         let server_catalog_calls = catalog_calls.clone();
         let server_database_calls = database_calls.clone();
@@ -96,12 +99,15 @@ impl Fixture {
                     continue;
                 };
                 let result = match msg["method"].as_str() {
-                    Some("initialize") => Some(json!({
-                        "protocolVersion": "2025-11-25",
-                        "capabilities": {"tools": {}},
-                        "serverInfo": {"name": options.server_name, "version": "fixture"},
-                        "capabilityProfile": options.profile,
-                    })),
+                    Some("initialize") => {
+                        server_initialize_calls.fetch_add(1, Ordering::Relaxed);
+                        Some(json!({
+                            "protocolVersion": "2025-11-25",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": options.server_name, "version": "fixture"},
+                            "capabilityProfile": options.profile,
+                        }))
+                    }
                     Some("tools/list") => {
                         server_catalog_calls.fetch_add(1, Ordering::Relaxed);
                         Some(json!({"tools": advertised_tools(&options)}))
@@ -156,6 +162,7 @@ impl Fixture {
         });
         Self {
             url,
+            initialize_calls,
             calls,
             catalog_calls,
             database_calls,

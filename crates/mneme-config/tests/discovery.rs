@@ -503,6 +503,173 @@ fn imported_secret_references_and_incomplete_routes_are_rejected() {
 }
 
 #[test]
+fn selected_device_owner_replaces_the_whole_route_and_missing_device_uses_default() {
+    let publication = format!(
+        "schema='mneme.discovery-catalog.v1'\n[stores.target]\nid='{TARGET}'\n\
+         owner={{url='ssh://operator@owner.test',db='shared',ssh_mcp_port=18766,path='/srv/shared.db'}}\n\
+         [stores.target.devices.laptop]\nowner={{url='http://127.0.0.1:18767/',db='laptop'}}\n\
+         [stores.target.devices.desktop]\nowner={{url='https://desktop.test/mcp',db='desktop',path='/srv/desktop.db'}}"
+    );
+    let catalog = PublishedCatalog::parse_toml(&publication, A).unwrap();
+    assert_eq!(
+        PublishedCatalog::parse_json(&serde_json::to_vec(&catalog).unwrap()).unwrap(),
+        catalog,
+    );
+    let graph = DiscoveryGraph {
+        seeds: vec![A.into()],
+        catalogs: [(A.into(), catalog)].into(),
+        ..DiscoveryGraph::default()
+    };
+    for (device, expected_db, expected_port, expected_path) in [
+        (Some("laptop"), "laptop", None, None),
+        (Some("desktop"), "desktop", None, Some("/srv/desktop.db")),
+        (
+            Some("unlisted"),
+            "shared",
+            Some(18766),
+            Some("/srv/shared.db"),
+        ),
+        (None, "shared", Some(18766), Some("/srv/shared.db")),
+    ] {
+        let mut declarations = local("");
+        declarations.device = device.map(str::to_owned);
+        let result = resolve_discovery(&declarations, &graph).unwrap();
+        let owner = &target(&result).owner;
+        assert_eq!(owner.db, expected_db);
+        assert_eq!(owner.ssh_mcp_port, expected_port);
+        assert_eq!(
+            owner.path.as_deref(),
+            expected_path.map(std::path::Path::new)
+        );
+        assert_eq!(&result.routes[TARGET], owner);
+    }
+}
+
+#[test]
+fn device_only_owner_requires_a_matching_device_and_can_supply_a_local_seed() {
+    let mut declarations = ConfigDeclarations::parse(&format!(
+        "schema='mneme.config.v1'\ndevice='laptop'\n[stores.target]\nid='{TARGET}'\n\
+         discovery=true\n[stores.target.devices.laptop]\nowner={}",
+        route(TARGET),
+    ))
+    .unwrap();
+    let seeds = declarations.discovery_seeds().unwrap();
+    assert_eq!(seeds.len(), 1);
+    assert_eq!(seeds[0].id, TARGET);
+    let seeded_graph = DiscoveryGraph {
+        seeds: vec![TARGET.into()],
+        catalogs: [(
+            TARGET.into(),
+            PublishedCatalog::parse_toml(&document(&[], None), TARGET).unwrap(),
+        )]
+        .into(),
+        ..DiscoveryGraph::default()
+    };
+    let matched = resolve_discovery(&declarations, &seeded_graph).unwrap();
+    assert_eq!(target(&matched).owner, seeds[0].owner);
+
+    let mut imported = graph(&[(A, &[], None)]);
+    imported.catalogs.insert(
+        A.into(),
+        PublishedCatalog::parse_toml(
+            &format!(
+                "schema='mneme.discovery-catalog.v1'\n[stores.target]\nid='{TARGET}'\n\
+         [stores.target.devices.laptop]\nowner={}",
+                route(TARGET),
+            ),
+            A,
+        )
+        .unwrap(),
+    );
+    for device in [None, Some("unlisted")] {
+        declarations.device = device.map(str::to_owned);
+        assert!(declarations.discovery_seeds().unwrap().is_empty());
+        assert!(seeded_graph.validate_for(&declarations).is_err());
+        no_target(&resolve_discovery(&declarations, &DiscoveryGraph::default()).unwrap());
+        let mut local = local("");
+        local.device = device.map(str::to_owned);
+        no_target(&resolve_discovery(&local, &imported).unwrap());
+    }
+}
+
+#[test]
+fn device_owner_is_complete_bounded_and_cannot_import_secrets_or_local_execution() {
+    for owner in [
+        "{url='http://127.0.0.1:1',db='memory',token_env='PRIVATE_TOKEN'}".to_owned(),
+        "{url='http://127.0.0.1:1'}".to_owned(),
+        "{db='memory'}".to_owned(),
+        "{url='ssh://operator@owner.test',db='memory'}".to_owned(),
+        "{url='http://127.0.0.1:1',db='memory',ssh_mcp_port=18766}".to_owned(),
+        "{url='https://user:secret@owner.test',db='memory'}".to_owned(),
+        "{url='https://owner.test?token=secret',db='memory'}".to_owned(),
+        "{url='file:///srv/memory.db',db='memory'}".to_owned(),
+        "{url='http://127.0.0.1:1',db='memory',path='relative.db'}".to_owned(),
+        format!(
+            "{{url='https://owner.test/{}',db='memory'}}",
+            "a".repeat(4096)
+        ),
+    ] {
+        let text = format!(
+            "schema='mneme.discovery-catalog.v1'\n[stores.target]\nid='{TARGET}'\n\
+             [stores.target.devices.off_device]\nowner={owner}"
+        );
+        assert!(
+            PublishedCatalog::parse_toml(&text, A).is_err(),
+            "accepted {owner}"
+        );
+    }
+    for fields in [
+        "command='sh'",
+        "libraries={cached={path='/tmp/library'}}",
+        "owner={url='http://127.0.0.1:1',db='memory',command='sh'}",
+    ] {
+        assert!(
+            PublishedCatalog::parse_toml(
+                &document(
+                    &[],
+                    Some(&format!("[stores.target.devices.laptop]\n{fields}"))
+                ),
+                A,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn device_owner_uses_branch_conflicts_and_explicit_local_override() {
+    let graph = graph(&[
+        (A, &[B, C], None),
+        (
+            B,
+            &[],
+            Some("[stores.target.devices.laptop]\nowner={url='http://127.0.0.1:18767',db='left'}"),
+        ),
+        (
+            C,
+            &[],
+            Some("[stores.target.devices.laptop]\nowner={url='http://127.0.0.1:18768',db='right'}"),
+        ),
+    ]);
+    let mut declarations = local("");
+    target(&resolve_discovery(&declarations, &graph).unwrap());
+    declarations.device = Some("laptop".into());
+    let conflicted = resolve_discovery(&declarations, &graph).unwrap();
+    no_target(&conflicted);
+    assert!(conflicted.report.stores[TARGET].fields["owner"].conflict);
+    assert!(!conflicted.routes.contains_key(TARGET));
+
+    declarations = local(&format!(
+        "[stores.local_target]\nid='{TARGET}'\nowner={{url='https://local.test/mcp',db='chosen'}}"
+    ));
+    declarations.device = Some("laptop".into());
+    let overridden = resolve_discovery(&declarations, &graph).unwrap();
+    assert_eq!(target(&overridden).owner.db, "chosen");
+    assert!(overridden.report.stores[TARGET].fields["owner"].local_override);
+    assert!(!overridden.report.stores[TARGET].fields["owner"].conflict);
+}
+
+#[test]
 fn unavailable_publisher_is_distinct_from_an_empty_catalog() {
     let empty = resolve(&[(A, &[], None)]);
     assert!(empty.report.unavailable.is_empty());

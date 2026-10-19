@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::model::{Activity, Edge, Graph, Node, Request, Response, Target, clean};
+use crate::read_source::ReadProvenance;
 use crate::{scenes, touchstones};
 
 mod inventory;
@@ -28,7 +29,8 @@ enum ReadClient {
         client: mneme_store_client::ConfiguredClient,
         store: String,
         catalog: Vec<Value>,
-        source: Option<Value>,
+        source: Option<mneme_store_client::ReadSource>,
+        observed: Option<ReadProvenance>,
         budget: mneme_store_client::OperationBudget,
     },
 }
@@ -59,6 +61,7 @@ impl ReadClient {
             store: target.store.clone(),
             catalog,
             source: None,
+            observed: None,
             budget,
         })
     }
@@ -90,23 +93,49 @@ impl ReadClient {
                     client,
                     store,
                     source,
+                    observed,
                     budget,
                     ..
                 } => {
                     if let Some(witness) = source.as_ref() {
-                        arguments["_mneme_source"] = witness.clone();
+                        arguments["_mneme_source"] = serde_json::to_value(witness)?;
                     }
                     arguments["db"] = json!(store);
                     let result = client
                         .call_with_budget(store, tool, arguments, budget)
                         .await?;
                     if let Some(witness) = result.get("_mneme_source") {
-                        if source.as_ref().is_some_and(|selected| selected != witness) {
+                        // Preserve the original exact serialized pin check:
+                        // PathBuf equality alone also equates lexical spellings
+                        // such as a/b and a/./b, which is not witness equality.
+                        if source
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()?
+                            .as_ref()
+                            .is_some_and(|selected| selected != witness)
+                        {
                             return Err(
                                 "observatory source edition changed; reopen deliberately".into()
                             );
                         }
-                        *source = Some(witness.clone());
+                        *source = Some(serde_json::from_value(witness.clone())?);
+                    }
+                    // Registry/activity metadata must not make an otherwise
+                    // snapshot-only payload look mixed. Successful memory reads
+                    // accumulate independently: canonical query/get followed by
+                    // cached neighbors is a genuinely mixed displayed field.
+                    if !matches!(tool, "databases" | "activity") {
+                        let provenance = if result.get("_mneme_source").is_some() {
+                            ReadProvenance::snapshot(source.clone().ok_or("missing cache witness")?)
+                        } else {
+                            ReadProvenance::default()
+                        };
+                        if let Some(previous) = observed {
+                            previous.merge(&provenance);
+                        } else {
+                            *observed = Some(provenance);
+                        }
                     }
                     if result.get("_mneme_source").is_some() && result.get("result").is_some() {
                         Ok(result["result"].clone())
@@ -117,7 +146,7 @@ impl ReadClient {
             }
         })
     }
-    fn cache_source(&self) -> Option<&Value> {
+    fn cache_source(&self) -> Option<&mneme_store_client::ReadSource> {
         if let Self::Configured { source, .. } = self {
             source.as_ref()
         } else {
@@ -125,10 +154,46 @@ impl ReadClient {
         }
     }
     fn begin_operation(&mut self) -> Result<(), Error> {
-        if let Self::Configured { budget, .. } = self {
+        if let Self::Configured {
+            budget, observed, ..
+        } = self
+        {
             *budget = mneme_store_client::OperationBudget::new(1024 * 1024, TIMEOUT)?;
+            *observed = None;
         }
         Ok(())
+    }
+    fn observed_source(&self) -> ReadProvenance {
+        match self {
+            Self::Configured { observed, .. } => observed.clone().unwrap_or_default(),
+            Self::Legacy(_) => ReadProvenance::default(),
+        }
+    }
+    fn restore_observed(&mut self, previous: ReadProvenance) {
+        // A rejected optional payload contributes no displayed provenance. This
+        // does not unpin its selected edition or resurrect a failed transport.
+        if let Self::Configured { observed, .. } = self {
+            *observed = Some(previous);
+        }
+    }
+    fn observe_absent_target(&mut self) {
+        // A validated native "node not found" becomes a displayed absence,
+        // unlike other failed reads. Preserve the exact already-pinned source
+        // sent with that request; without a witness its source remains unknown.
+        if let Self::Configured {
+            source, observed, ..
+        } = self
+        {
+            let provenance = source
+                .clone()
+                .map(ReadProvenance::snapshot)
+                .unwrap_or_default();
+            if let Some(previous) = observed {
+                previous.merge(&provenance);
+            } else {
+                *observed = Some(provenance);
+            }
+        }
     }
     async fn close(&mut self) {
         match self {
@@ -185,7 +250,17 @@ pub async fn serve(target: Target, mut requests: Receiver<Request>, responses: S
         )
         .await
         {
-            Ok(response) => response,
+            Ok(mut response) => {
+                // Attach atomically to the payload. UI history, partial results
+                // and stale-response rejection then retain the right edition.
+                response.set_read_source(
+                    client
+                        .as_ref()
+                        .map(ReadClient::observed_source)
+                        .unwrap_or_default(),
+                );
+                response
+            }
             Err(error) => {
                 discard_client(&mut client).await;
                 Response::Error(text(&error.to_string(), 1024))
@@ -246,15 +321,15 @@ async fn execute(
         let catalog = connection.call_tool("databases", json!({})).await?;
         let source = connection.cache_source();
         let registry_database = source
-            .and_then(|source| source["database"].as_str())
+            .map(|source| source.database.as_str())
             .unwrap_or(&target.database);
         let (identity, mut activity) = registry(&catalog, registry_database, pinned_id.as_deref())?;
         if let Some(source) = source {
             activity.state = format!(
                 "snapshot {} / {} / {}",
-                text(source["source_device_id"].as_str().unwrap_or("?"), 64),
-                text(source["generation"].as_str().unwrap_or("?"), 64),
-                source["captured_at"]
+                text(&source.source_device_id, 64),
+                text(&source.generation, 64),
+                source.captured_at
             );
         }
         if let Some(expected_path) = target.expected_path.as_deref().filter(|_| source.is_none()) {
@@ -431,19 +506,36 @@ async fn query_edges(
     let deadline = tokio::time::Instant::now() + budget;
     let result = tokio::time::timeout_at(deadline, async {
         for id in &ids {
+            let previous = connection.observed_source();
             let page = connection
                 .call_tool(
                     "neighbors",
                     json!({"db":database,"expected_db_id":identity,"id":id}),
                 )
                 .await?;
-            let (items, more) = neighbor_items(&page)?;
-            partial |= more || items.len() > NEIGHBORS;
-            for item in items.iter().take(NEIGHBORS) {
-                let edge = neighbor_edge(id, item)?;
-                if !field.contains(edge.from.as_str()) || !field.contains(edge.to.as_str()) {
-                    continue;
+            // Validate each bounded page before accepting its edges or source.
+            // A valid empty page is still an observed absence; a malformed page
+            // must not relabel the successful search hits retained on failure.
+            let parsed = (|| {
+                let (items, more) = neighbor_items(&page)?;
+                let edges = items
+                    .iter()
+                    .take(NEIGHBORS)
+                    .map(|item| neighbor_edge(id, item))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                Ok::<_, Error>((edges, more || items.len() > NEIGHBORS))
+            })();
+            let (page_edges, more) = match parsed {
+                Ok(page) => page,
+                Err(error) => {
+                    connection.restore_observed(previous);
+                    return Err(error);
                 }
+            };
+            partial |= more;
+            for edge in page_edges.into_iter().filter(|edge| {
+                field.contains(edge.from.as_str()) && field.contains(edge.to.as_str())
+            }) {
                 let key = (edge.from.clone(), edge.to.clone(), edge.kind.clone());
                 edges.entry(key).or_insert(edge);
             }
@@ -769,18 +861,6 @@ pub(crate) fn node(value: &Value) -> Result<Node, Error> {
     })
 }
 
-fn append_cache_label(note: &mut String, value: &Value) {
-    if let Some(source) = value.get("_mneme_source") {
-        note.push_str(&format!(
-            " · snapshot owner={} device={} generation={} captured={}",
-            text(source["owner_db_id"].as_str().unwrap_or("?"), 26),
-            text(source["source_device_id"].as_str().unwrap_or("?"), 64),
-            text(source["generation"].as_str().unwrap_or("?"), 64),
-            source["captured_at"]
-        ));
-    }
-}
-
 fn query_graph(value: &Value) -> Result<Graph, Error> {
     if value["schema"] != "mneme.query.v3" {
         return Err("unsupported memory query response schema".into());
@@ -836,7 +916,6 @@ fn query_graph(value: &Value) -> Result<Graph, Error> {
     if graph.partial {
         graph.note.push_str(" · bounded/partial results");
     }
-    append_cache_label(&mut graph.note, value);
     Ok(graph)
 }
 
@@ -892,7 +971,6 @@ fn focus_graph(id: &str, value: &Value, neighbors: &Value) -> Result<Graph, Erro
     if graph.partial && !more && !body_partial && items.len() <= NEIGHBORS {
         graph.note.push_str(" · some summaries truncated");
     }
-    append_cache_label(&mut graph.note, value);
     Ok(graph)
 }
 
@@ -938,3 +1016,6 @@ fn neighbor_edge(id: &str, item: &Value) -> Result<Edge, Error> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cache_tests;

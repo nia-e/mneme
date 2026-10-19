@@ -41,8 +41,7 @@ pub(super) async fn page(
         args["after"] = json!(after);
     }
     let value = connection.call_tool("graph", args).await?;
-    let mut page = parse_page(&value, identity, after)?;
-    append_cache_label(&mut page.graph.note, &value);
+    let page = parse_page(&value, identity, after)?;
     Ok(Response::Inventory(page))
 }
 pub(super) async fn summaries(

@@ -49,6 +49,7 @@ pub struct SceneContext {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
+    pub read_source: crate::read_source::ReadProvenance,
     pub episode_id: String,
     pub edition_id: String,
     pub revision: u64,
@@ -65,6 +66,7 @@ pub struct Scene {
 }
 #[derive(Clone, Debug, Default)]
 pub struct ScenePage {
+    pub read_source: crate::read_source::ReadProvenance,
     pub items: Vec<Scene>,
     pub axis: SceneAxis,
     pub partial: bool,
@@ -249,6 +251,7 @@ pub(crate) fn parse_page(
         sort_scenes(&mut items, axis);
     }
     Ok(ScenePage {
+        read_source: Default::default(),
         items,
         axis,
         partial,
@@ -325,6 +328,7 @@ pub fn demo_scenes(axis: SceneAxis) -> ScenePage {
         let edition_id = if revised { "01ARZ3NDEKTSV4RRFFQ69G5G09".into() } else { episode_id.clone() };
         let at = base + i as u64 * 3_600_000;
         Scene {
+            read_source: Default::default(),
             episode_id, edition_id: edition_id.clone(), revision: if revised { 1 } else { 0 },
             summary: (*summary).into(),
             occurred: match i % 4 { 0 => SceneOccurrence::Unknown, 1 => SceneOccurrence::Range { start: at - 600_000, end: at }, _ => SceneOccurrence::Point { at } },
@@ -341,6 +345,7 @@ pub fn demo_scenes(axis: SceneAxis) -> ScenePage {
     }
     items.reverse();
     ScenePage {
+        read_source: Default::default(),
         items,
         axis,
         partial: false,

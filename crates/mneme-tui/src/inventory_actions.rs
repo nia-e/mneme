@@ -152,6 +152,7 @@ pub(super) fn apply_inventory(
             return;
         }
         let bytes = previous.bytes + page.bytes;
+        app.graph.read_source.merge(&graph.read_source);
         app.graph.nodes.extend(graph.nodes);
         // Native cursor order already gives each stored edge once. Do not add
         // an O(E²) deduplication pass to every lightweight topology page.
@@ -283,6 +284,15 @@ pub(super) fn apply_summaries(
         return;
     }
     state.bytes += page.bytes;
+    // Missing cards do not contribute displayed values. A rejected or stale
+    // hydration must not alter the provenance of the retained topology either.
+    let contributes = page
+        .nodes
+        .iter()
+        .any(|fresh| app.graph.nodes.iter().any(|card| card.id == fresh.id));
+    if contributes {
+        app.graph.read_source.merge(&page.read_source);
+    }
     for fresh in page.nodes {
         if let Some(card) = app.graph.nodes.iter_mut().find(|node| node.id == fresh.id) {
             state.hydrated.insert(fresh.id.clone());
@@ -429,6 +439,7 @@ mod tests {
             &mut app,
             &mut Some(PendingRead::Summaries { ids: ids.clone() }),
             InventorySummaries {
+                read_source: Default::default(),
                 nodes: vec![fresh],
                 missing: vec![ids[1].clone()],
                 bytes: 100,

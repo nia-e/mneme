@@ -361,6 +361,44 @@ pub struct Cache {
     pub library: String,
     #[serde(default)]
     pub mode: CacheMode,
+    /// Opt-in population after a successful canonical memory read. Omission
+    /// preserves the established selection encoding as well as disabling work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub populate: Option<CachePopulate>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CachePopulate {
+    #[serde(default = "cache_refresh_after_secs")]
+    pub refresh_after_secs: u64,
+    #[serde(default = "cache_max_snapshot_bytes")]
+    pub max_snapshot_bytes: u64,
+}
+fn cache_refresh_after_secs() -> u64 {
+    900
+}
+fn cache_max_snapshot_bytes() -> u64 {
+    128 * 1024 * 1024
+}
+impl Default for CachePopulate {
+    fn default() -> Self {
+        Self {
+            refresh_after_secs: cache_refresh_after_secs(),
+            max_snapshot_bytes: cache_max_snapshot_bytes(),
+        }
+    }
+}
+impl CachePopulate {
+    pub fn validate(&self) -> Result<()> {
+        if !(60..=86_400).contains(&self.refresh_after_secs)
+            || !(1024 * 1024..=512 * 1024 * 1024).contains(&self.max_snapshot_bytes)
+        {
+            return Err(error(
+                "cache population needs refresh_after_secs 60..=86400 and max_snapshot_bytes 1MiB..=512MiB",
+            ));
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -578,6 +616,9 @@ impl Config {
             }
             if let Some(cache) = &store.cache {
                 validate_name(&cache.library)?;
+                if let Some(populate) = &cache.populate {
+                    populate.validate()?;
+                }
                 if complete && !self.libraries.contains_key(&cache.library) {
                     return Err(error("cache references an unconfigured library"));
                 }
@@ -807,4 +848,54 @@ fn unique_names(values: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cache_policy_tests {
+    use super::*;
+
+    #[test]
+    fn absent_population_preserves_established_cache_json() {
+        let old = r#"{"library":"offline","mode":"owner-first"}"#;
+        let cache: Cache = serde_json::from_str(old).unwrap();
+        assert!(cache.populate.is_none());
+        assert_eq!(serde_json::to_string(&cache).unwrap(), old);
+        let default: Cache = toml::from_str("library='offline'\npopulate={}").unwrap();
+        assert_eq!(default.populate, Some(CachePopulate::default()));
+        default.populate.unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn config_validation_checks_population_not_only_deserialization() {
+        let text = r#"schema='mneme.config.v1'
+[stores.alpha]
+id='01M3CPEVDTM9PP4HJTMMBZ8HR9'
+owner={url='http://127.0.0.1:1',db='project'}
+cache={library='offline',populate={refresh_after_secs=900,max_snapshot_bytes=134217728}}
+[libraries.offline]
+catalog='/fixture/catalog.json'
+"#;
+        let mut config = Config::parse(text).unwrap();
+        let cache = config
+            .stores
+            .get_mut("alpha")
+            .unwrap()
+            .cache
+            .as_mut()
+            .unwrap();
+        cache.populate.as_mut().unwrap().refresh_after_secs = 0;
+        assert!(config.validate().is_err());
+        assert!(
+            Config::parse(&text.replace("refresh_after_secs=900", "refresh_after_secs=86401"))
+                .is_err()
+        );
+        assert!(
+            Config::parse(&text.replace(
+                "max_snapshot_bytes=134217728",
+                "max_snapshot_bytes=536870913"
+            ))
+            .is_err()
+        );
+        assert!(Config::parse(&text.replace("populate={", "populate={command='no',")).is_err());
+    }
 }
