@@ -7,6 +7,7 @@
 pub mod capture;
 pub mod concern;
 mod context;
+pub mod core;
 pub mod episode;
 pub mod graph_view;
 pub mod list;

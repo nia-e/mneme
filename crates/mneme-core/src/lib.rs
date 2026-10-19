@@ -14,6 +14,7 @@
 
 pub mod concern;
 pub use concern::*;
+mod contradiction_summary;
 pub mod episode;
 pub use episode::*;
 pub mod managed;

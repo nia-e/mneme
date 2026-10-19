@@ -16,7 +16,25 @@ pub(super) fn refusal(db: &str, snapshot: Option<&Value>, message: &str) -> Valu
     result
 }
 
-pub(super) fn wrap(mut native: Value, db: &str, snapshot: Option<&Value>) -> Result<Value, AnyErr> {
+pub(super) fn wrap(native: Value, db: &str, snapshot: Option<&Value>) -> Result<Value, AnyErr> {
+    wrap_mode(native, db, snapshot, None)
+}
+
+pub(super) fn wrap_core(
+    native: Value,
+    db: &str,
+    snapshot: Option<&Value>,
+    requested: bool,
+) -> Result<Value, AnyErr> {
+    wrap_mode(native, db, snapshot, Some(requested))
+}
+
+fn wrap_mode(
+    mut native: Value,
+    db: &str,
+    snapshot: Option<&Value>,
+    core_requested: Option<bool>,
+) -> Result<Value, AnyErr> {
     let object = native.as_object().ok_or("invalid upstream tool result")?;
     if object.keys().any(|key| {
         !matches!(
@@ -49,18 +67,38 @@ pub(super) fn wrap(mut native: Value, db: &str, snapshot: Option<&Value>) -> Res
     if text.len() > crate::response::MAX_TOOL_TEXT_BYTES {
         return Err("upstream text exceeds router response envelope".into());
     }
-    let domain = match serde_json::from_str(text) {
+    let mut domain = match serde_json::from_str(text) {
         Ok(domain) => domain,
         Err(_) if native["isError"] == true => json!(text),
         Err(_) => return Err("upstream success text is not native domain JSON".into()),
     };
-    let wrapped = envelope(db, snapshot, domain);
+    let core_success = core_requested.is_some() && native["isError"] != true;
+    if core_success {
+        mneme_app::core::complete_remote_result(
+            &mut domain,
+            core_requested.unwrap(),
+            crate::response::MAX_TOOL_TEXT_BYTES,
+        );
+    }
+    let mut wrapped = envelope(db, snapshot, domain);
+    let omitted_notice =
+        core_success && crate::response::omit_core_notice_for_text_bound(&mut wrapped);
     let text = serde_json::to_string(&wrapped)?;
     if text.len() > crate::response::MAX_TOOL_TEXT_BYTES {
         return Err("wrapped upstream result exceeds router response envelope".into());
     }
     native["content"][0]["text"] = json!(text);
     if let Some(structured) = native.get_mut("structuredContent") {
+        if core_success {
+            mneme_app::core::complete_remote_result(
+                structured,
+                core_requested.unwrap(),
+                crate::response::MAX_TOOL_TEXT_BYTES,
+            );
+            if omitted_notice {
+                crate::response::remove_core_notice(structured);
+            }
+        }
         *structured = envelope(db, snapshot, structured.clone());
     }
     Ok(native)

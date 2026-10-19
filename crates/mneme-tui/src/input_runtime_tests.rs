@@ -262,3 +262,132 @@ fn continuous_wheel_flood_yields_with_a_bounded_report_count() {
     assert!(reads > 0 && reads <= INPUT_EVENTS_PER_TURN);
     assert_eq!(pump.wheel_reports, reads);
 }
+
+#[test]
+fn help_consumes_read_navigation_and_cancel_keys_before_underlying_dispatch() {
+    for view in [View::Map, View::Scenes, View::Touchstones] {
+        let mut app = App::new(vec![], "original query".into(), false);
+        app.view = view;
+        app.graph = demo_graph();
+        app.graph.inventory = Some(InventoryState {
+            crawling: true,
+            ..Default::default()
+        });
+        app.selected = 2;
+        app.scroll = 7;
+        app.show_details = true;
+        app.busy = true;
+        let mut pending = Some(PendingRead::Inventory {
+            after: None,
+            pages: 0,
+            bytes: 0,
+            started: Instant::now(),
+            waiting: true,
+        });
+        render::help::open(&mut app);
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('/'),
+            KeyCode::Char('e'),
+            KeyCode::Char('r'),
+            KeyCode::Char('s'),
+            KeyCode::Char('t'),
+            KeyCode::Char('n'),
+            KeyCode::Char('m'),
+            KeyCode::Char('b'),
+            KeyCode::Char('i'),
+            KeyCode::Char('c'),
+            KeyCode::Char('o'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('h'),
+        ] {
+            // This is the event-loop's first gate. A consumed event cannot reach
+            // pause_background, request dispatch, selection or the source picker.
+            assert_eq!(
+                render::help::input(&mut app, &key(code), 1),
+                render::help::Input::Consumed
+            );
+            assert_eq!(app.view, view);
+            assert_eq!(app.selected, 2);
+            assert_eq!(app.scroll, 7);
+            assert_eq!(app.query, "original query");
+            assert!(!app.editing);
+            assert!(app.source_menu.is_none());
+            assert!(app.show_details && app.busy);
+            assert!(app.events.is_empty());
+            let inventory = app.graph.inventory.as_ref().unwrap();
+            assert!(inventory.crawling && !inventory.background_paused);
+        }
+        assert_eq!(
+            render::help::input(&mut app, &key(KeyCode::Esc), 1),
+            render::help::Input::Consumed
+        );
+        assert!(!app.show_help);
+        assert!(app.show_details && app.busy);
+        // The unchanged underlying background read remains cancellable after
+        // dismissal; help did not cancel it or throw away its completion intent.
+        assert!(pause_background(&mut app, &mut pending));
+    }
+}
+
+#[test]
+fn help_defers_queued_read_and_selection_restore_until_dismissal() {
+    let mut app = App::new(vec![], String::new(), true);
+    app.graph = demo_graph();
+    app.selected = 0;
+    let id = app.graph.nodes[3].id.clone();
+    for code in [KeyCode::Enter, KeyCode::Char('e')] {
+        app.selected = 0;
+        let mut queued = Some((KeyEvent::new(code, KeyModifiers::NONE), Some(id.clone())));
+        render::help::open(&mut app);
+        assert!(queued_input(&mut app, true, &mut queued).is_none());
+        assert!(queued_input(&mut app, false, &mut queued).is_none());
+        assert!(queued.is_some());
+        assert_eq!(app.selected, 0);
+        render::help::input(&mut app, &key(KeyCode::Esc), 1);
+        assert_eq!(queued_input(&mut app, false, &mut queued), Some(key(code)));
+        assert!(queued.is_none());
+        assert_eq!(app.selected, 3);
+    }
+}
+
+#[test]
+fn modal_help_keeps_quit_and_interrupt_available() {
+    let mut app = App::new(vec![], String::new(), true);
+    render::help::open(&mut app);
+    assert_eq!(
+        render::help::input(&mut app, &key(KeyCode::Char('q')), 1),
+        render::help::Input::Quit
+    );
+    let interrupt = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(
+        render::help::input(&mut app, &interrupt, 1),
+        render::help::Input::Quit
+    );
+}
+
+#[test]
+fn telemetry_poll_does_not_relabel_failed_or_empty_map_as_loading() {
+    let mut app = App::new(vec![], String::new(), false);
+    let (tx, mut rx) = mpsc::channel(2);
+    app.error = Some("Connection refused".into());
+    assert!(request(&mut app, &tx, Request::Poll));
+    assert!(matches!(rx.try_recv(), Ok(Request::Poll)));
+    let frame = render::preview(100, 30, &app).unwrap();
+    assert!(frame.contains("Map unavailable"));
+    assert!(!frame.contains("Reading this source"));
+    app.busy = false;
+    app.error = None;
+    app.last_refresh = Some(Instant::now());
+    assert!(request(&mut app, &tx, Request::Poll));
+    let frame = render::preview(100, 30, &app).unwrap();
+    assert!(frame.contains("No memories in this field"));
+    assert!(!frame.contains("Reading this source"));
+}

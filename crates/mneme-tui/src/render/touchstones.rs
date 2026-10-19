@@ -78,11 +78,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 fn cards(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let cabinet = &app.cabinet;
-    let mut lines = vec![
-        Line::from(s("TOUCHSTONES", LILAC)),
-        Line::from(s("Authored meaning · not a ranking", DIM)),
-        Line::default(),
-    ];
+    let mut lines = vec![Line::from(s("TOUCHSTONES", LILAC)), Line::default()];
     if cabinet.page.items.is_empty() {
         lines.push(Line::from(s(
             if !cabinet.loaded {
@@ -99,7 +95,7 @@ fn cards(frame: &mut Frame<'_>, area: Rect, app: &App) {
             DIM,
         )));
     } else {
-        let rows = usize::from(area.height.saturating_sub(5)) / 3;
+        let rows = usize::from(area.height.saturating_sub(4)) / 3;
         let rows = rows.max(1);
         let start = cabinet
             .selected

@@ -7,9 +7,9 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::symbols::Marker;
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Line as Stroke, Points};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::fmt::Write as _;
 
@@ -24,6 +24,7 @@ const BLUE: Color = Color::Rgb(116, 185, 229);
 const GOLD: Color = Color::Rgb(233, 197, 129);
 const ROSE: Color = Color::Rgb(237, 137, 160);
 
+pub(crate) mod help;
 mod islands;
 pub(crate) mod map;
 mod memory;
@@ -97,7 +98,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         app.layout.borrow_mut().set_map_area(None);
     }
     if app.show_help && app.source_menu.is_none() {
-        help(frame, screen, app);
+        help::draw(frame, screen, app);
     }
     let mut layout = app.layout.borrow_mut();
     if app.view != View::Map
@@ -186,24 +187,28 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         DIM
     };
+    let (brand, divider) = if area.width < 48 {
+        ("◌ mneme", " · ")
+    } else {
+        ("◌  m n e m e", "   /   ")
+    };
+    let reserved = Line::raw(brand).width()
+        + Line::raw(divider).width()
+        + usize::from(area.width > 48 && app.busy) * 9;
     text_line(
         frame,
         area,
         Line::from(vec![
-            s("◌  m n e m e", MINT).add_modifier(Modifier::BOLD),
-            s("   /   ", GRID),
+            s(brand, MINT).add_modifier(Modifier::BOLD),
+            s(divider, GRID),
             s(
-                short(status, usize::from(area.width.saturating_sub(30))),
+                short(status, usize::from(area.width).saturating_sub(reserved)),
                 status_color,
             ),
         ]),
     );
-    if area.width > 48 {
-        let badge = if app.busy {
-            "reading  "
-        } else {
-            "observatory  "
-        };
+    if area.width > 48 && app.busy {
+        let badge = "reading  ";
         text_line(
             frame,
             Rect::new(
@@ -230,7 +235,7 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     DIM
                 },
             ),
-            s("  s / t  ", DIM),
+            s("  ", GRID),
         ];
         let used = Line::from(tabs.clone()).width();
         let mut tabs = tabs;
@@ -381,7 +386,7 @@ fn activity(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    if area.height == 0 {
+    if area.height == 0 || app.show_help || app.source_menu.is_some() {
         return;
     }
     if app.editing {
@@ -400,7 +405,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             || app.show_help
             || app.cabinet.detail.is_some();
         let can_back = app.view == View::Map && app.can_go_back();
-        let back = if pane_open && can_back {
+        let back = if pane_open && can_back && area.width >= 40 {
             "esc close · b ← back  "
         } else if pane_open {
             "esc close  "
@@ -411,35 +416,30 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         };
         let remaining = usize::from(area.width).saturating_sub(Line::raw(back).width());
         let candidates: &[&str] = if app.show_details || app.edge_lens.is_some() {
-            &[
-                "↑↓ / j k scroll  wheel over text  PgUp/PgDn page  Home/End  ? keys  q leave",
-                "↑↓ scroll  wheel  PgUp/PgDn  Home/End  ?  q",
-                "↑↓ scroll  wheel  ?  q",
-                "↑↓ scroll  ?  q",
-            ]
+            if app.view == View::Touchstones {
+                &["↑↓ scroll  t map  ? keys  q quit", "t map  ?  q"]
+            } else {
+                &["↑↓ scroll  ? keys  q quit", "↑↓ scroll  ?  q", "?  q"]
+            }
         } else if app.view == View::Touchstones {
             &[
-                "↑↓ choose  ↵ annotation  [ ] reference  c today  n next  r restart  t map  tab source  ?  q",
-                "↵ annotation  [ ] ref  c today  n next  t map  ?  q",
-                "c today  n next  t map  ?  q",
+                "↵ annotation  c today  t map  ? keys  q quit",
+                "↵ annotation  t map  ?  q",
                 "t map  ?  q",
             ]
         } else if app.view == View::Scenes {
             &[
-                "/ find  ↑↓ choose  ↵ edition  o time  s map  t cabinet  r refresh  tab source  ? keys  q leave",
-                "/ find  ↑↓ choose  ↵ edition  o time  s map  ?  q",
-                "/ find  ↑↓  ↵ edition  o time  s map  ?  q",
-                "↵ edition  o time  s map  ?  q",
-                "s map  ?  q",
+                "↵ edition  / search  ? keys  q quit",
+                "↵ edition  / search  ?  q",
+                "↵ read  / find  ?  q",
+                "/ find  ?  q",
             ]
         } else {
             &[
-                "/ find  arrows choose  ,. all  h archived  ⇧arrows pan  +/- zoom  f fit  ↵ follow  i memory  e edges  s scenes  t cabinet  tab source  ?  q",
-                "/ find  arrows choose  ,. all  ⇧arrows pan  +/- zoom  f fit  ↵ follow  i memory  e edges  s scenes  ?  q",
-                "arrows choose  +/- zoom  f fit  ↵ follow  i memory  e edges  ?  q",
-                "e edges  i memory  s scenes  ?  q",
-                "e edges  i memory  ?  q",
-                "s scenes  ?  q",
+                "↵ follow  / search  ? keys  q quit",
+                "↵ follow  / search  ?  q",
+                "↵ follow  / find  ?  q",
+                "/ find  ?  q",
             ]
         };
         let keys = candidates
@@ -449,123 +449,6 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .unwrap_or("?  q");
         text_line(frame, area, Line::from(vec![s(back, MINT), s(keys, LILAC)]));
     }
-}
-
-fn help(frame: &mut Frame<'_>, screen: Rect, app: &App) {
-    let width = screen.width.min(76);
-    let height = screen.height.min(27);
-    let area = Rect::new(
-        screen.x + (screen.width - width) / 2,
-        screen.y + (screen.height - height) / 2,
-        width,
-        height,
-    );
-    frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .title(" ◌ FIELD GUIDE ")
-        .border_style(Style::default().fg(MINT))
-        .style(Style::default().bg(PANEL).fg(INK));
-    let inside = block.inner(area);
-    frame.render_widget(block, area);
-    let lines = if app.view == View::Touchstones {
-        vec![
-            Line::from(s("Authored significance, not a truth score.", MINT)),
-            Line::raw(" t              map"),
-            Line::raw(" s              scenes"),
-            Line::raw(" j k / ↑ ↓      select a touchstone"),
-            Line::raw(" enter / i      read annotation"),
-            Line::raw(" [ ] / ← →      choose historical reference"),
-            Line::raw(" c              read the exact target today"),
-            Line::raw(" n / r          next page / restart from first page"),
-            Line::raw(" tab            choose source; switching resets cabinet"),
-            Line::raw(" esc            close current read, annotation, then Map"),
-            Line::raw(" ↑↓ / j k       scroll opened inspector (Esc closes)"),
-            Line::raw(" Wheel / PgUp/Dn scroll text / page; Home/End jumps"),
-            Line::raw(" /              unavailable; no pretend search"),
-            Line::raw(" ? / esc        close guide"),
-            Line::raw(" q / Ctrl-C     leave"),
-            Line::default(),
-            Line::from(s(
-                "Historical references are summary_only, not archived bodies.",
-                DIM,
-            )),
-            Line::from(s(
-                "Unchanged snapshot fields do not mean an unchanged body.",
-                DIM,
-            )),
-            Line::from(s("One bounded page; next replaces it, never crawls.", DIM)),
-        ]
-    } else {
-        vec![
-            Line::from(s("A lens, not the whole sky.", MINT)),
-            Line::default(),
-            Line::raw(" s              map / scenes · t touchstones"),
-            Line::raw(" /              search the current view; Enter submits"),
-            Line::raw(" arrows / j k   map: spatial select; linked neighbors first"),
-            Line::raw(" , / .          map: cycle selectable nodes, including islands"),
-            Line::raw(" Click         select a marker, number or index row"),
-            Line::raw(" Drag / ⇧arrows pan · Wheel / +/- (=) zoom in the field"),
-            Line::raw(" enter          map: follow · scenes: read the exact edition"),
-            Line::raw(" i              open / close memory or exact scene detail"),
-            Line::raw(" e              map: isolate / restore edges in place"),
-            Line::raw(" h              map: hide / show archived (unknowns stay)"),
-            Line::raw(" o              scenes: recorded / occurred chronology"),
-            Line::raw(" esc / ⌫ / b    map: back · Esc closes panes / cancels search"),
-            Line::raw(" tab / r        choose source / refresh current view"),
-            Line::raw(" f / 0 / R      map: fit loaded / 100% / recompose"),
-            Line::raw(" ↑↓ / j k       opened detail: scroll; otherwise choose"),
-            Line::raw(" Wheel / PgUp/Dn scroll text / page; Home/End jumps"),
-            Line::raw(" ? / esc        close this guide"),
-            Line::raw(" q / Ctrl-C     leave the observatory"),
-            Line::default(),
-            Line::from(vec![
-                s("◆ selected   ", MINT),
-                s("◇ core   ", GOLD),
-                s("× archived   ", DIM),
-                s("• memory", INK),
-            ]),
-            Line::from(s(
-                "Stored links dim; selected connections shine. Types in detail.",
-                DIM,
-            )),
-            Line::from(s(
-                "Islands use loaded weighted links; names are existing tags.",
-                DIM,
-            )),
-            Line::from(s(
-                "The field settles. Position is not semantic distance.",
-                DIM,
-            )),
-            Line::from(s(
-                "Scenes separate occurrence time/context from capture provenance.",
-                DIM,
-            )),
-            Line::from(s(
-                "Unknown times and intervals stay explicit; all dates are UTC.",
-                DIM,
-            )),
-            Line::from(s(
-                "Exact editions do not silently become their current successors.",
-                DIM,
-            )),
-            Line::from(s(
-                "Reads never reinforce memory. Every view has bounded coverage.",
-                DIM,
-            )),
-            Line::from(s(
-                "Waveform: observed returns + current requests / jobs.",
-                BLUE,
-            )),
-            Line::from(s(
-                "Samples can miss bursts; blank = no data, not no activity.",
-                DIM,
-            )),
-        ]
-    };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-        inside,
-    );
 }
 
 /// Render a noninteractive, ANSI-colored frame without modifying the terminal.
@@ -641,7 +524,8 @@ mod tests {
         let text = plain_frame(110, 34, &app());
         assert!(text.contains("DEMO"));
         assert!(text.contains("nodes ·"));
-        assert!(text.contains("i  open memory"));
+        assert!(text.contains("↵ follow"));
+        assert!(!text.contains("i  open memory"));
         assert!(text.contains("demo · no telemetry"));
         assert!(text.contains("follows this"));
         assert!(text.contains("A memory is a promise"));
@@ -661,6 +545,86 @@ mod tests {
             let text = plain_frame(width, height, &app());
             if width >= 60 {
                 assert!(text.contains("nodes ·"));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_map_distinguishes_loading_unavailable_unread_empty_search_and_partial() {
+        let mut app = App::new(vec![], String::new(), false);
+        for (busy, error, loaded, query, partial, expected) in [
+            (true, false, false, "", false, "Reading this source"),
+            (false, true, false, "", false, "Map unavailable"),
+            (false, false, false, "", false, "Map not loaded"),
+            (false, false, true, "", false, "No memories in this field"),
+            (false, false, true, "a cue", false, "No memories match"),
+            (false, false, true, "a cue", true, "partial view"),
+        ] {
+            app.busy = busy;
+            app.error = error.then(|| "Connection refused".into());
+            app.last_refresh = loaded.then(std::time::Instant::now);
+            app.query = query.into();
+            app.graph.partial = partial;
+            for (width, height) in [(120, 36), (60, 24), (40, 16)] {
+                let text = plain_frame(width, height, &app);
+                assert!(text.contains(expected), "{width}x{height}: {text}");
+                if error || !loaded || partial {
+                    assert!(!text.contains("No memories in this field"));
+                }
+            }
+            // Even the minimum layout keeps the real source failure in its header.
+            let text = plain_frame(24, 9, &app);
+            if error {
+                assert!(text.contains("unavailable"));
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_chrome_keeps_primary_actions_without_the_instruction_inventory() {
+        for view in [View::Map, View::Scenes, View::Touchstones] {
+            let mut app = app();
+            app.view = view;
+            app.scenes = crate::scenes::demo_scenes(app.scene_axis);
+            app.scenes_loaded = true;
+            app.cabinet.page = crate::touchstones::demo_touchstones();
+            app.cabinet.loaded = true;
+            for width in [120, 80, 40, 24] {
+                let text = plain_frame(width, 30, &app);
+                let footer = text.lines().last().unwrap();
+                assert!(footer.contains('?') && footer.contains('q'));
+                assert!(!footer.contains("tab source"));
+                assert!(!footer.contains("zoom"));
+                assert!(!text.contains("Authored meaning"));
+                assert!(!text.contains("changes time axis"));
+                assert!(!text.lines().next().unwrap().contains("observatory"));
+            }
+        }
+    }
+
+    #[test]
+    fn modal_footer_is_quiet_and_pane_actions_fit_small_screens() {
+        for width in [24, 40, 80, 120] {
+            let mut app = app();
+            app.remember(app.visit());
+            app.show_details = true;
+            for view in [View::Map, View::Scenes, View::Touchstones] {
+                app.view = view;
+                let text = plain_frame(width, 30, &app);
+                let footer = text.lines().last().unwrap();
+                assert!(
+                    footer.contains('?') && footer.contains('q'),
+                    "{view:?} {width}: {footer}"
+                );
+                if view == View::Touchstones {
+                    assert!(footer.contains("t map"));
+                }
+            }
+            for help in [true, false] {
+                app.show_help = help;
+                app.source_menu = (!help).then_some(0);
+                let text = plain_frame(width, 36, &app);
+                assert!(text.lines().last().unwrap().trim().is_empty());
             }
         }
     }
@@ -746,7 +710,7 @@ mod tests {
     fn help_and_input_are_readable_and_untrusted_controls_are_not_emitted() {
         let mut app = app();
         app.show_help = true;
-        assert!(plain_frame(100, 30, &app).contains("FIELD GUIDE"));
+        assert!(plain_frame(100, 30, &app).contains("Map keys"));
         app.show_help = false;
         app.editing = true;
         app.input = "hello\u{1b}[31m".into();
@@ -781,7 +745,7 @@ mod tests {
         for (width, height) in [(100, 30), (60, 24)] {
             let text = plain_frame(width, height, &app);
             assert!(text.contains("esc ← back"));
-            assert!(text.contains("e edges"));
+            assert!(text.contains("/ search"));
         }
         app.open_edge_lens("demo-00".into(), app.graph.clone(), LensState::Ready);
         let text = plain_frame(60, 24, &app);

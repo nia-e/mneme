@@ -237,6 +237,13 @@ class SelectedStore:
     guidance: dict = field(default_factory=dict)
 
     @property
+    def contradiction_notice(self):
+        # The native per-owner delivery policy is the only opt-in. Legacy
+        # registries and standalone core configurations remain unchanged.
+        return (self.native_binding is not None
+                and _native_contradiction_notice(self.native_binding["entry"]["store"]))
+
+    @property
     def is_project(self):
         return self.workspace_root is not None
 
@@ -633,6 +640,13 @@ def _native_core_cleanup(entry):
     return _bool(background.get("core_cleanup", True))
 
 
+def _native_contradiction_notice(entry):
+    delivery = _object(entry.get("delivery", {}), ("core", "context", "contradiction_notice"))
+    for value in delivery.values():
+        _bool(value)
+    return delivery.get("contradiction_notice", False)
+
+
 @dataclass(frozen=True)
 class NativeSelection:
     snapshot: dict
@@ -664,6 +678,7 @@ class NativeSelection:
             names.add(row["name"]); owners.add(store["id"])
             _native_record_policy(store, row["eligible"])
             _native_core_cleanup(store)
+            _native_contradiction_notice(store)
         if len(json.dumps(value).encode()) > MAX_NATIVE_SNAPSHOT_BYTES:
             raise ValueError("native selected snapshot exceeds byte limit")
 

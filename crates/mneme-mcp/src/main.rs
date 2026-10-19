@@ -673,9 +673,10 @@ impl Server {
         };
         let id = msg.get("id").cloned();
         let params = msg.get("params").cloned().unwrap_or(json!({}));
+        let core_response = method == "tools/call" && params["name"] == "core";
         let result = self.dispatch(method, params).await;
         let id = id?; // a notification expects no response
-        Some(BoundedResponse::new(match result {
+        let response = match result {
             Ok(r) => result_response(id, r),
             Err(e) => {
                 let code = match method {
@@ -685,7 +686,12 @@ impl Server {
                 };
                 error(id, code, &e.to_string())
             }
-        }))
+        };
+        Some(if core_response {
+            BoundedResponse::core(response)
+        } else {
+            BoundedResponse::new(response)
+        })
     }
 
     async fn dispatch(&self, method: &str, params: Value) -> Result<Value, AnyErr> {
@@ -697,7 +703,9 @@ impl Server {
                 let profile = self.capability.profile.as_str();
                 Ok(json!({
                     "protocolVersion": negotiated_protocol(&params)?,
-                    "capabilities": { "tools": {} },
+                    "capabilities": { "tools": {}, "experimental": {
+                        (mneme_app::core::CONTRADICTION_SUMMARY_FEATURE): true
+                    } },
                     "serverInfo": {
                         "name": "mneme-mcp",
                         "version": env!("CARGO_PKG_VERSION"),
@@ -725,7 +733,11 @@ impl Server {
                 )
                 .await
                 {
-                    Ok(v) => Ok(response::tool_success(&v)),
+                    Ok(v) => Ok(if name == "core" {
+                        response::core_tool_success(&v)
+                    } else {
+                        response::tool_success(&v)
+                    }),
                     Err(e) => Ok(response::tool_error(&e.to_string())),
                 }
             }
@@ -1018,7 +1030,7 @@ async fn call_tool_authorized(
             .await
         }
 
-        AdmittedOperation::Core => {
+        AdmittedOperation::Core(options) => {
             let h = db(reg, a)?;
             let all = h.mem.core(ColdPath::acquire()).await?;
             let total = all.len();
@@ -1049,14 +1061,22 @@ async fn call_tool_authorized(
             }
             reg.activity
                 .returned("core", selected_db_name(a)?, h.db_id, ids);
-            Ok(json!({
+            let mut result = json!({
                 "nodes": out,
                 "total": total,
                 "truncated": total > MAX_CORE_NODES || bodies_truncated,
                 "nodes_truncated": total > MAX_CORE_NODES,
                 "bodies_truncated": bodies_truncated,
                 "body_bytes_limit": MAX_CORE_BODY_BYTES,
-            }))
+            });
+            if let Some(summary) = options.contradiction_summary(&h.mem).await {
+                mneme_app::core::attach_contradiction_summary(
+                    &mut result,
+                    summary,
+                    response::MAX_TOOL_TEXT_BYTES,
+                );
+            }
+            Ok(result)
         }
 
         AdmittedOperation::Ingest(_) => {
@@ -2173,7 +2193,7 @@ enum AdmittedOperation {
     Graph,
     Neighbors,
     RemoteEdges,
-    Core,
+    Core(mneme_app::core::CoreOptions),
     Ingest(IngestRequest),
     Capture(capture::PreparedCapture),
     Retag(retag::PreparedRetag),
@@ -2216,7 +2236,7 @@ impl AdmittedOperation {
             Self::Graph => ToolRequestKind::Graph,
             Self::Neighbors => ToolRequestKind::Neighbors,
             Self::RemoteEdges => ToolRequestKind::RemoteEdges,
-            Self::Core => ToolRequestKind::Core,
+            Self::Core(_) => ToolRequestKind::Core,
             Self::Ingest(action) => ToolRequestKind::Ingest(*action),
             Self::Capture(prepared) => ToolRequestKind::Capture(prepared.authority()),
             Self::Retag(prepared) => {
@@ -3421,7 +3441,9 @@ fn admit_tool_operation(name: &str, arguments: &Value) -> Result<AdmittedOperati
         }
         "core" => {
             body_limit(arguments)?;
-            Ok(AdmittedOperation::Core)
+            Ok(AdmittedOperation::Core(
+                mneme_app::core::CoreOptions::parse(arguments)?,
+            ))
         }
         "ingest" => {
             let summary = bounded_required(arguments, "summary", MAX_SUMMARY_BYTES)?;
@@ -3836,9 +3858,10 @@ fn unfiltered_tool_schemas() -> Vec<Value> {
         ),
         tool(
             "core",
-            "The always-loaded core set with bounded bodies and whole-second UTC date companions beside numeric timestamps. Returns truncation metadata, emits at most 32 nodes, and shares a 128 KiB body allowance fairly across them.",
+            "The always-loaded core set with bounded bodies and whole-second UTC date companions beside numeric timestamps. Returns truncation metadata, emits at most 32 nodes, and shares a 128 KiB body allowance fairly across them. Optional contradiction_summary scans at most 256 legacy flag rows for 100 ms; partial is not a total, unavailable is not zero.",
             json!({
                 "db": db_prop(),
+                "include_contradictions": { "type": "boolean", "description": "include a bounded summary of open contradictions (default false)" },
                 "max_body_bytes": { "type": "integer", "minimum": 1, "maximum": MAX_BODY_BYTES, "description": "per-body output cap; default 65536" },
             }),
             &[],
@@ -4047,6 +4070,9 @@ fn tool_schemas(capability: CapabilityPolicy) -> Vec<Value> {
     apply_profile_schema_restrictions(&mut tools, capability.profile);
     tools
 }
+
+#[cfg(test)]
+mod core_notice_tests;
 
 #[cfg(test)]
 mod tests;

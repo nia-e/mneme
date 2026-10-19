@@ -78,6 +78,7 @@ fn permission_delivery_background_matrix_is_exhaustive() {
                     store.delivery = Delivery {
                         core: delivery,
                         context: delivery,
+                        ..Delivery::default()
                     };
                     let selected = select(&cfg, &context(dir.path())).unwrap();
                     let s = &selected.active[0];

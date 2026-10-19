@@ -73,6 +73,9 @@ MAX_STATE = 256_000
 MAX_TURNS = 128
 MAX_CONTEXT_BYTES = 4096
 MAX_SEEN = 32
+# Retain attempts for the session, not the rolling card/turn cache. Once full,
+# skip additional notices rather than evicting identities and repeating them.
+MAX_CONTRADICTION_NOTICE_OWNERS = 64
 MEMORY_CHOICE = (
     "Consider 0–few source-bound memories: use save with kind episode for a short event worth "
     "remembering, even without a lesson; kind note for a reusable lesson. Neither is required. "
@@ -455,6 +458,11 @@ def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = Tr
             data[field] = values
         if len(data["seen_ids"]) != len(data["seen_fingerprints"]):
             raise HookError("misaligned seen-card metadata")
+        attempts = data.get("contradiction_notice_attempts", [])
+        if (not isinstance(attempts, list) or len(attempts) > MAX_CONTRADICTION_NOTICE_OWNERS
+                or any(not isinstance(owner, str) or ULID_RE.fullmatch(owner) is None for owner in attempts)
+                or len(set(attempts)) != len(attempts)):
+            raise HookError("invalid contradiction notice metadata")
         now = time.time()
         data["turns"] = {k: v for k, v in data["turns"].items()
                          if _valid_id(k) and isinstance(v, dict) and isinstance(v.get("at"), (int, float))
@@ -467,6 +475,19 @@ def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = Tr
                     del data["turns"][key]
             _atomic_write(path, data)
         return result
+
+
+def claim_contradiction_notice(state_dir: Path, session_id: str, owner_id: str):
+    """Claim before a native read; no I/O or state lock survives this call."""
+    if not _valid_id(session_id) or not isinstance(owner_id, str) or ULID_RE.fullmatch(owner_id) is None:
+        raise HookError("invalid contradiction notice identity")
+    def claim(data, _now):
+        attempted = data.get("contradiction_notice_attempts", [])
+        if owner_id in attempted or len(attempted) >= MAX_CONTRADICTION_NOTICE_OWNERS:
+            return False, False
+        data["contradiction_notice_attempts"] = [*attempted, owner_id]
+        return True, True
+    return _with_state(state_dir, session_id, claim, blocking=False)
 
 
 def _legacy_hook_state(raw: bytes) -> dict[str, Any]:

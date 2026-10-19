@@ -22,6 +22,10 @@ use unordered_pair::UnorderedPair;
 pub use crate::concern::{
     ConcernCommitOutcome, ConcernPage, ConcernPageCursor, ConcernPageRequest, ConcernStore,
 };
+pub use crate::contradiction_summary::{
+    CONTRADICTION_SUMMARY_TIMEOUT, ContradictionSummary, ContradictionSummaryRequest,
+    MAX_CONTRADICTION_SUMMARY_SCAN_ROWS,
+};
 pub use crate::episode::EpisodeStore;
 pub use crate::retag::{NodeContentGuard, RetagContentGuards};
 pub use crate::tag_vocabulary::*;
@@ -1516,6 +1520,18 @@ pub trait GraphStore: Send + Sync {
     /// agent-supplied — see [`Contradiction`]; this is just the mechanism.)
     async fn observe_contradiction(&self, a: NodeId, b: NodeId, at: Timestamp) -> Result<()>;
     async fn open_contradictions(&self, cold: ColdPath) -> Result<Vec<Contradiction>>;
+    /// Inspect only an admitted physical overlay prefix, before filtering open
+    /// rows. Never hydrate nodes, detect communities or fall back to the cold
+    /// collection. Charge queue/lock/scan work to one remaining deadline; a
+    /// saturated prefix is incomplete, including when it found no open rows.
+    /// None means unsupported, not empty. Errors mean unavailable, not zero.
+    async fn contradiction_summary(
+        &self,
+        request: &ContradictionSummaryRequest,
+    ) -> Result<Option<ContradictionSummary>> {
+        request.validate()?;
+        Ok(None)
+    }
     /// Set a reconciliation verdict. `Unresolved` is an explicit open deferral
     /// and may later transition to `Superseded` or `ContextDependent`. Repeating
     /// the current verdict is an idempotent no-op; replacing either terminal

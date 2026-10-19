@@ -836,7 +836,7 @@ impl<'a> TryFrom<Ingest<'a>> for PreparedIngest<'a> {
 }
 
 /// Stable ordering evidence for one typed retrieval hit. Ranks are one-based;
-/// absent evidence means that retrieval leg did not retain this node. Raw ANN,
+/// absent evidence means that retrieval leg did not return this candidate. Raw ANN,
 /// BM25, graph-activation, and reranker scores intentionally stay private: they
 /// are not calibrated against one another or across result lanes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1767,14 +1767,22 @@ impl Memory {
         // consumes its ranks.
         dense_seeds.sort_by(scored_order);
         dense_seeds.truncate(effective_k);
-        let mut direct = dense_seeds.clone();
+        // RRF uses ranks, not raw relevance. Reject the dense tail before
+        // fusion so an unrelated sparse match cannot lift it above the floor.
+        // Keep the original lane for evidence; independent sparse or graph
+        // evidence may still admit one of these rejected dense candidates.
+        let mut direct: Vec<Scored> = dense_seeds
+            .iter()
+            .copied()
+            .filter(|hit| hit.score >= budget.min_relevance)
+            .collect();
         let mut sparse_seeds = Vec::new();
         if sparse_enabled && let Some(lexical) = &self.lexical {
             sparse_seeds = lexical.search(query, lexical_k, status).await?;
             sparse_seeds.sort_by(scored_order);
             sparse_seeds.truncate(lexical_k);
             direct = reciprocal_rank_fuse(
-                &dense_seeds,
+                &direct,
                 &sparse_seeds,
                 self.cfg.rrf_constant,
                 self.cfg.dense_weight,
@@ -2890,6 +2898,20 @@ impl Memory {
 
     pub async fn open_contradictions(&self, cold: ColdPath) -> Result<Vec<Contradiction>> {
         self.graph.open_contradictions(cold).await
+    }
+
+    /// Bounded advisory counts from the legacy overlay. No cold triage, node
+    /// hydration, reinforcement or fallback when an adapter lacks this read.
+    pub async fn contradiction_summary(
+        &self,
+        request: &mneme_core::ports::ContradictionSummaryRequest,
+    ) -> Result<Option<mneme_core::ports::ContradictionSummary>> {
+        request.validate()?;
+        let summary = self.graph.contradiction_summary(request).await?;
+        if let Some(summary) = &summary {
+            summary.validate_for(request)?;
+        }
+        Ok(summary)
     }
 
     /// Open merge candidates awaiting the merge pass (the redundancy analogue of

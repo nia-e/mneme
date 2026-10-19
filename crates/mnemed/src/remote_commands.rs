@@ -108,7 +108,16 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
             return Err("library reads require --config PATH and cannot use --remote".into());
         }
         Command::Status => (PreparedOperation::Status, json!({})),
-        Command::Core => (PreparedOperation::Core, json!({})),
+        Command::Core {
+            include_contradictions,
+        } => (
+            PreparedOperation::Core,
+            if *include_contradictions {
+                json!({"include_contradictions": true})
+            } else {
+                json!({})
+            },
+        ),
         Command::Query(a) => {
             if a.bodies {
                 return Err(unsupported(
@@ -696,7 +705,9 @@ pub(crate) fn render(command: &Command, result: &Value, json_output: bool) -> Re
                 );
             }
         }
-        Command::Core => {
+        Command::Core {
+            include_contradictions,
+        } => {
             let nodes = result["nodes"]
                 .as_array()
                 .ok_or("remote core result lacks nodes")?;
@@ -705,6 +716,13 @@ pub(crate) fn render(command: &Command, result: &Value, json_output: bool) -> Re
             }
             for node in nodes {
                 println!("# {}\n{}\n", s(node, "summary"), s(node, "body"));
+            }
+            if *include_contradictions {
+                let summary = result
+                    .get("contradiction_summary")
+                    .and_then(mneme_app::core::ContradictionNotice::from_json)
+                    .unwrap_or(mneme_app::core::ContradictionNotice::Unavailable);
+                println!("{summary}");
             }
             if result["truncated"] == true {
                 eprintln!("[mnemed: remote core was truncated; inspect --json for limits]");

@@ -681,6 +681,15 @@ impl ConfiguredClient {
                     );
                 }
 
+                // The optional notice must not spend a catalog request (or the
+                // core-card allowance) merely to discover whether it is supported.
+                let contradictions_requested = if tool == "core" {
+                    let supported = mneme_app::core::initialized_support(client.initialize_result())
+                        || mneme_app::core::advertised(client.tool_catalog());
+                    mneme_app::core::prepare_remote_arguments_with_support(&mut args, supported)
+                } else {
+                    false
+                };
                 if tool == "query" && args.get("summary_max_bytes").is_some() {
                     tokio::time::timeout_at(budget.deadline, client.ensure_catalog())
                         .await.map_err(|_| "shared catalog deadline exhausted")??;
@@ -759,6 +768,11 @@ impl ConfiguredClient {
                     } else {
                         result = json!({"result":result,"_mneme_source":source});
                     }
+                }
+                if tool == "core" {
+                    mneme_app::core::complete_remote_result(
+                        &mut result, contradictions_requested, mneme_mcp_client::MAX_TOOL_TEXT_BYTES,
+                    );
                 }
                 Ok(result)
             }

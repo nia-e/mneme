@@ -162,19 +162,32 @@ pub(crate) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
         );
         app.source_menu_hits.borrow_mut().push((rect, index));
     }
-    let reason = app
-        .sources
-        .get(selected)
-        .and_then(|source| source.unavailable_reason.as_deref())
-        .unwrap_or("Configured route · availability checked only when selected");
+    let reason = app.sources.get(selected).and_then(|source| {
+        source.unavailable_reason.as_deref().or_else(|| {
+            let route_index = app.sources[..selected]
+                .iter()
+                .filter(|source| source.route.is_some())
+                .count();
+            (source.route.is_some() && route_index == app.target)
+                .then_some(app.error.as_deref())
+                .flatten()
+        })
+    });
     if inner.height >= 3 {
+        if let Some(reason) = reason {
+            frame.render_widget(
+                Paragraph::new(clipped(reason, inner.width))
+                    .style(Style::default().fg(Color::Rgb(233, 197, 129))),
+                Rect::new(inner.x, inner.y + inner.height - 2, inner.width, 1),
+            );
+        }
+        let controls = if inner.width >= 34 {
+            "↑↓ select · Enter open · Esc cancel"
+        } else {
+            "↑↓ · ↵ open · Esc"
+        };
         frame.render_widget(
-            Paragraph::new(clipped(reason, inner.width))
-                .style(Style::default().fg(Color::Rgb(233, 197, 129))),
-            Rect::new(inner.x, inner.y + inner.height - 2, inner.width, 1),
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::raw("↑↓ select · Enter open · Esc cancel"))),
+            Paragraph::new(Line::from(Span::raw(controls))),
             Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
         );
     }
@@ -202,6 +215,41 @@ mod tests {
         ));
         app
     }
+    #[test]
+    fn configured_source_has_no_standing_caveat_but_real_failures_remain() {
+        let mut app = app();
+        let text = |app: &App, width, height| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| crate::render::draw(frame, app))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        open(&mut app);
+        let configured = text(&app, 100, 24);
+        assert!(configured.contains("project (alias)"));
+        assert!(!configured.contains("Configured route"));
+        assert!(!configured.contains("availability checked"));
+        app.error = Some("Connection refused · r retries".into());
+        for (width, height) in [(24, 9), (36, 16), (100, 24)] {
+            let rendered = text(&app, width, height);
+            assert!(rendered.contains("Connection refused"));
+            assert!(rendered.contains("Esc"));
+        }
+        key(&mut app, KeyCode::Down);
+        assert!(text(&app, 100, 24).contains("No configured owner route"));
+        assert_eq!(key(&mut app, KeyCode::Enter), None);
+        assert!(app.source_menu.is_some());
+        assert_eq!(app.target, 0);
+    }
+
     #[test]
     fn keyboard_visits_unavailable_and_cancel_does_not_switch() {
         let mut app = app();

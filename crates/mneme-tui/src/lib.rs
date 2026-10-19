@@ -577,6 +577,25 @@ fn back_key(app: &mut App, key: KeyCode) -> bool {
     previous_view == View::Scenes && app.view == View::Map && app.last_refresh.is_none()
 }
 
+/// A queued read belongs to the underlying view, never the modal guide.
+fn queued_input(
+    app: &mut App,
+    cancel_barrier: bool,
+    queued: &mut Option<(crossterm::event::KeyEvent, Option<String>)>,
+) -> Option<Event> {
+    if cancel_barrier || app.show_help || app.source_menu.is_some() {
+        return None;
+    }
+    queued.take().map(|(key, selected_id)| {
+        if let Some(id) = selected_id {
+            if let Some(index) = app.scene_nodes().iter().position(|node| node.id == id) {
+                app.select_node(index);
+            }
+        }
+        Event::Key(key)
+    })
+}
+
 async fn stop(tx: &mpsc::Sender<Request>, task: &mut tokio::task::JoinHandle<()>) {
     if tokio::time::timeout(Duration::from_secs(30), async {
         let _ = tx.send(Request::Shutdown).await;
@@ -663,7 +682,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
                     poll_at = Instant::now() + Duration::from_secs(2);
                 }
             }
-            if app.deferred_view_read && !app.busy {
+            if app.deferred_view_read && !app.busy && !app.show_help {
                 app.deferred_view_read = false;
                 if view_is_unread(&app) {
                     if let Some((tx, _, _)) = &channel { initial_read(&mut app, tx, &mut pending); }
@@ -678,14 +697,8 @@ pub async fn run(options: Options) -> Result<(), Error> {
             app.normalize_map_selection();
             terminal.draw(|frame| render::draw(frame, &app))?;
             detail_scroll::clamp(&mut app);
-            let queued_event=if !cancel_barrier {
-                queued_user_key.take().map(|(key,selected_id)| {
-                    if let Some(id)=selected_id {
-                        if let Some(index)=app.scene_nodes().iter().position(|node|node.id==id){app.select_node(index);}
-                    }
-                    Event::Key(key)
-                })
-            }else{None};
+            render::help::clamp(&mut app);
+            let queued_event = queued_input(&mut app, cancel_barrier, &mut queued_user_key);
             let input_event = match queued_event {
                 Some(event) => Some(event),
                 None => input_pump.terminal_input()?,
@@ -695,6 +708,11 @@ pub async fn run(options: Options) -> Result<(), Error> {
             });
             let mut chosen_source = None;
             if let Some(event) = input_event {
+                match render::help::input(&mut app, &event, input_pump.wheel_reports) {
+                    render::help::Input::Quit => break,
+                    render::help::Input::Consumed => continue,
+                    render::help::Input::Pass => {}
+                }
                 match event {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
                         app.layout.borrow_mut().cancel_drag();
@@ -764,7 +782,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
                             if detail_scroll::key(&mut app, key) || input::map_key(&mut app, key) { continue; }
                             match key.code {
                                 KeyCode::Char('q') => break,
-                                KeyCode::Char('?') => app.show_help = !app.show_help,
+                                KeyCode::Char('?') => render::help::open(&mut app),
                                 KeyCode::Char('i') if app.view == View::Map => {
                                     app.close_edge_lens();
                                     app.show_details = !app.show_details;
@@ -893,7 +911,7 @@ pub async fn run(options: Options) -> Result<(), Error> {
             // An ignored-only drain must not starve background work forever.
             // A pending actionable burst gets priority; noise does not create
             // a new request per report or enlarge the one-operation queue.
-            let background_allowed = app.source_menu.is_none() && (!input_waiting || !discrete_input);
+            let background_allowed = !app.show_help && app.source_menu.is_none() && (!input_waiting || !discrete_input);
             if !cancel_barrier && background_allowed {
                 if let Some((tx, _, _)) = &channel {
                     advance_inventory(&mut app, tx, &mut pending);

@@ -31,6 +31,8 @@ permissions={{read={read},write={write}}}
 struct Fixture {
     url: String,
     calls: Arc<AtomicUsize>,
+    catalog_calls: Arc<AtomicUsize>,
+    requests: Arc<std::sync::Mutex<Vec<Value>>>,
     stop: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -68,13 +70,32 @@ fn advertised_catalog() -> Value {
     }
     tools
 }
+#[derive(Default)]
+struct CoreFixture {
+    feature: Option<Value>,
+    catalog_field: Option<Value>,
+    notice: Option<Value>,
+    wrong_result_identity: bool,
+}
 fn fixture(profile: &'static str, wrong_identity: bool, http_denied: bool) -> Fixture {
+    fixture_with_core(profile, wrong_identity, http_denied, CoreFixture::default())
+}
+fn fixture_with_core(
+    profile: &'static str,
+    wrong_identity: bool,
+    http_denied: bool,
+    core: CoreFixture,
+) -> Fixture {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let calls = Arc::new(AtomicUsize::new(0));
+    let catalog_calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let server_calls = calls.clone();
+    let server_catalog_calls = catalog_calls.clone();
+    let server_requests = requests.clone();
     let server_stop = stop.clone();
     let join = std::thread::spawn(move || {
         while !server_stop.load(Ordering::Relaxed) {
@@ -124,13 +145,28 @@ fn fixture(profile: &'static str, wrong_identity: bool, http_denied: bool) -> Fi
                 serde_json::from_slice(&bytes[header_end..header_end + size]).unwrap()
             };
             let body = match msg["method"].as_str() {
-                Some("initialize") => Some(
-                    json!({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"mneme-mcp","version":"fixture"},"capabilityProfile":profile}}),
-                ),
-                Some("tools/list") => Some(
-                    json!({"jsonrpc":"2.0","id":msg["id"],"result":{"tools":advertised_catalog()}}),
-                ),
+                Some("initialize") => {
+                    let mut result = json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"mneme-mcp","version":"fixture"},"capabilityProfile":profile});
+                    if let Some(feature) = core.feature.as_ref() {
+                        result["capabilities"]["experimental"] = json!({
+                            mneme_app::core::CONTRADICTION_SUMMARY_FEATURE: feature
+                        });
+                    }
+                    Some(json!({"jsonrpc":"2.0","id":msg["id"],"result":result}))
+                }
+                Some("tools/list") => {
+                    server_catalog_calls.fetch_add(1, Ordering::Relaxed);
+                    let mut catalog = advertised_catalog();
+                    let mut schema = json!({"name":"core","inputSchema":{"type":"object","properties":{"db":{"type":"string"},"expected_db_id":{"type":"string","minLength":26,"maxLength":26,"pattern":"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"}}}});
+                    if let Some(field) = core.catalog_field.as_ref() {
+                        schema["inputSchema"]["properties"]["include_contradictions"] =
+                            field.clone();
+                    }
+                    catalog.as_array_mut().unwrap().push(schema);
+                    Some(json!({"jsonrpc":"2.0","id":msg["id"],"result":{"tools":catalog}}))
+                }
                 Some("tools/call") => {
+                    server_requests.lock().unwrap().push(msg["params"].clone());
                     let name = msg["params"]["name"].as_str().unwrap();
                     let value = if name == "databases" {
                         json!([{"db":"project","db_id":if wrong_identity{NODE}else{DB},"state":"open","resolved_path":"/fixture/project.db"}])
@@ -138,6 +174,15 @@ fn fixture(profile: &'static str, wrong_identity: bool, http_denied: bool) -> Fi
                         server_calls.fetch_add(1, Ordering::Relaxed);
                         let args = &msg["params"]["arguments"];
                         match name {
+                            "core" => {
+                                let mut result = json!({"db":"project","db_id":if core.wrong_result_identity {NODE} else {DB},"nodes":[{"id":NODE,"summary":"fixture core card"}]});
+                                if args["include_contradictions"] == true {
+                                    if let Some(notice) = core.notice.as_ref() {
+                                        result["contradiction_summary"] = notice.clone();
+                                    }
+                                }
+                                result
+                            }
                             "retag" => {
                                 json!({"db":"project","db_id":DB,"id":args["id"],"tags":args["tags"],"changed":args["expected_tags"] != args["tags"]})
                             }
@@ -171,6 +216,8 @@ fn fixture(profile: &'static str, wrong_identity: bool, http_denied: bool) -> Fi
     Fixture {
         url,
         calls,
+        catalog_calls,
+        requests,
         stop,
         join: Some(join),
     }
@@ -295,6 +342,14 @@ async fn complete_domain_admission_precedes_owner_contact() {
     .unwrap();
     for (tool, args) in [
         ("get", json!({"id":NODE,"body":"yes"})),
+        ("core", json!({"include_contradictions":"yes"})),
+        ("core", json!({"include_contradictions":null})),
+        ("core", json!({"include_contradictions":1})),
+        ("core", json!({"max_body_bytes":0})),
+        (
+            "core",
+            json!({"include_contradictions":true,"unknown":true}),
+        ),
         ("query", json!({"text":"x","k":-1})),
         ("query", json!({"text":"x","summary_max_bytes":0})),
         ("query", json!({"text":"x","summary_max_bytes":16385})),
@@ -771,6 +826,197 @@ async fn configured_content_edit_profile_parity_denies_before_operation_send() {
                 .is_err()
         );
         assert_eq!(server.calls.load(Ordering::Relaxed), before);
+        client.close().await;
+    }
+}
+
+#[tokio::test]
+async fn optional_core_notice_uses_initialize_without_catalog_io() {
+    let notice = json!({"status":"complete","open_found":2,"rows_scanned":3});
+    for feature in [
+        None,
+        Some(json!(false)),
+        Some(json!("true")),
+        Some(json!(1)),
+        Some(json!({})),
+        Some(json!(true)),
+    ] {
+        let supported = feature == Some(json!(true));
+        let server = fixture_with_core(
+            "read-only",
+            false,
+            false,
+            CoreFixture {
+                feature,
+                notice: Some(notice.clone()),
+                ..CoreFixture::default()
+            },
+        );
+        let client = ConfiguredClient::new(selection(&server.url, true, false)).unwrap();
+        let mut budget = OperationBudget::new(4096, Duration::from_secs(2)).unwrap();
+        let result = client
+            .call_with_budget(
+                "alpha",
+                "core",
+                json!({"include_contradictions":true}),
+                &mut budget,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["nodes"][0]["id"], NODE);
+        assert_eq!(
+            result["contradiction_summary"],
+            if supported {
+                notice.clone()
+            } else {
+                json!({"status":"unavailable"})
+            }
+        );
+        assert_eq!(server.catalog_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(server.calls.load(Ordering::Relaxed), 1);
+        let requests = server.requests.lock().unwrap().clone();
+        let args = &requests
+            .iter()
+            .find(|request| request["name"] == "core")
+            .unwrap()["arguments"];
+        assert_eq!(
+            args.get("include_contradictions"),
+            supported.then_some(&json!(true))
+        );
+        assert_eq!(args["db"], "project");
+        assert_eq!(args["expected_db_id"], DB);
+        client.close().await;
+    }
+}
+
+#[tokio::test]
+async fn default_core_read_omits_optional_field_and_result() {
+    let server = fixture_with_core(
+        "read-only",
+        false,
+        false,
+        CoreFixture {
+            feature: Some(json!(true)),
+            notice: Some(json!({"status":"complete","open_found":1,"rows_scanned":1})),
+            ..CoreFixture::default()
+        },
+    );
+    let client = ConfiguredClient::new(selection(&server.url, true, false)).unwrap();
+    for arguments in [json!({}), json!({"include_contradictions":false})] {
+        let result = client.call("alpha", "core", arguments).await.unwrap();
+        assert!(result.get("contradiction_summary").is_none());
+        assert_eq!(result["nodes"][0]["id"], NODE);
+    }
+    assert_eq!(server.catalog_calls.load(Ordering::Relaxed), 0);
+    for request in server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["name"] == "core")
+    {
+        assert!(request["arguments"].get("include_contradictions").is_none());
+    }
+    client.close().await;
+}
+
+#[tokio::test]
+async fn optional_core_notice_can_use_an_already_loaded_catalog() {
+    for field in [
+        None,
+        Some(json!({"type":"string"})),
+        Some(json!({"type":"boolean"})),
+    ] {
+        let supported = field == Some(json!({"type":"boolean"}));
+        let server = fixture_with_core(
+            "read-only",
+            false,
+            false,
+            CoreFixture {
+                catalog_field: field,
+                notice: Some(json!({"status":"partial","open_found":1,"rows_scanned":256})),
+                ..CoreFixture::default()
+            },
+        );
+        let client = ConfiguredClient::new(selection(&server.url, true, false)).unwrap();
+        client.catalog("alpha").await.unwrap();
+        let result = client
+            .call("alpha", "core", json!({"include_contradictions":true}))
+            .await
+            .unwrap();
+        assert_eq!(result["nodes"][0]["id"], NODE);
+        assert_eq!(
+            result["contradiction_summary"]["status"],
+            if supported { "partial" } else { "unavailable" }
+        );
+        assert_eq!(server.catalog_calls.load(Ordering::Relaxed), 1);
+        let requests = server.requests.lock().unwrap().clone();
+        let args = &requests
+            .iter()
+            .find(|request| request["name"] == "core")
+            .unwrap()["arguments"];
+        assert_eq!(
+            args.get("include_contradictions"),
+            supported.then_some(&json!(true))
+        );
+        client.close().await;
+    }
+}
+
+#[tokio::test]
+async fn optional_core_notice_failures_do_not_erase_cards_or_bypass_identity() {
+    for notice in [
+        None,
+        Some(Value::Null),
+        Some(json!({"status":"complete","open_found":2,"rows_scanned":1})),
+        Some(json!({"status":"unavailable","open_found":0})),
+    ] {
+        let server = fixture_with_core(
+            "read-only",
+            false,
+            false,
+            CoreFixture {
+                feature: Some(json!(true)),
+                notice,
+                ..CoreFixture::default()
+            },
+        );
+        let client = ConfiguredClient::new(selection(&server.url, true, false)).unwrap();
+        let result = client
+            .call("alpha", "core", json!({"include_contradictions":true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result["contradiction_summary"],
+            json!({"status":"unavailable"})
+        );
+        assert_eq!(result["nodes"][0]["id"], NODE);
+        assert_eq!(server.calls.load(Ordering::Relaxed), 1);
+        client.close().await;
+    }
+    for wrong_handshake in [false, true] {
+        let server = fixture_with_core(
+            "read-only",
+            wrong_handshake,
+            false,
+            CoreFixture {
+                feature: Some(json!(true)),
+                wrong_result_identity: true,
+                ..CoreFixture::default()
+            },
+        );
+        let client = ConfiguredClient::new(selection(&server.url, true, false)).unwrap();
+        assert!(
+            client
+                .call("alpha", "core", json!({"include_contradictions":true}))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            server.calls.load(Ordering::Relaxed),
+            usize::from(!wrong_handshake)
+        );
+        assert_eq!(server.catalog_calls.load(Ordering::Relaxed), 0);
         client.close().await;
     }
 }

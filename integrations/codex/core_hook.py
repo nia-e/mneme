@@ -166,7 +166,7 @@ def _unavailable(target):
             "outcome": "unavailable", "cards": [], "total": None}
 
 
-def _pack(target, native, limit=MAX_SCOPE_BYTES):
+def _pack(target, native, limit=MAX_SCOPE_BYTES, *, include_contradictions=False):
     """Keep whole JSON cards, never a byte-sliced JSON or silently clipped field."""
     partial = native["truncated"]
     section = {"scope": target["scope"], "db": target["db"],
@@ -197,7 +197,39 @@ def _pack(target, native, limit=MAX_SCOPE_BYTES):
         section = candidate
     section["outcome"] = ("partial" if partial else
                           "ok" if section["cards"] else "empty")
+    # Cards have priority. Charge both the child metadata and rendered notice
+    # to the same envelope, rather than giving optional text another budget.
+    from memory import _contradiction_summary
+    summary = _contradiction_summary(native.get("contradiction_summary")) if include_contradictions else None
+    if summary is not None and summary.get("open_found", 0) > 0:
+        candidate = {**section, "contradiction_summary": summary}
+        if _section_bytes(candidate) <= limit:
+            section = candidate
     return section
+
+
+def _contradiction_line(section):
+    summary = section.get("contradiction_summary")
+    if summary is None:
+        return ""
+    count = str(summary["open_found"])
+    if summary["status"] == "partial":
+        count = "at least " + count
+    return f'{section["scope"]}: {count} open contradictions. `contradictions` to inspect.'
+
+
+def _section_bytes(section):
+    return len(_json(section).encode("utf-8")) + len(_contradiction_line(section).encode("utf-8"))
+
+
+def _notice_state(value):
+    if value is None:
+        return None
+    from hooks import _valid_id
+    if (not isinstance(value, dict) or set(value) != {"state_dir", "session_id"}
+            or not _valid_id(value["session_id"])):
+        raise ValueError("invalid contradiction notice session")
+    return {"state_dir": str(_absolute_path(value["state_dir"])), "session_id": value["session_id"]}
 
 
 def _registry_selection(config, cwd):
@@ -235,7 +267,8 @@ def _revalidate_config_guard(guard):
         raise ValueError("core configuration changed; select again")
 
 
-def _collect_registry_scope(selection, store, deadline, limit, *, config_guard=None, shared_work=None):
+def _collect_registry_scope(selection, store, deadline, limit, *, config_guard=None, shared_work=None,
+                            notice_state=None):
     from memory import BridgeError, _core_response
     from store_registry import revalidate
 
@@ -300,8 +333,29 @@ def _collect_registry_scope(selection, store, deadline, limit, *, config_guard=N
             args = {"db": chosen.db_alias, "max_body_bytes": body_limit}
             if chosen.db_id is not None:
                 args["expected_db_id"] = chosen.db_id
+            include_notice = False
+            if notice_state is not None and chosen.contradiction_notice:
+                from hooks import HookError, claim_contradiction_notice
+                try:
+                    # Catalog identity and selection have been checked. Claim
+                    # by actual owner, not its mutable name; release the lock
+                    # before the existing bounded native core request.
+                    include_notice = claim_contradiction_notice(
+                        Path(notice_state["state_dir"]), notice_state["session_id"], chosen.db_id)
+                except (HookError, OSError, ValueError, TypeError, RecursionError, OverflowError):
+                    pass  # Optional ledger failure must not hide core cards.
+                # State I/O is inside the original owner slice, not a reason
+                # to hand the subsequent native call an obsolete allowance.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                client.timeout = remaining
+            if include_notice:
+                args["include_contradictions"] = True
             native = _core_response(read("core", args), max_body_bytes=body_limit)
-            section = _pack(_registry_target(chosen), native, limit)
+            if not include_notice and "contradiction_summary" in native:
+                native = {key: value for key, value in native.items() if key != "contradiction_summary"}
+            section = _pack(_registry_target(chosen), native, limit, include_contradictions=include_notice)
             _revalidate_config_guard(config_guard)
             revalidate(selection, operation="core", store_name=store.name)
             return section
@@ -325,9 +379,10 @@ def _registry_child_main():
         if len(raw) > MAX_REGISTRY_REQUEST:
             raise ValueError("collector input exceeds size limit")
         request = json.loads(raw, object_pairs_hook=_unique_object)
-        if (not {"selection", "timeout"} <= set(request) or set(request) - {"selection", "timeout", "config_guard"}
+        if (not {"selection", "timeout"} <= set(request) or set(request) - {"selection", "timeout", "config_guard", "notice_state"}
                 or not _valid_timeout(request["timeout"])):
             raise ValueError("invalid registry collector request")
+        notice_state = _notice_state(request.get("notice_state"))
         deadline = time.monotonic() + request["timeout"]
         _revalidate_config_guard(request.get("config_guard"))
         witness = request["selection"]
@@ -351,11 +406,12 @@ def _registry_child_main():
             try:
                 section = _collect_registry_scope(selection, store, scope_deadline,
                                                   min(MAX_SCOPE_BYTES, remaining_bytes - 1),
-                                                  config_guard=request.get("config_guard"), shared_work=shared_work)
+                                                  config_guard=request.get("config_guard"), shared_work=shared_work,
+                                                  notice_state=notice_state)
             except (McpError, OSError, ValueError, KeyError, TypeError, RuntimeError):
                 section = _unavailable(target)
             line = _json(section)
-            remaining_bytes -= len(line.encode("utf-8")) + 1
+            remaining_bytes -= _section_bytes(section) + 1
             print(line, flush=True)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return 1
@@ -452,17 +508,29 @@ def _read_sections(raw, targets, *, limit=MAX_CHILD_OUTPUT):
     if not isinstance(raw, bytes) or len(raw) > limit:
         return []
     sections = []
+    remaining = limit
     # Only newline-terminated records were completely emitted by the child.
     for line, target in zip(raw.split(b"\n")[:-1], targets):
         try:
             value = json.loads(line)
             if (len(line) > MAX_SCOPE_BYTES or not isinstance(value, dict)
-                    or set(value) != {"scope", "db", "outcome", "cards", "total"}
+                    or not {"scope", "db", "outcome", "cards", "total"} <= set(value)
+                    or set(value) - {"scope", "db", "outcome", "cards", "total", "contradiction_summary"}
                     or value["scope"] != target["scope"] or value["db"] != target["db"]
                     or value["outcome"] not in ("ok", "empty", "partial", "unavailable")
                     or not isinstance(value["cards"], list)):
                 break
+            if "contradiction_summary" in value:
+                from memory import _contradiction_summary
+                summary = _contradiction_summary(value["contradiction_summary"])
+                if summary is None or summary.get("open_found", 0) == 0:
+                    del value["contradiction_summary"]
+            if _section_bytes(value) + 1 > min(MAX_SCOPE_BYTES + 1, remaining):
+                value.pop("contradiction_summary", None)
+            if _section_bytes(value) + 1 > min(MAX_SCOPE_BYTES + 1, remaining):
+                break
             sections.append(value)
+            remaining -= _section_bytes(value) + 1
         except (ValueError, UnicodeDecodeError):
             break
     return sections
@@ -486,7 +554,7 @@ def collect_core(targets, timeout=WALL_TIMEOUT):
     return sections + [_unavailable(target) for target in targets[len(sections):]]
 
 
-def collect_registry_core(selection, timeout=WALL_TIMEOUT, *, config_guard=None):
+def collect_registry_core(selection, timeout=WALL_TIMEOUT, *, config_guard=None, notice_state=None):
     """One killable collector and one byte budget for the entire selection."""
     if not _valid_timeout(timeout):
         raise ValueError("timeout must be finite and in (0, %g]" % WALL_TIMEOUT)
@@ -495,8 +563,10 @@ def collect_registry_core(selection, timeout=WALL_TIMEOUT, *, config_guard=None)
     witness = ({"schema": "mneme.native-core-selection.v1", "config_path": selection.registry_path,
                 "native_cli": selection.native_cli, "cwd": selection.cwd, "digest": selection.digest, "binary_pin": selection.binary_pin}
                if isinstance(selection, NativeSelection) else selection.to_dict())
-    payload = _json({"selection": witness, "timeout": timeout,
-                     "config_guard": config_guard}).encode("utf-8")
+    request = {"selection": witness, "timeout": timeout, "config_guard": config_guard}
+    if notice_state is not None:
+        request["notice_state"] = _notice_state(notice_state)
+    payload = _json(request).encode("utf-8")
     if len(payload) > MAX_REGISTRY_REQUEST:
         raise ValueError("selected core request exceeds byte limit")
     raw = b""
@@ -510,7 +580,7 @@ def collect_registry_core(selection, timeout=WALL_TIMEOUT, *, config_guard=None)
         pass
     targets = [_registry_target(store) for store in selection.core]
     sections = _read_sections(raw, targets, limit=MAX_REGISTRY_OUTPUT)
-    size = sum(len(_json(section).encode("utf-8")) + 1 for section in sections)
+    size = sum(_section_bytes(section) + 1 for section in sections)
     for target in targets[len(sections):]:
         section = _unavailable(target)
         required = len(_json(section).encode("utf-8")) + 1
@@ -527,7 +597,11 @@ def _registry_context(selection, sections):
             "current user instructions take precedence.\n")
     if any("created_utc" in card for section in sections for card in section["cards"]):
         text += "Dates are UTC whole seconds; created_utc is note creation, not freshness or verification.\n"
-    text += "\n".join(_json(section) for section in sections)
+    text += "\n".join(_json({key: value for key, value in section.items() if key != "contradiction_summary"})
+                       for section in sections)
+    notices = [_contradiction_line(section) for section in sections if "contradiction_summary" in section]
+    if notices:
+        text += "\n" + "\n".join(notices)
     omitted = len(selection.core) - len(sections)
     if omitted:
         text += "\n%d selected core store(s) omitted by the shared context budget." % omitted
@@ -590,7 +664,7 @@ def handle_event(event, config, timeout=WALL_TIMEOUT):
     return _context(collect_core(targets, timeout))
 
 
-def handle_selection(event, selection, timeout=WALL_TIMEOUT, *, config_guard=None):
+def handle_selection(event, selection, timeout=WALL_TIMEOUT, *, config_guard=None, notice_state=None):
     """Passive startup view of the same selection used by the async integration."""
     if not _eligible(event):
         return {}
@@ -599,7 +673,10 @@ def handle_selection(event, selection, timeout=WALL_TIMEOUT, *, config_guard=Non
         raise ValueError("core event workspace differs from selected workspace")
     _revalidate_config_guard(config_guard)
     selection = revalidate(selection)
-    sections = collect_registry_core(selection, timeout, config_guard=config_guard) if selection.core else []
+    options = {"config_guard": config_guard}
+    if notice_state is not None:
+        options["notice_state"] = _notice_state(notice_state)
+    sections = collect_registry_core(selection, timeout, **options) if selection.core else []
     # Earlier completed reads must not be delivered after a later owner waited
     # through selection revocation. No fallback selection is resolved here.
     _revalidate_config_guard(config_guard)
@@ -614,7 +691,15 @@ def handle_hook_event(event, config, timeout=WALL_TIMEOUT):
     from hooks import HookError
     guard = {"path": str(config["_config_path"]), "sha256": config["_registry_config_sha256"]}
     try:
-        result = handle_selection(event, selection(config), timeout, config_guard=guard)
+        selected = selection(config)
+        options = {"config_guard": guard}
+        # No opt-in means no extra state access, fields or owner work. Old
+        # standalone core configurations have no session ledger and stay out.
+        if any(store.contradiction_notice for store in selected.core):
+            from hooks import _valid_id
+            if "state_dir" in config and _valid_id(event.get("session_id")):
+                options["notice_state"] = {"state_dir": str(config["state_dir"]), "session_id": event["session_id"]}
+        result = handle_selection(event, selected, timeout, **options)
         selection(config)  # Includes separately authored project-purpose pins.
         return result
     except HookError as error:

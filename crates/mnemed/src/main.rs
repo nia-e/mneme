@@ -114,28 +114,26 @@ type Backend = (
     name = "mnemed",
     version,
     about = "A traversable memory graph for agents",
-    after_help = "Ordinary commands use the configured MCP owner: shared memory.toml configuration (user + project overlay) when present; --store NAME selects an admitted named store. Legacy project .mneme/cli.json remains an explicit pre-migration workflow when no declarative config exists. Missing or unavailable owners never fall back to opening a database. --db/MNEME_DB explicitly selects offline storage; --remote overrides enrollment. Bootstrap, creation, migration and index replacement retain explicit offline authority. See docs/remote-cli.md for connection configuration and deliberate surface differences.",
-    before_help = "START HERE\n  Read:      recall-context TEXT for bounded model context; episode list for the timeline; library catalog for enrolled projects.\n  Inspect:   tui for the memory observatory; get ID for node details; body ID for a bounded body range.\n  Write:     save TEXT for a note; save --kind episode TEXT for an experience; init sets up project memory and Codex hippocampus (use --no-recording to disable automatic recording); capture init with --db PATH explicitly initializes absent storage. Compatibility: capture add --input PATH and episode append --input PATH.\n  Curate:    edit-summary ID for guarded summary replacement; edit-body ID for guarded body replacement; retag ID for guarded complete tag replacement; concern --input PATH for bounded advisory maintenance; status, then reconcile or merge reviewed conflicts.\n  Maintain:  decay and prune are explicit edge sweeps.\n\nUse 'mnemed COMMAND --help' for arguments and recovery details."
+    after_help = "Uses the configured owner; unavailable owners never fall back to opening a database.\n--store NAME selects a configured store; --db PATH or MNEME_DB selects offline storage.\nRun 'mnemed COMMAND --help' for details; see docs/remote-cli.md for connection setup.",
+    before_help = "EXAMPLES\n  mnemed save \"a useful note\"\n  mnemed recall-context \"topic\"\n  mnemed get NODE_ID\n  mnemed tui"
 )]
 struct Cli {
-    /// Explicit offline database path; bypasses the configured owner.
-    /// Otherwise use the project owner, or the global owner with --user.
+    /// Use an offline database instead of the configured owner.
     #[arg(long, global = true, env = "MNEME_DB")]
     db: Option<PathBuf>,
-    /// Use the configured global owner, never project enrollment. With --remote,
-    /// select registry entry user. Explicit --db remains an offline override.
+    /// Use the configured private user owner; --db overrides.
     #[arg(long, global = true)]
     user: bool,
     /// Emit JSON instead of human-readable text.
     #[arg(long, global = true)]
     json: bool,
-    /// Shared declarative memory configuration; defaults to ~/.config/mneme/memory.toml.
+    /// Memory configuration (default: ~/.config/mneme/memory.toml).
     #[arg(long, global = true, conflicts_with_all = ["db", "remote"])]
     memory_config: Option<PathBuf>,
-    /// Deliberate named-store access within the current profile/exclusion boundary.
+    /// Select a configured store within the current profile and exclusions.
     #[arg(long, global = true, conflicts_with_all = ["db", "remote", "user"])]
     store: Option<String>,
-    /// Narrow selection with the shared default, private or isolated profile.
+    /// Select the default, private or isolated profile.
     #[arg(long, global = true, conflicts_with_all = ["db", "remote"])]
     profile: Option<String>,
     #[command(flatten)]
@@ -197,90 +195,125 @@ fn project_db() -> std::io::Result<PathBuf> {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect shared configuration or invoke a bounded, selection-pinned native operation.
+    /// Inspect configuration and run native operations.
+    ///
+    /// Native operations are bounded and pinned to the selected stores.
     Config(cli_config::ConfigArgs),
     /// Internal bounded local MCP client process.
     #[command(hide = true)]
     Client(cli_client::ClientArgs),
-    /// Read an immutable memory-library generation without opening a local database.
+    /// Read a memory-library snapshot.
+    ///
+    /// Reads an immutable generation without opening a local database.
     Library(cli_library::LibraryArgs),
-    /// Open the read-only memory observatory (or use --demo).
+    /// Browse memory in a read-only terminal interface.
+    ///
+    /// Use --demo to explore without a store.
     Tui(cli_tui::TuiArgs),
-    /// List known configured sources without connecting or opening databases.
+    /// List configured stores without connecting.
     Stores(cli_sources::StoresArgs),
-    /// Plan/apply an explicit offline lexical tag-format migration; never routes to a live owner.
+    /// Plan or apply an offline tag-format migration.
+    ///
+    /// Requires explicit offline authority; never routes to a live owner.
     TagFormatMigration(cli_tag_format_migration::TagFormatMigrationArgs),
-    /// Ask the existing remote owner to create a library snapshot.
+    /// Create a library snapshot on the remote owner.
     Snapshot {
         #[command(subcommand)]
         action: SnapshotAction,
     },
-    /// Inspect repository bootstrap and store state without mutation.
+    /// Inspect repository setup without opening a store.
     ///
     /// Classify bootstrap/store state without opening or creating a database,
     /// loading an embedder, or creating a lease inode.
     BootstrapInspect(bootstrap::BootstrapInspectArgs),
-    /// Create an approved greenfield repository memory generation.
+    /// Create an approved greenfield memory generation.
     ///
     /// Validate an approved greenfield repo-sync plan, construct it in a private
     /// generation, and atomically activate it. Managed refresh remains refused.
     BootstrapCreate(bootstrap::BootstrapCreateArgs),
-    /// Create or adopt a local project store, its owner, and Codex hippocampus. Never publishes.
+    /// Set up project memory and Codex recording.
+    ///
+    /// Creates or adopts a local project store, its owner, and Codex hippocampus.
+    /// Never publishes. Use --no-recording to disable automatic recording.
     Init(cli_init::InitArgs),
-    /// Experimental raw node ingestion; ordinary manual saving uses `save`.
+    /// Ingest a raw node (experimental).
+    ///
+    /// Use `save` for ordinary notes and experiences.
     Ingest(cli_ingest::IngestArgs),
-    /// Save a note or experience to an existing current database; never creates or upgrades.
+    /// Save a note or experience.
+    ///
+    /// Requires an existing current database; never creates or upgrades one.
     Save(cli_save::SaveArgs),
-    /// List bounded concern pages or record guarded advisory findings (no reconciliation).
+    /// List or record advisory concerns.
+    ///
+    /// Pages are bounded; writes are guarded. Does not reconcile findings.
     Concern(cli_concern::ConcernArgs),
-    /// Compare and replace the complete inspected tag set of an existing node.
+    /// Replace a memory's tags with a revision guard.
+    ///
+    /// Compares and replaces the complete inspected tag set of an existing node.
     Retag(cli_retag::RetagArgs),
-    /// Replace only a note body with an inspected revision guard. No replay/history promise.
+    /// Replace a note body with a revision guard.
+    ///
+    /// Replaces only the body. No replay or history promise.
     EditBody(cli_edit_body::EditBodyArgs),
-    /// Guarded semantic summary replacement with atomic retrieval embedding refresh.
+    /// Replace a summary with a revision guard.
+    ///
+    /// Refreshes the retrieval embedding atomically.
     EditSummary(cli_edit_summary::EditSummaryArgs),
-    /// Initialize or inspect explicit storage, or use the compatibility sourced-capture path.
+    /// Initialize storage or use legacy sourced capture.
+    ///
+    /// Initializes or inspects explicit storage. `capture add` is the compatibility
+    /// sourced-capture path; use `save` for ordinary notes and experiences.
     Capture {
         #[command(subcommand)]
         action: cli_capture::CaptureAction,
     },
-    /// Read/edit experiences; `episode append` is a compatibility save path.
-    /// Ordinary context recall includes typed episodes; semantic ranking and decay do not.
+    /// Read or edit recorded experiences.
+    ///
+    /// `episode append` is a compatibility save path. Ordinary context recall
+    /// includes typed episodes; semantic ranking and decay do not.
     Episode {
         #[command(subcommand)]
         action: cli_episode::EpisodeAction,
     },
+    /// Build an offline successor without activating it.
+    ///
     /// Build a detached named successor; defaults to single-graph-v1 from
     /// capture/episode predecessors. Use --target-generation concern-v1 for
     /// single-graph-v1, episode-context-v2 for concern-v1, and touchstones-v1
     /// for episode-context-v2 predecessors.
     /// The source is retained, not activated.
     SingleGraphUpgrade(cli_single_graph_upgrade::SingleGraphUpgradeArgs),
-    /// Show a node — and, on request, a bounded body range and/or edge prefix.
-    Get(GetArgs),
-    /// Read a bounded body range (use `get --body` alongside node details).
+    /// Show a memory; optionally include body and edges.
     ///
+    /// Body ranges and edge prefixes are bounded.
+    Get(GetArgs),
+    /// Read a bounded page of a memory body.
+    ///
+    /// Use `get --body` alongside node details.
     /// `body --raw` is an explicit unbounded escape hatch, incompatible with
     /// `--json` and range options.
     Body(BodyArgs),
-    /// List a node's neighbors, for walking the graph.
+    /// List a memory's neighbors.
     Neighbors(NeighborsArgs),
-    /// Page through cross-database edges from one local node.
+    /// List a memory's cross-database links.
     Remote(RemoteArgs),
-    /// Diagnostic raw retrieval; use `recall-context` for bounded model context.
+    /// Inspect raw search results.
     ///
     /// Searches ANN seeds and spreads activation through the graph.
+    /// Use `recall-context` for bounded model context.
     Query(QueryArgs),
-    /// Bounded model-context JSON; use `query` to inspect raw retrieval.
+    /// Recall bounded context as JSON.
     ///
     /// Retrieves semantic memories and lexical or linked scenes into bounded JSON.
+    /// Use `query` to inspect raw retrieval.
     /// Both lane capacities follow --max-nodes and share the byte budget.
     /// Links preserve exact historical accounts. Partial windows and
     /// omissions are explicit. This command is always JSON; `--json` is unnecessary.
     RecallContext(RecallContextArgs),
-    /// Browse a bounded page of stored nodes, or the native touchstone collection.
+    /// List memories, tags or touchstones.
     List(ListArgs),
-    /// Create (or overwrite) an edge between two nodes.
+    /// Create or replace a link between memories.
     Link(LinkArgs),
     /// Resolve a contradiction: winner supersedes loser.
     Supersede {
@@ -316,26 +349,30 @@ enum Command {
     /// weaken it. Direct CLI feedback is neither receipt-bound nor idempotent;
     /// callers must not replay an ambiguous invocation.
     Feedback(FeedbackArgs),
-    /// List open merge candidates awaiting the merge pass.
+    /// List open merge candidates.
     Merges,
-    /// Adjudicate a merge candidate (the acting half of the merge overlay).
+    /// Resolve a merge candidate.
     Merge {
         #[command(subcommand)]
         action: MergeAction,
     },
-    /// Walk the graph from a node in a bounded traversal shell.
+    /// Explore links in a bounded traversal shell.
     ///
     /// Drop into a bounded traversal shell from a start node — the sandbox a
     /// retrieval sub-agent is given instead of this full binary. Movement is
     /// read-only and free within the node budget; `done <used-id...>` explicitly
     /// reflects over the completed trail, while abort/EOF trains nothing.
     Repl(ReplArgs),
-    /// Print the always-loaded core set.
+    /// Print always-loaded core memories.
     ///
     /// Print the always-loaded core set — every node tagged `core`, with its body
     /// — for injecting into context at session start. Core nodes never decay.
-    Core,
-    /// Delete a node and its edges and vector.
+    Core {
+        /// Include a bounded summary of open contradictions.
+        #[arg(long)]
+        include_contradictions: bool,
+    },
+    /// Delete a memory and its links.
     ///
     /// Forget a node outright — drop it, its edges, and its vector. Edge decay
     /// never archives or forgets a node.
@@ -357,15 +394,19 @@ enum Command {
     Reembed,
     /// Run a bounded edge-decay sweep (cold path).
     Decay,
-    /// Density GC (cold path): delete never-validated similarity edges and
-    /// weaken over-connected nodes' weakest edges.
+    /// Prune weak or excess graph edges.
+    ///
+    /// Delete weak unvalidated edges and the weakest associations of
+    /// over-connected nodes. Density pruning can delete validated edges.
     Prune,
-    /// Show counts and pending curation and maintenance work.
+    /// Show counts and pending maintenance.
     ///
     /// Maintenance snapshot: counts + what's due (contradictions, merges,
     /// and edge decay).
     Status,
-    /// Seed sample data and print a walkthrough (ephemeral; ignores --db).
+    /// Try an ephemeral sample graph.
+    ///
+    /// Seeds sample data and prints a walkthrough; ignores --db.
     Demo {
         #[arg(long)]
         query: Option<String>,
@@ -1049,13 +1090,20 @@ async fn main() -> Result<(), AnyErr> {
             return Err(error);
         }
         let tool = request.tool();
-        let (arguments, response_check) = request.into_submission()?;
+        let (mut arguments, response_check) = request.into_submission()?;
+        let contradiction_summary_requested = tool == "core"
+            && mneme_app::core::prepare_remote_arguments(&mut arguments, client.tool_catalog());
         let result = tokio::select! {
             result = client.call_tool(tool, arguments) => result,
             _ = tokio::signal::ctrl_c() => Err("remote operation interrupted; a submitted write may have completed; do not blindly retry".into()),
         };
         client.close().await;
-        let result = result.map_err(|error| error.to_string())?;
+        let mut result = result.map_err(|error| error.to_string())?;
+        mneme_app::core::complete_remote_result(
+            &mut result,
+            contradiction_summary_requested,
+            mneme_mcp_client::MAX_TOOL_TEXT_BYTES,
+        );
         if let Some(owner) = &selected.owner {
             owner.check_result(response_check.access(), &result, &remote.database)?;
         }
@@ -2412,7 +2460,9 @@ async fn dispatch(
             Ok(true)
         }
         Command::Status => cmd_status(mem, json).await,
-        Command::Core => cmd_core(mem, json).await,
+        Command::Core {
+            include_contradictions,
+        } => cmd_core(mem, json, include_contradictions).await,
         Command::Forget { id } => {
             let existed = mem.forget(ColdPath::acquire(), parse_id(&id)?).await?;
             if existed {
@@ -3355,8 +3405,11 @@ fn core_node_json(node: &Node, body: Option<String>) -> Value {
     })
 }
 
-async fn cmd_core(mem: &Memory, json: bool) -> Result<bool, AnyErr> {
+async fn cmd_core(mem: &Memory, json: bool, include_contradictions: bool) -> Result<bool, AnyErr> {
     let nodes = mem.core(ColdPath::acquire()).await?;
+    let summary = mneme_app::core::CoreOptions::new(include_contradictions)
+        .contradiction_summary(mem)
+        .await;
     if json {
         let mut arr = Vec::with_capacity(nodes.len());
         for n in &nodes {
@@ -3367,7 +3420,11 @@ async fn cmd_core(mem: &Memory, json: bool) -> Result<bool, AnyErr> {
                 .map(|b| String::from_utf8_lossy(&b).into_owned());
             arr.push(core_node_json(n, body));
         }
-        print_json(&json!(arr));
+        if let Some(summary) = &summary {
+            print_json(&json!({"nodes": arr, "contradiction_summary": summary}));
+        } else {
+            print_json(&json!(arr));
+        }
     } else if nodes.is_empty() {
         println!("(no core memory — tag a node `core` to bless it as always-loaded)");
     } else {
@@ -3382,6 +3439,9 @@ async fn cmd_core(mem: &Memory, json: bool) -> Result<bool, AnyErr> {
             }
             println!();
         }
+    }
+    if !json && let Some(summary) = summary {
+        println!("{summary}");
     }
     Ok(false)
 }

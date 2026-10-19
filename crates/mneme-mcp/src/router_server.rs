@@ -445,6 +445,7 @@ impl Route {
         let capture = replica.as_ref().map(snapshot_metadata);
         let outcome: Result<Value, AnyErr> = async {
         args["db"] = json!(self.native_db(replica.as_ref()));
+        let core_notice_requested = name == "core" && mneme_app::core::prepare_remote_arguments(&mut args, &self.tools);
         params["arguments"] = args;
         let options = self.options(replica.as_ref());
         let mut guard = self
@@ -477,7 +478,11 @@ impl Route {
             session.client.raw_rpc("tools/call", params).await.map_err(
                 |_| "upstream call failed; outcome may be ambiguous, no automatic replay",
             )?;
-        let wrapped = response::wrap(native, &self.name, capture.as_ref()).map_err(|_|"upstream call completed but its response could not be represented; outcome may be ambiguous, no automatic replay")?;
+        let wrapped = if name == "core" {
+            response::wrap_core(native, &self.name, capture.as_ref(), core_notice_requested)
+        } else {
+            response::wrap(native, &self.name, capture.as_ref())
+        }.map_err(|_|"upstream call completed but its response could not be represented; outcome may be ambiguous, no automatic replay")?;
         if let Some(request) = checked_retag.as_ref() {
             if wrapped["isError"] != true {
                 let envelope: Value = serde_json::from_str(wrapped["content"][0]["text"].as_str().ok_or("invalid retag response")?)?;

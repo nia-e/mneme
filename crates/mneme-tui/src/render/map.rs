@@ -17,6 +17,25 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
+/// The empty canvas and narrow inspector share the same read-state truth.
+pub(super) fn empty_message(app: &App) -> &'static str {
+    if app.error.is_some() {
+        "Map unavailable · r retries"
+    } else if app.busy && app.last_refresh.is_none() {
+        "Reading this source…"
+    } else if app.hide_archived && !app.graph.nodes.is_empty() {
+        "No selectable memories · archived hidden.\nh shows archived nodes."
+    } else if app.last_refresh.is_none() && !app.demo {
+        "Map not loaded · r reads this source"
+    } else if app.graph.partial {
+        "No memories returned · partial view.\nr retries"
+    } else if !app.query.trim().is_empty() {
+        "No memories match this search.\n/ try another thought"
+    } else {
+        "No memories in this field."
+    }
+}
+
 pub(super) fn draw(frame: &mut Frame<'_>, body: Rect, app: &App) {
     app.layout.borrow_mut().camera.index_only = false;
     if body.width >= 84 {
@@ -600,12 +619,8 @@ fn constellation(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if app.edge_lens.is_none() {
         islands::labels(frame, sky, &island_marks);
     }
-    if count == 0 {
-        let message = if app.busy {
-            "opening the lens…"
-        } else {
-            "No memories in this field.  / search another thought"
-        };
+    if count == 0 || nodes.iter().all(|node| !app.node_selectable(node)) {
+        let message = empty_message(app);
         frame.render_widget(
             Paragraph::new(message)
                 .style(Style::default().fg(DIM))

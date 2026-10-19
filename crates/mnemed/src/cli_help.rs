@@ -6,62 +6,79 @@ use clap::{CommandFactory, Parser, error::ErrorKind};
 
 #[test]
 fn root_help_keeps_the_complete_generated_catalog() {
-    let mut catalog = Cli::command();
+    let catalog = Cli::command();
     let names: Vec<_> = catalog
         .get_subcommands()
         .filter(|command| !command.is_hide_set())
         .map(|command| command.get_name().to_owned())
         .collect();
-    let help = catalog.render_help().to_string();
-    assert!(
-        !help
-            .lines()
-            .any(|line| line.trim_start().starts_with("client ")),
-        "hidden integration command leaked into root help"
-    );
+    for flag in ["-h", "--help"] {
+        let error = Cli::try_parse_from(["mnemed", flag])
+            .err()
+            .expect("help is not an operation");
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with("client ")),
+            "hidden integration command leaked into root help"
+        );
 
-    for name in &names {
-        let matches = help
-            .lines()
-            .filter(|line| line.trim_start().starts_with(&format!("{name} ")))
-            .count();
-        assert_eq!(matches, 1, "{name} missing or duplicated in root help");
+        for name in &names {
+            let matches = help
+                .lines()
+                .filter(|line| line.trim_start().starts_with(&format!("{name} ")))
+                .count();
+            assert_eq!(matches, 1, "{name} missing or duplicated in root help");
+        }
+        assert_eq!(
+            names.iter().filter(|name| name.as_str() != "help").count(),
+            41,
+            "review the workflow guide when commands change"
+        );
+        let examples = help
+            .split_once("EXAMPLES\n")
+            .expect("ordinary examples")
+            .1
+            .split_once("\n\n")
+            .expect("examples end before the generated catalog")
+            .0;
+        assert_eq!(examples.lines().count(), 4);
+        for command in [
+            "mnemed save \"a useful note\"",
+            "mnemed recall-context \"topic\"",
+            "mnemed get NODE_ID",
+            "mnemed tui",
+        ] {
+            assert!(examples.contains(command), "missing example {command}");
+        }
+        for command in [
+            "stores",
+            "edit-summary",
+            "edit-body",
+            "retag",
+            "tag-format-migration",
+        ] {
+            assert!(names.iter().any(|name| name == command));
+        }
+        assert!(
+            Cli::try_parse_from(["mnemed", "stores", "--config", "/metadata/library.json"]).is_ok()
+        );
+        assert!(!help.contains("episode-upgrade"));
+        assert!(!help.contains("upgrade-index"));
+        assert!(!help.contains("consolidate"));
+        assert!(!help.contains("START HERE"));
+        assert!(!help.contains("--target-generation"));
+        assert!(help.contains("unavailable owners never fall back to opening a database"));
+        assert!(help.contains("--db PATH or MNEME_DB selects offline storage"));
+        assert!(help.contains("docs/remote-cli.md"));
+        assert!(help.len() < 6000, "root help grew back into an essay");
+        assert!(
+            help.lines().count() <= 80,
+            "root help gained expanded boilerplate"
+        );
     }
-    assert_eq!(
-        names.iter().filter(|name| name.as_str() != "help").count(),
-        41,
-        "review the workflow guide when commands change"
-    );
-    for heading in ["Read:", "Inspect:", "Write:", "Curate:", "Maintain:"] {
-        assert!(help.contains(heading), "missing workflow heading {heading}");
-    }
-    assert!(help.contains("recall-context TEXT"));
-    assert!(help.contains("episode list"));
-    assert!(help.contains("library catalog"));
-    assert!(names.iter().any(|name| name == "stores"));
-    assert!(
-        Cli::try_parse_from(["mnemed", "stores", "--config", "/metadata/library.json"]).is_ok()
-    );
-    assert!(help.contains("get ID"));
-    assert!(help.contains("body ID"));
-    assert!(help.contains("save TEXT"));
-    assert!(help.contains("concern --input PATH"));
-    assert!(help.contains("edit-body ID"));
-    assert!(help.contains("edit-summary ID"));
-    assert!(names.iter().any(|name| name == "edit-summary"));
-    assert!(names.iter().any(|name| name == "edit-body"));
-    assert!(help.contains("retag ID"));
-    assert!(names.iter().any(|name| name == "retag"));
-    assert!(help.contains("capture init"));
-    assert!(help.contains("capture add --input PATH"));
-    assert!(help.contains("episode append --input PATH"));
-    assert!(help.contains("single-graph-upgrade"));
-    assert!(names.iter().any(|name| name == "tag-format-migration"));
-    assert!(!help.contains("episode-upgrade"));
-    assert!(!help.contains("upgrade-index"));
-    assert!(!help.contains("consolidate"));
-    assert!(help.contains(".mneme/cli.json"));
-    assert!(help.contains("unavailable owners never fall back to opening a database"));
 }
 
 #[test]
@@ -70,6 +87,19 @@ fn nested_help_preserves_command_specific_contracts_without_opening_a_store() {
         ("recall-context", "always JSON"),
         ("body", "unbounded escape hatch"),
         ("query", "ANN seeds"),
+        ("save", "never creates or upgrades"),
+        ("init", "--no-recording"),
+        ("capture", "compatibility"),
+        ("episode", "semantic ranking and decay do not"),
+        (
+            "single-graph-upgrade",
+            "The source is retained, not activated",
+        ),
+        ("single-graph-upgrade", "episode-context-v2 for concern-v1"),
+        ("tag-format-migration", "never routes to a live owner"),
+        ("migrate", "<db>.snapshot.bak"),
+        ("reembed", "<db>.reembed.bak"),
+        ("feedback", "must not replay an ambiguous invocation"),
     ] {
         let error = match Cli::try_parse_from(["mnemed", command, "--help"]) {
             Ok(_) => panic!("{command} --help unexpectedly parsed as an operation"),
@@ -105,6 +135,13 @@ fn nested_help_preserves_command_specific_contracts_without_opening_a_store() {
 
 #[test]
 fn workflow_guide_does_not_change_parser_or_legacy_alias() {
+    for args in [
+        vec!["mnemed", "save", "a useful note"],
+        vec!["mnemed", "get", "NODE_ID"],
+        vec!["mnemed", "tui"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_ok());
+    }
     assert!(matches!(
         Cli::try_parse_from(["mnemed", "recall-context", "needle"])
             .unwrap()
@@ -147,5 +184,28 @@ fn retired_whole_graph_communities_dump_is_not_callable() {
             Cli::try_parse_from(args).err().unwrap().kind(),
             ErrorKind::InvalidSubcommand
         );
+    }
+}
+
+#[test]
+fn help_is_available_before_owner_selection_in_all_output_modes() {
+    for prefix in [
+        vec!["mnemed"],
+        vec!["mnemed", "--json"],
+        vec!["mnemed", "--db", "/absent/memory.db"],
+        vec!["mnemed", "--remote", "http://127.0.0.1:1"],
+        vec!["mnemed", "--store", "not-configured"],
+    ] {
+        for suffix in [
+            vec!["--help"],
+            vec!["save", "--help"],
+            vec!["query", "--help"],
+        ] {
+            let args = prefix.iter().chain(&suffix).copied().collect::<Vec<_>>();
+            let error = Cli::try_parse_from(args)
+                .err()
+                .expect("help is not an operation");
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        }
     }
 }

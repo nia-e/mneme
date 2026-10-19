@@ -257,7 +257,7 @@ impl RetrievalPolicyInput<'_> {
 
         let mut hash = Sha256::new();
         hash.update(
-            b"mneme:rank-only-v6\0semantic-corpus-only\0precise-graph-fusion-direct-winner-ties\0conditional-target-fair-entry-v1\0",
+            b"mneme:rank-only-v7\0semantic-corpus-only\0precise-graph-fusion-direct-winner-ties\0conditional-target-fair-entry-v1\0dense-floor-before-hybrid-fusion-v1\0",
         );
         hash.update(retrieval_index_semantics_fingerprint(
             index_set.vector_semantics,
@@ -330,7 +330,7 @@ impl RetrievalPolicyInput<'_> {
         }
 
         RetrievalPolicyVersion {
-            contract: "rank-only-v6",
+            contract: "rank-only-v7",
             fingerprint: hash.finalize().into(),
         }
     }
@@ -422,7 +422,7 @@ mod tests {
         };
         let check = |name: &str, input: RetrievalPolicyInput<'_>| {
             let stamp = memory.retrieval_policy_stamp(input);
-            assert_eq!(stamp.retrieval_policy.as_str(), "rank-only-v6");
+            assert_eq!(stamp.retrieval_policy.as_str(), "rank-only-v7");
             assert_eq!(
                 stamp.index_set.embedding,
                 EmbeddingFingerprint::new("ordering-fixture", 4, "l2-f32-v1", "symmetric-v1")
@@ -459,26 +459,26 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
-            // Captured from the pre-extraction implementation. These are byte-format
-            // compatibility fixtures, not merely pairwise inequality checks.
+            // Frozen v7 vectors independently encoded from these inputs, with
+            // the encoder cross-checked against the prior frozen v6 vectors.
             let expected = match name {
                 "untagged-dense" => {
-                    "61853bdc5b9a66ec5c9b249e7b737f295d3ab93d6e89e1bfd45b2724af26a48d"
+                    "c45ecd384da11d4fbd49ba4e74acc6af5d1301430fd2975c0fdae4b5bc2cfebf"
                 }
                 "untagged-sparse" => {
-                    "06939bc594f957443313bb18b130a2f50ef3f39f55966314fdfb029a26933b94"
+                    "e075f08d9ad01982dd0e27140bf5478384a5127df7f51619cd357731f2cf6000"
                 }
                 "untagged-all-legs" => {
-                    "82ea787b1effdf886e77cbf429322040e601e66bcb65dc3a45b064f568460fc3"
+                    "3ddeaa0bf86ad9c0ddf766fc2818542690158d61354b7437851c6acc7933fb9d"
                 }
                 "tagged-exact" => {
-                    "098aa0f752037b1b9739bf656988f2a7623cc11b394e5b52415871401b4882ad"
+                    "6098c384678d5f6b1e0c314e37bf5ce1f0be556b8b1ab72ba63fb93498377259"
                 }
                 "tagged-deterministic" => {
-                    "b95ad75550cdffacbb5bc5ba4b83e6088cf83a0af7a245a82bff338582551db2"
+                    "a14272f93a4ef44821fd2700dde369b97b925236d86ab5cfb4c472f061e3163b"
                 }
                 "tagged-hybrid" => {
-                    "62f48ecbef05ae5bcf891c4930e0dc49b99210c76f0b2827c60264b09e0aa50a"
+                    "91a44f56c89eddae1b7fd8dfb9f56bb745ae34d5a19176fcc2105ebdcc680f7c"
                 }
                 _ => unreachable!("unknown policy fixture"),
             };

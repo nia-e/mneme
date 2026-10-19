@@ -70,6 +70,23 @@ or a timestamp inferred from another source. Companions supplied by an owner
 must agree with its numeric timestamps. Context byte budgets and observation
 hashes include the actual rendered companions.
 
+### Optional core notice
+
+`mnemed core --include-contradictions` (MCP `core` with
+`include_contradictions: true`) adds a small summary of legacy contradiction
+flags. It scans at most 256 flag rows with a 100 ms deadline, without maintenance or
+reinforcing memories. `complete` means the scan reached the end; `open_found`
+counts unresolved flags. `partial` reports only what the bounded prefix found,
+not a store total; `unavailable` is not zero.
+Failures of this optional read do not discard the core cards. If its metadata
+would exceed a response byte limit, the summary is omitted instead; consumers
+treat that omission as unavailable.
+
+The default output is unchanged. Local `--json` with the flag returns
+`{nodes, contradiction_summary}` instead of the default node array; remote JSON
+already uses a core envelope. Older owners without support still return cards
+with an unavailable summary, without a second core read.
+
 ### Save and retry
 
 SAVE needs an existing current store. It does not initialize or upgrade storage.

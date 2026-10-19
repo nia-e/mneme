@@ -172,11 +172,18 @@ impl ConfiguredServer {
                     Box::pin(self.client.call(alias,tool,forwarded)).await
                 }.await;
                 Ok(match outcome {
-                    Ok(result) => crate::response::tool_success(&router_response::envelope(
-                        alias,
-                        result.get("_mneme_source"),
-                        result.clone(),
-                    )),
+                    Ok(result) => {
+                        let wrapped = router_response::envelope(
+                            alias,
+                            result.get("_mneme_source"),
+                            result.clone(),
+                        );
+                        if tool == "core" {
+                            crate::response::core_tool_success(&wrapped)
+                        } else {
+                            crate::response::tool_success(&wrapped)
+                        }
+                    }
                     Err(error) => router_response::refusal(alias, None, &error.to_string()),
                 })
             }

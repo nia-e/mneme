@@ -63,7 +63,8 @@ const SUPPORTED_PROTOCOLS: &[&str] = &[PROTOCOL_VERSION, "2025-06-18", "2025-03-
 const MAX_WIRE_BYTES: usize = 2 * 1024 * 1024;
 const CODEX_REQUEST_BYTES: usize = 128 * 1024;
 const CODEX_RESPONSE_BYTES: usize = 512 * 1024;
-const MAX_TOOL_TEXT_BYTES: usize = 256 * 1024;
+/// Maximum decoded native tool text accepted from one owner response.
+pub const MAX_TOOL_TEXT_BYTES: usize = 256 * 1024;
 const MAX_TOOLS: usize = 1024;
 const MAX_CATALOG_PAGES: usize = 16;
 const SSH_READY_TIMEOUT: Duration = Duration::from_secs(10);

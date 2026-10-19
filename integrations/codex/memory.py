@@ -159,6 +159,22 @@ def get(client, identifier, *, db="project", max_body_bytes=64 * 1024):
     return value
 
 
+def _contradiction_summary(value):
+    """Optional read metadata is never authority and never invalidates cards."""
+    if not isinstance(value, dict):
+        return None
+    if value == {"status": "unavailable"}:
+        return value
+    if (set(value) != {"status", "open_found", "rows_scanned"}
+            or value.get("status") not in ("complete", "partial")
+            or type(value.get("open_found")) is not int
+            or type(value.get("rows_scanned")) is not int
+            or not 0 <= value["open_found"] <= value["rows_scanned"] <= 256
+            or (value["status"] == "complete") != (value["rows_scanned"] < 256)):
+        return None
+    return value
+
+
 def _core_response(value, *, max_body_bytes=DEFAULT_CORE_BODY_BYTES):
     """Validate native core bounds without hiding its partial-read metadata."""
     max_body_bytes = _body_limit(max_body_bytes)
@@ -216,9 +232,17 @@ def _core_response(value, *, max_body_bytes=DEFAULT_CORE_BODY_BYTES):
             or value["bodies_truncated"] != bodies_truncated
             or value["truncated"] != (nodes_truncated or bodies_truncated)):
         raise BridgeError(malformed, operation="core")
+    # Native receive accounting still charges the complete response. Invalid
+    # optional metadata must not invalidate independently checked core cards.
+    if "contradiction_summary" in value and _contradiction_summary(value["contradiction_summary"]) is None:
+        value = {key: item for key, item in value.items() if key != "contradiction_summary"}
     try:
         encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=False,
                              allow_nan=False).encode("utf-8")
+        if len(encoded) > MAX_CORE_RESPONSE_BYTES and "contradiction_summary" in value:
+            value = {key: item for key, item in value.items() if key != "contradiction_summary"}
+            encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=False,
+                                 allow_nan=False).encode("utf-8")
     except (TypeError, ValueError, RecursionError) as error:
         raise BridgeError(malformed, operation="core") from error
     if len(encoded) > MAX_CORE_RESPONSE_BYTES:

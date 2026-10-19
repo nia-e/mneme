@@ -9,6 +9,7 @@ use mneme_core::ports::{
 use mneme_core::{BodyRef, Provenance};
 
 mod capture;
+mod contradiction_summary;
 mod touchstones;
 
 fn active_node(id: NodeId) -> Node {

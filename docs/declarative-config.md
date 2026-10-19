@@ -72,9 +72,10 @@ generation) invalidates that selection: restart configured MCP processes/start
 fresh sessions and reassess queued work after activating a new generation. A
 symlink is not a live hot-reload mechanism.
 
-Be deliberate about grants: omitted permissions, delivery and per-store background
-switches have enabled defaults. A minimal example is not a scope-preserving
-migration of an older installation.
+Be deliberate about grants: omitted permissions, core/context delivery and
+per-store background switches have enabled defaults. Contradiction notices are
+off by default. A minimal example is not a scope-preserving migration of an older
+installation.
 
 ### Independent controls
 
@@ -82,6 +83,12 @@ migration of an older installation.
 - `delivery.core` controls passive startup core independently of background work.
 - `delivery.context` controls task context. `background.recall` enables its
   asynchronous collection; `background.record` enables automatic recording.
+- `delivery.contradiction_notice = true` opts one owner into a brief unresolved-
+  contradiction notice in the session-scoped startup core hook, at most once per
+  owner/session across startup, resume and compact. It defaults to `false` and
+  requires that owner's existing core/read eligibility, not background recording.
+  The standalone core hook's `--config` mode does not issue these notices. The
+  preference grants no additional owner access.
 - `[background].enabled = false` disables paid/background work, not manual reads
   or passive core. Per-store flags narrow native grants; they cannot expand them.
 - `[workspace] profile = "isolated"` admits only explicitly allowlisted stores and

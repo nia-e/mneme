@@ -79,13 +79,9 @@ pub(super) fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let inside = area;
     let Some(node) = app.selected_node() else {
         frame.render_widget(
-            Paragraph::new(if app.hide_archived && !app.graph.nodes.is_empty() {
-                "No selectable memories · archived hidden.\n\nh shows archived nodes; the loaded inventory is unchanged."
-            } else {
-                "A lens, not the whole sky.\n\nFind a thought with /, then follow its connections."
-            })
-            .style(Style::default().fg(DIM))
-            .wrap(Wrap { trim: true }),
+            Paragraph::new(super::map::empty_message(app))
+                .style(Style::default().fg(DIM))
+                .wrap(Wrap { trim: true }),
             inside,
         );
         return;
@@ -98,8 +94,6 @@ pub(super) fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if !app.show_details {
         let groups = app.layout.borrow_mut().groups(&app.graph);
         let mut lines = vec![
-            Line::from(s("i  open memory · e  edges", DIM)),
-            Line::default(),
             Line::from(s(single(card_title(app, node)), MINT).add_modifier(Modifier::BOLD)),
             Line::default(),
             Line::from(s(
@@ -211,7 +205,6 @@ pub(super) fn inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ),
             islands::color(group.id, true),
         )));
-        lines.push(Line::from(s("Grouped from loaded weighted links; any name comes from an existing tag. Not a stored community or semantic-distance claim.", DIM)));
         lines.push(Line::default());
     }
     lines.push(Line::from(s("── THREADS", DIM)));
@@ -511,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_compact_controls_precede_summary_and_are_not_duplicated() {
+    fn compact_inspector_starts_with_memory_not_repeated_controls() {
         let hint = "i  open memory · e  edges";
         for selected in [0, 1] {
             let text = rendered_pane("supersedes", selected, Pane::Compact);
@@ -520,8 +513,8 @@ mod tests {
             } else {
                 "target memory"
             };
-            assert!(text.find(hint).unwrap() < text.find(summary).unwrap());
-            assert_eq!(text.matches(hint).count(), 1);
+            assert!(text.contains(summary));
+            assert!(!text.contains(hint));
             for pane in [Pane::Details, Pane::Edges] {
                 assert!(!rendered_pane("supersedes", selected, pane).contains(hint));
             }

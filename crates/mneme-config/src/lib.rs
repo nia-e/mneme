@@ -47,6 +47,9 @@ fn yes() -> bool {
 fn is_true(value: &bool) -> bool {
     *value
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 fn default_rule() -> String {
     "project-or-misc".into()
 }
@@ -197,12 +200,17 @@ pub struct Delivery {
     pub core: bool,
     #[serde(default = "yes")]
     pub context: bool,
+    /// Opt in to a session-scoped startup notice for unresolved contradictions.
+    /// This delivery preference does not grant owner read access.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub contradiction_notice: bool,
 }
 impl Default for Delivery {
     fn default() -> Self {
         Self {
             core: true,
             context: true,
+            contradiction_notice: false,
         }
     }
 }

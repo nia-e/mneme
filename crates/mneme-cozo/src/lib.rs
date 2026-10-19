@@ -89,6 +89,7 @@ use mneme_core::ports::{
     stable_tag_sample_hash, tagged_exact_work_overflow, tagged_fallback_leg_quotas,
     tagged_physical_status_quotas, tagged_query_tag_quotas, tagged_sample_pivot,
 };
+use mneme_core::ports::{ContradictionSummary, ContradictionSummaryRequest};
 use mneme_core::touchstone::*;
 use mneme_core::{
     CaptureReplayProof, CaptureSource, Contradiction, Edge, EmbeddingFingerprint, FullMergeRecord,
@@ -100,6 +101,12 @@ use mneme_core::{
 use serde::Serialize;
 use ulid::Ulid;
 use unordered_pair::UnorderedPair;
+
+// HashMap iteration visits empty buckets as well as yielded rows. Refuse large
+// retained allocations before iteration: the reported-capacity ceiling bounds
+// that O(capacity) work independently of the 256-row logical record allowance.
+// This is not an assertion about std's replaceable bucket/control-byte layout.
+const MAX_CONTRADICTION_SUMMARY_REFERENCE_CAPACITY: usize = 64 * 1024;
 
 pub(crate) fn linked_read_remaining(
     started: std::time::Instant,
@@ -3469,6 +3476,38 @@ impl GraphStore for MemStore {
             .collect())
     }
 
+    async fn contradiction_summary(
+        &self,
+        request: &ContradictionSummaryRequest,
+    ) -> Result<Option<ContradictionSummary>> {
+        request.validate()?;
+        let started = std::time::Instant::now();
+        let inner = self.linked_read_lock(started, request.remaining())?;
+        if inner.contradictions.capacity() > MAX_CONTRADICTION_SUMMARY_REFERENCE_CAPACITY {
+            return Err(Error::Backend(
+                "contradiction summary reference capacity exceeds bounded scan work".into(),
+            ));
+        }
+        let mut open_found = 0;
+        let mut rows_scanned = 0;
+        // Bound the physical prefix, not the number of matching open rows.
+        // Hash iteration order is deliberately not a ranking or stable sample.
+        for row in inner.contradictions.values().take(request.scan_rows()) {
+            linked_read_remaining(started, request.remaining())?;
+            row.validate().map_err(Error::Backend)?;
+            rows_scanned += 1;
+            open_found += usize::from(row.is_open());
+        }
+        linked_read_remaining(started, request.remaining())?;
+        let summary = ContradictionSummary::new(
+            open_found,
+            rows_scanned,
+            rows_scanned < request.scan_rows(),
+        )?;
+        summary.validate_for(request)?;
+        Ok(Some(summary))
+    }
+
     async fn resolve_contradiction(
         &self,
         pair: UnorderedPair<NodeId>,
@@ -4982,6 +5021,75 @@ mod tests {
             .mutation_epoch()
             .expect("managed reference fixture")
             .get()
+    }
+
+    #[tokio::test]
+    async fn contradiction_summary_preserves_managed_reference_epoch() {
+        let store = managed_reference_store(2, 7);
+        let a = cap_test_node(NodeId(Ulid::from(74_100u128)), NodeStatus::Active);
+        let b = cap_test_node(NodeId(Ulid::from(74_101u128)), NodeStatus::Active);
+        store.put_node(&a).await.unwrap();
+        store.put_node(&b).await.unwrap();
+        store
+            .observe_contradiction(a.id(), b.id(), 10)
+            .await
+            .unwrap();
+        let before_head = store.observed_managed_head();
+        let before = serde_json::to_value(store.export()).unwrap();
+        let request =
+            ContradictionSummaryRequest::new(2, mneme_core::ports::CONTRADICTION_SUMMARY_TIMEOUT)
+                .unwrap();
+        let result = store
+            .contradiction_summary(&request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.open_found(), 1);
+        assert!(result.complete());
+        assert_eq!(store.observed_managed_head(), before_head);
+        assert_eq!(serde_json::to_value(store.export()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn contradiction_summary_reference_lock_wait_is_deadline_bound() {
+        let store = MemStore::new(2);
+        let request =
+            ContradictionSummaryRequest::new(2, std::time::Duration::from_millis(10)).unwrap();
+        let held = store.lock();
+        let started = std::time::Instant::now();
+        let error = store.contradiction_summary(&request).await.unwrap_err();
+        assert!(error.to_string().contains("deadline"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        drop(held);
+        assert!(
+            store
+                .contradiction_summary(&request)
+                .await
+                .unwrap()
+                .unwrap()
+                .complete()
+        );
+    }
+
+    #[tokio::test]
+    async fn contradiction_summary_refuses_sparse_reference_capacity_before_iteration() {
+        let store = managed_reference_store(2, 7);
+        store
+            .lock()
+            .contradictions
+            .reserve(MAX_CONTRADICTION_SUMMARY_REFERENCE_CAPACITY + 1);
+        let before = store.observed_managed_head();
+        let request =
+            ContradictionSummaryRequest::new(2, mneme_core::ports::CONTRADICTION_SUMMARY_TIMEOUT)
+                .unwrap();
+        let error = store.contradiction_summary(&request).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("capacity exceeds bounded scan work")
+        );
+        assert_eq!(store.observed_managed_head(), before);
+        assert!(store.lock().contradictions.is_empty());
     }
 
     #[test]

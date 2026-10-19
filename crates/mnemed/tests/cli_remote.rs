@@ -75,6 +75,7 @@ fn stdout(output: &Output) -> String {
 #[derive(Clone, Copy)]
 enum ReplyMode {
     Success,
+    CoreNotice,
     TouchstoneList,
     CaptureOld,
     CaptureMalformed,
@@ -210,7 +211,9 @@ fn serve_one(stream: &mut TcpStream, mode: ReplyMode, requests: &Mutex<Vec<Value
             let mut tools: Vec<Value> = names
                 .iter()
                 .map(|name| {
-                    let schema = if *name == "episode" {
+                    let schema = if *name == "core" && matches!(mode, ReplyMode::CoreNotice) {
+                        json!({"type":"object","properties":{"include_contradictions":{"type":"boolean"}}})
+                    } else if *name == "episode" {
                         mneme_app::episode::input_schema(&mneme_app::episode::EpisodeAction::ALL)
                     } else {
                         json!({"type":"object","properties":{}})
@@ -363,7 +366,14 @@ fn serve_one(stream: &mut TcpStream, mode: ReplyMode, requests: &Mutex<Vec<Value
                     json!({"fixture_tool":tool,"fixture_db":db,"items":[{"target":NODE,"target_db":"user","weight":0.5}],"next":null})
                 }
                 "core" => {
-                    json!({"fixture_tool":tool,"fixture_db":db,"nodes":[{"id":NODE,"summary":"remote-only","body":"core body"}],"total":1,"truncated":false,"nodes_truncated":false,"bodies_truncated":false,"body_bytes_limit":1048576})
+                    let mut core = json!({"fixture_tool":tool,"fixture_db":db,"nodes":[{"id":NODE,"summary":"remote-only","body":"core body"}],"total":1,"truncated":false,"nodes_truncated":false,"bodies_truncated":false,"body_bytes_limit":1048576});
+                    if matches!(mode, ReplyMode::CoreNotice)
+                        && message["params"]["arguments"]["include_contradictions"] == true
+                    {
+                        core["contradiction_summary"] =
+                            json!({"status":"complete","open_found":2,"rows_scanned":3});
+                    }
+                    core
                 }
                 "recall_context" => {
                     json!({"schema":"mneme.recall-context.v1","fixture_marker":"remote-only","items":[]})
@@ -1486,5 +1496,43 @@ fn remote_summary_edit_is_one_shot_owner_bound_and_never_opens_local_storage() {
             );
         }
         f.assert_no_local_store();
+    }
+}
+
+#[test]
+fn core_notice_negotiates_old_and_current_remote_catalogs_without_retry() {
+    for (mode, supported) in [(ReplyMode::Success, false), (ReplyMode::CoreNotice, true)] {
+        let fixture = Fixture::new();
+        let peer = McpPeer::start(mode);
+        let output = fixture.run(&[
+            "--remote",
+            &peer.url,
+            "--json",
+            "core",
+            "--include-contradictions",
+        ]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["nodes"][0]["summary"], "remote-only");
+        assert_eq!(
+            value["contradiction_summary"],
+            if supported {
+                json!({"status":"complete","open_found":2,"rows_scanned":3})
+            } else {
+                json!({"status":"unavailable"})
+            }
+        );
+        let calls: Vec<_> = peer
+            .calls()
+            .into_iter()
+            .filter(|request| request["message"]["method"] == "tools/call")
+            .collect();
+        assert_eq!(calls.len(), 1, "no optional read retries: {calls:?}");
+        assert_eq!(calls[0]["message"]["params"]["name"], "core");
+        assert_eq!(
+            calls[0]["message"]["params"]["arguments"].get("include_contradictions"),
+            supported.then_some(&json!(true))
+        );
+        fixture.assert_no_local_store();
     }
 }

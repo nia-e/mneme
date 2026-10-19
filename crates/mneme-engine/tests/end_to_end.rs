@@ -1537,6 +1537,270 @@ async fn hybrid_rrf_rescues_an_exact_token_the_dense_top_misses() {
     assert_eq!(hits[0].node.id(), exact);
 }
 
+/// Pin cosine scores independently of lexical content, without ingest-time
+/// linking. The fixed query embedder emits the first unit axis for every query.
+async fn hybrid_floor_fixture(entries: &[(&str, f32)]) -> (Memory, Arc<MemStore>, Vec<NodeId>) {
+    let store = Arc::new(MemStore::new(4));
+    let memory = Memory::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        Arc::new(RoutingFixtureEmbedder),
+        Arc::new(SystemClock),
+        Config {
+            lexical_k: 8,
+            graph_seed_cap: 8,
+            // Nonzero legacy learning configuration must not turn reads into writes.
+            coretrieval_link_cap: 8,
+            ..Config::default()
+        },
+    )
+    .with_lexical_index(store.clone());
+    let mut ids = Vec::new();
+    for (index, &(summary, cosine)) in entries.iter().enumerate() {
+        let id = NodeId(Ulid::from(800_000 + index as u128));
+        let node = Node::try_new(
+            id,
+            summary,
+            BodyRef::new(format!("inline://{}", id.0)).unwrap(),
+            ["floor-fixture"],
+            prov(),
+            1.0,
+            1.0,
+            NodeStatus::Active,
+            1,
+        )
+        .unwrap();
+        store.put_node(&node).await.unwrap();
+        store
+            .upsert(id, &[cosine, (1.0 - cosine * cosine).sqrt(), 0.0, 0.0])
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    (memory, store, ids)
+}
+
+fn hybrid_floor_budget() -> Budget {
+    Budget {
+        max_nodes: 8,
+        max_depth: 0,
+        min_relevance: 0.05,
+        relevance_ratio: 0.0,
+        explore: 0.0,
+        dedup_similarity: 1.0,
+        query_conditioning: 0.0,
+    }
+}
+
+#[tokio::test]
+async fn hybrid_floor_rejects_unsupported_dense_tail_with_or_without_sparse_matches() {
+    let (memory, _, ids) = hybrid_floor_fixture(&[
+        ("needle", 0.8),
+        ("semantic second", 0.4),
+        ("at threshold", 0.05),
+        ("below threshold", 0.049),
+        ("unrelated tail", 0.01),
+        ("opposite", -0.5),
+    ])
+    .await;
+    for query in ["no lexical match", "needle"] {
+        let batch = memory
+            .retrieve_batch_seeded(query, 8, hybrid_floor_budget(), StatusFilter::ACTIVE, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            batch
+                .primary
+                .iter()
+                .map(|hit| hit.node.id())
+                .collect::<Vec<_>>(),
+            ids[..3],
+            "a lexical match for another node cannot admit the rejected dense tail"
+        );
+        for (index, hit) in batch.primary.iter().enumerate() {
+            assert_eq!(hit.evidence.dense_rank.unwrap().get() as usize, index + 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn hybrid_floor_preserves_independent_sparse_rescue_and_original_dense_ranks() {
+    for top_dense in [0.8, 0.01] {
+        let (memory, _, ids) = hybrid_floor_fixture(&[
+            ("semantic anchor", top_dense),
+            ("unsupported tail", 0.005),
+            ("needle", 0.0),
+        ])
+        .await;
+        let empty_sparse = memory
+            .retrieve_batch_seeded(
+                "no lexical match",
+                8,
+                hybrid_floor_budget(),
+                StatusFilter::ACTIVE,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_sparse.primary.len(), usize::from(top_dense >= 0.05));
+        let batch = memory
+            .retrieve_batch_seeded(
+                "needle",
+                8,
+                hybrid_floor_budget(),
+                StatusFilter::ACTIVE,
+                &[],
+            )
+            .await
+            .unwrap();
+        let exact = batch
+            .primary
+            .iter()
+            .find(|hit| hit.node.id() == ids[2])
+            .unwrap();
+        assert_eq!(exact.evidence.dense_rank.unwrap().get(), 3);
+        assert_eq!(exact.evidence.sparse_rank.unwrap().get(), 1);
+        assert!(batch.primary.iter().all(|hit| hit.node.id() != ids[1]));
+        assert_eq!(batch.primary.len(), 1 + usize::from(top_dense >= 0.05));
+
+        // Independent lexical admission can also make this node a graph root,
+        // including when every dense candidate failed its own relevance floor.
+        memory
+            .link(ids[2], ids[1], EdgeKind::Transition, 0.8, None)
+            .await
+            .unwrap();
+        let expanded = memory
+            .retrieve_batch_seeded_observed(
+                "needle",
+                8,
+                Budget {
+                    max_depth: 1,
+                    ..hybrid_floor_budget()
+                },
+                StatusFilter::ACTIVE,
+                &[],
+            )
+            .await
+            .unwrap();
+        let target = expanded
+            .primary
+            .iter()
+            .find(|hit| hit.node.id() == ids[1])
+            .unwrap();
+        let path = target.graph_path.as_ref().unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!((path[0].previous, path[0].target), (ids[2], ids[1]));
+    }
+}
+
+#[tokio::test]
+async fn hybrid_floor_rejected_dense_is_an_expansion_not_a_root_and_reads_stay_pure() {
+    let (memory, store, ids) = hybrid_floor_fixture(&[
+        ("needle", 0.8),
+        ("rejected dense reachable from anchor", 0.01),
+        ("only reachable from rejected dense", 0.0),
+    ])
+    .await;
+    memory
+        .link(ids[0], ids[1], EdgeKind::Transition, 0.8, None)
+        .await
+        .unwrap();
+    memory
+        .link(ids[1], ids[2], EdgeKind::Transition, 0.8, None)
+        .await
+        .unwrap();
+    let before_nodes =
+        serde_json::to_value(store.all_nodes(ColdPath::acquire()).await.unwrap()).unwrap();
+    let before_edges =
+        serde_json::to_value(store.all_edges(ColdPath::acquire()).await.unwrap()).unwrap();
+    let budget = Budget {
+        max_depth: 1,
+        ..hybrid_floor_budget()
+    };
+    let plain = memory
+        .retrieve_batch_seeded("needle", 8, budget, StatusFilter::ACTIVE, &[])
+        .await
+        .unwrap();
+    let observed = memory
+        .retrieve_batch_seeded_observed("needle", 8, budget, StatusFilter::ACTIVE, &[])
+        .await
+        .unwrap();
+    let routed = memory
+        .retrieve_batch_seeded_routed("needle", 8, budget, StatusFilter::ACTIVE, &[], &[])
+        .await
+        .unwrap();
+    let signature = |batch: &mneme_engine::RetrievalBatch| {
+        batch
+            .primary
+            .iter()
+            .map(|hit| (hit.node.id(), hit.lane_rank, hit.evidence))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(signature(&plain), signature(&observed));
+    assert_eq!(signature(&plain), signature(&routed));
+    assert_eq!(plain.stamp, observed.stamp);
+    assert_eq!(plain.stamp, routed.stamp);
+    assert_eq!(
+        plain
+            .primary
+            .iter()
+            .map(|hit| hit.node.id())
+            .collect::<Vec<_>>(),
+        ids[..2]
+    );
+    let flat = memory
+        .retrieve_seeded("needle", 8, budget, StatusFilter::ACTIVE, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        flat.iter().map(|hit| hit.node.id()).collect::<Vec<_>>(),
+        ids[..2]
+    );
+    for batch in [&observed, &routed] {
+        let expansion = batch
+            .primary
+            .iter()
+            .find(|hit| hit.node.id() == ids[1])
+            .unwrap();
+        assert_eq!(expansion.evidence.dense_rank.unwrap().get(), 2);
+        assert_eq!(expansion.evidence.graph_rank.unwrap().get(), 1);
+        let path = expansion.graph_path.as_ref().unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!((path[0].previous, path[0].target), (ids[0], ids[1]));
+    }
+    assert!(plain.primary.iter().all(|hit| hit.graph_path.is_none()));
+    assert_eq!(
+        before_nodes,
+        serde_json::to_value(store.all_nodes(ColdPath::acquire()).await.unwrap()).unwrap()
+    );
+    assert_eq!(
+        before_edges,
+        serde_json::to_value(store.all_edges(ColdPath::acquire()).await.unwrap()).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn hybrid_floor_keeps_tagged_retrieval_on_the_raw_dense_floor() {
+    let (memory, _, ids) =
+        hybrid_floor_fixture(&[("semantic anchor", 0.8), ("needle", 0.01)]).await;
+    let batch = memory
+        .retrieve_batch_seeded(
+            "needle",
+            8,
+            hybrid_floor_budget(),
+            StatusFilter::ACTIVE,
+            &["floor-fixture"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch.primary.len(), 1);
+    assert_eq!(batch.primary[0].node.id(), ids[0]);
+    assert_eq!(batch.primary[0].evidence.dense_rank.unwrap().get(), 1);
+    assert!(batch.primary[0].evidence.sparse_rank.is_none());
+    assert!(batch.tagged.is_some());
+}
+
 #[tokio::test]
 async fn graph_fusion_preserves_full_direct_leg_and_admits_an_expansion() {
     let dim = DEFAULT_DIM;

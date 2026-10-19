@@ -79,8 +79,9 @@ pub(crate) fn prepare(tool: &str, args: &Value, _access: RequestAccess) -> Resul
             }
         }
         "core" => {
-            fields(&raw, &["max_body_bytes"])?;
+            fields(&raw, &["max_body_bytes", "include_contradictions"])?;
             integer(&raw, "max_body_bytes", 1, 1024 * 1024)?;
+            mneme_app::core::CoreOptions::parse(&raw)?;
         }
         "databases" | "status" | "contradictions" | "merges" | "decay" | "prune"
         | "snapshot_create" => fields(&raw, &[])?,

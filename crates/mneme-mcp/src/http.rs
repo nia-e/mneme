@@ -1144,6 +1144,10 @@ mod tests {
             initialize["result"]["capabilityProfile"],
             "receipt-grounded"
         );
+        assert_eq!(
+            initialize["result"]["capabilities"]["experimental"]["mneme/core-contradiction-summary-v1"],
+            true
+        );
 
         headers.insert("mcp-session-id", session);
         headers.insert(
@@ -1170,6 +1174,14 @@ mod tests {
         assert!(tools.iter().any(|schema| schema["name"] == "activity"));
         assert!(tools.iter().any(|schema| schema["name"] == "reflect"));
         assert!(tools.iter().all(|schema| schema["name"] != "ingest"));
+        let core = tools
+            .iter()
+            .find(|schema| schema["name"] == "core")
+            .unwrap();
+        assert_eq!(
+            core["inputSchema"]["properties"]["include_contradictions"]["type"],
+            "boolean"
+        );
         let database_control = tools
             .iter()
             .find(|schema| schema["name"] == "database_control")
@@ -1207,6 +1219,49 @@ mod tests {
                 assert_eq!(payload["events"], serde_json::json!([]));
                 assert_eq!(payload["latest_seq"], 0);
             }
+        }
+
+        for (arguments, malformed) in [
+            (serde_json::json!({"db":"missing"}), false),
+            (
+                serde_json::json!({"db":"missing","include_contradictions":false}),
+                false,
+            ),
+            (
+                serde_json::json!({"db":"missing","include_contradictions":true}),
+                false,
+            ),
+            (
+                serde_json::json!({"db":"missing","include_contradictions":null}),
+                true,
+            ),
+            (
+                serde_json::json!({"db":"missing","include_contradictions":"true"}),
+                true,
+            ),
+        ] {
+            let response = post_handler(
+                State(shared.clone()),
+                headers.clone(),
+                Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "jsonrpc":"2.0", "id":"core", "method":"tools/call",
+                        "params":{"name":"core","arguments":arguments}
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = response_json(response).await;
+            assert_eq!(response["result"]["isError"], true);
+            let error = response["result"]["content"][0]["text"].as_str().unwrap();
+            assert_eq!(
+                error.contains("include_contradictions"),
+                malformed,
+                "{error}"
+            );
+            assert_eq!(error.contains("unknown database"), !malformed, "{error}");
         }
 
         let denied = post_handler(

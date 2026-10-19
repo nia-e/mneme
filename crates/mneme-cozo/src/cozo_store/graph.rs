@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage_contract::conventional_unmanaged::spec::SINGLE_GRAPH_V1_CATALOG_GENERATION_MARKER;
 use mneme_core::Provenance;
+use mneme_core::ports::{ContradictionSummary, ContradictionSummaryRequest};
 use mneme_core::ports::{IncidentEdgeLeg, IncidentEdgesPage, IncidentEdgesRequest};
 
 #[cfg(test)]
@@ -1186,6 +1187,80 @@ impl GraphStore for CozoStore {
                 overlay::decode_contradiction_values(between, values)
             })
             .collect()
+    }
+
+    async fn contradiction_summary(
+        &self,
+        request: &ContradictionSummaryRequest,
+    ) -> Result<Option<ContradictionSummary>> {
+        request.validate()?;
+        let request = *request;
+        let started = std::time::Instant::now();
+        let job = ActiveBackendJob {
+            db: self.db.clone(),
+            authority: self.persistent_authority.clone(),
+            activity: self.backend_activity.enter(),
+        };
+        tokio::task::spawn_blocking(move || {
+            job.run(|db| {
+                let remaining = crate::linked_read_remaining(started, request.remaining())?;
+                let mut tx = db
+                    .read_multi_transaction_with_timeout(remaining)
+                    .map_err(backend)?;
+                let result = (|| {
+                    // Physical primary-key scan first: filtering open rows inside
+                    // Datalog before LIMIT could walk arbitrary resolved history.
+                    let rows = tx
+                        .scan_relation_by_primary_key(
+                            "contradiction",
+                            PrimaryKeyScan {
+                                prefix: Vec::new(),
+                                lower: PrimaryKeyScanBound::Unbounded,
+                                upper: PrimaryKeyScanBound::Unbounded,
+                                direction: PrimaryKeyScanDirection::Ascending,
+                                limit: request.scan_rows(),
+                            },
+                        )
+                        .map_err(backend)?
+                        .rows;
+                    if rows.len() > request.scan_rows() {
+                        return Err(backend_str(
+                            "contradiction summary exceeded physical row allowance".into(),
+                        ));
+                    }
+                    let mut open_found = 0;
+                    for row in &rows {
+                        crate::linked_read_remaining(started, request.remaining())?;
+                        if row.len() != 6 {
+                            return Err(backend_str("malformed contradiction summary row".into()));
+                        }
+                        let pair = overlay::decode_stored_pair(&row[0], &row[1], "contradiction")?;
+                        let contradiction = overlay::decode_contradiction_values(pair, &row[2..])?;
+                        open_found += usize::from(contradiction.is_open());
+                    }
+                    let summary = ContradictionSummary::new(
+                        open_found,
+                        rows.len(),
+                        rows.len() < request.scan_rows(),
+                    )?;
+                    summary.validate_for(&request)?;
+                    Ok(Some(summary))
+                })();
+                let close = tx.close_and_join().map_err(backend);
+                match (result, close) {
+                    (Ok(value), Ok(())) => {
+                        crate::linked_read_remaining(started, request.remaining())?;
+                        Ok(value)
+                    }
+                    (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+                    (Err(error), Err(close)) => Err(backend_str(format!(
+                        "contradiction summary failed ({error}); snapshot teardown failed ({close})"
+                    ))),
+                }
+            })
+        })
+        .await
+        .map_err(|error| backend_str(format!("join contradiction summary worker: {error}")))?
     }
 
     async fn resolve_contradiction(

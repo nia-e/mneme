@@ -94,9 +94,9 @@ fn chronology(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
     let query = if app.scene_query.is_empty() {
-        "Newest first · o changes time axis".into()
+        String::new()
     } else {
-        format!("Find: {} · o changes time axis", single(&app.scene_query))
+        format!("Find: {}", single(&app.scene_query))
     };
     text_line(
         frame,
