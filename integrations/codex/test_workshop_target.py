@@ -46,7 +46,7 @@ class WorkshopTargetTests(unittest.TestCase):
             "summary_truncated": False, "memory_kind": {"kind": "semantic"},
             "provenance": {"type": "conversation", "session": "fixture", "turn": 1}}
         from test_touchstone_librarian import coverage
-        from test_hook_recall import discovery_metadata
+        from fixture_recall_owner import discovery_metadata
         self.context = {"schema": "mneme.context.v7", "core": [], "primary": [{"id": NODE}],
                         "expansions": [], "episodes": [], "touchstone_retrieval": coverage(),
                         "observation": {"schema": 1, "learning": "disabled", "cards": [

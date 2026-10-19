@@ -159,7 +159,7 @@ class TouchstoneLibrarianTests(unittest.TestCase):
                     {**value, "searched": False}, {**value, "recursive_reads": 1}):
             with self.subTest(value=bad), self.assertRaises(ValueError):
                 validate_touchstone_retrieval(bad)
-        from test_hook_recall import discovery_metadata
+        from fixture_recall_owner import discovery_metadata
         native = hook_recall._native_discovery({**discovery_metadata(), "schema": "mneme.context.v7",
                                                "touchstone_retrieval": value})
         self.assertEqual(native["touchstone_retrieval"], value)

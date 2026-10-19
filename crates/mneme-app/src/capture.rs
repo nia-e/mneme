@@ -592,20 +592,10 @@ mod tests {
     fn normalized_legacy_replay_proves_original_request_not_current_body() {
         let prepared = PreparedCapture::parse(&candidate()).unwrap();
         let proof = prepared.expected_replay_proof().unwrap();
-        let (legacy_digest, source) = match proof {
-            CaptureReplayProof::Semantic {
-                legacy_candidate_digest,
-                source,
-                ..
-            } => (legacy_candidate_digest, source),
-            CaptureReplayProof::Episode { .. } | CaptureReplayProof::Touchstone { .. } => {
-                panic!("ordinary semantic capture has another proof codec")
-            }
-        };
-        let digest: String = legacy_digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let source = proof.source();
+        // Frozen capture_v1 candidate digest for candidate(), not reconstructed
+        // from the replay proof or the node's subsequently edited fields.
+        let digest = "d6a08d8ff308d19ee79a0a782ee0712ff00dc3044829e59bb37937b11da7a8c8";
         let readback = json!({
             "id":source.node_id().0.to_string(),
             "summary":"This node was deliberately edited later", "summary_truncated":false,

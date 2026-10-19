@@ -18,13 +18,13 @@ use ulid::Ulid;
 use crate::storage_contract::conventional_unmanaged::spec::{
     BASE_RELATIONS, CONCERN_V1_CATALOG_GENERATION_MARKER, CatalogContract, DERIVED_RELATIONS,
     EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER, SINGLE_GRAPH_V1_CATALOG_GENERATION_MARKER,
-    STRUCT_MAP_CATALOG_GENERATION_MARKER, TOUCHSTONES_V1_CATALOG_GENERATION_MARKER,
-    all_physical_relations,
+    TOUCHSTONES_V1_CATALOG_GENERATION_MARKER, all_physical_relations,
 };
 
 #[cfg(test)]
 use crate::storage_contract::conventional_unmanaged::spec::{
     CAPTURE_V1_CATALOG_GENERATION_MARKER, EPISODE_V1_CATALOG_GENERATION_MARKER,
+    STRUCT_MAP_CATALOG_GENERATION_MARKER,
 };
 
 use super::{
@@ -42,9 +42,70 @@ const INJECTED_FAILURE_SCRIPT: &str = "?[must_be_empty] <- [[1]] :assert none";
 struct ValidatedCurrentSchemaRequest {
     dimension: usize,
     database_id: String,
-    generation_marker: &'static str,
-    tag_policy: &'static str,
-    catalog: CatalogContract,
+    target: SchemaTarget,
+}
+
+/// A complete named schema contract, never independently chosen metadata and DDL.
+///
+/// Legacy touchstones deliberately retains the predecessor tag policy while
+/// sharing the current physical catalog and generation marker. Only the separate
+/// lexical migration may replace that policy.
+#[derive(Clone, Copy, Debug)]
+enum SchemaTarget {
+    #[cfg(test)]
+    StructMap,
+    #[cfg(test)]
+    Capture,
+    #[cfg(test)]
+    Episode,
+    SingleGraph,
+    Concern,
+    EpisodeContext,
+    LegacyTouchstones,
+    Touchstones,
+}
+
+impl SchemaTarget {
+    const fn generation_marker(self) -> &'static str {
+        match self {
+            #[cfg(test)]
+            Self::StructMap => STRUCT_MAP_CATALOG_GENERATION_MARKER,
+            #[cfg(test)]
+            Self::Capture => CAPTURE_V1_CATALOG_GENERATION_MARKER,
+            #[cfg(test)]
+            Self::Episode => EPISODE_V1_CATALOG_GENERATION_MARKER,
+            Self::SingleGraph => SINGLE_GRAPH_V1_CATALOG_GENERATION_MARKER,
+            Self::Concern => CONCERN_V1_CATALOG_GENERATION_MARKER,
+            Self::EpisodeContext => EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER,
+            Self::LegacyTouchstones | Self::Touchstones => TOUCHSTONES_V1_CATALOG_GENERATION_MARKER,
+        }
+    }
+
+    const fn tag_policy(self) -> &'static str {
+        match self {
+            #[cfg(test)]
+            Self::StructMap | Self::Capture | Self::Episode => {
+                crate::tag_projection::LEGACY_META_VALUE
+            }
+            Self::SingleGraph | Self::Concern | Self::EpisodeContext | Self::LegacyTouchstones => {
+                crate::tag_projection::LEGACY_META_VALUE
+            }
+            Self::Touchstones => crate::tag_projection::META_VALUE,
+        }
+    }
+
+    const fn catalog(self) -> CatalogContract {
+        match self {
+            #[cfg(test)]
+            Self::StructMap | Self::Capture => CatalogContract::Predecessor,
+            #[cfg(test)]
+            Self::Episode => CatalogContract::EpisodeV1,
+            Self::SingleGraph => CatalogContract::SingleGraphV1,
+            Self::Concern => CatalogContract::ConcernV1,
+            Self::EpisodeContext => CatalogContract::EpisodeContextV2,
+            Self::LegacyTouchstones | Self::Touchstones => CatalogContract::TouchstonesV1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,7 +167,7 @@ pub(super) fn stage_current_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let request = validate_request(dimension, database_id.get())?;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::StructMap)?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 
@@ -117,8 +178,7 @@ pub(super) fn stage_capture_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let mut request = validate_request(dimension, database_id.get())?;
-    request.generation_marker = CAPTURE_V1_CATALOG_GENERATION_MARKER;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::Capture)?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 
@@ -129,9 +189,7 @@ pub(super) fn stage_episode_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let mut request = validate_request(dimension, database_id.get())?;
-    request.generation_marker = EPISODE_V1_CATALOG_GENERATION_MARKER;
-    request.catalog = CatalogContract::EpisodeV1;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::Episode)?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 
@@ -140,9 +198,7 @@ pub(super) fn stage_single_graph_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let mut request = validate_request(dimension, database_id.get())?;
-    request.generation_marker = SINGLE_GRAPH_V1_CATALOG_GENERATION_MARKER;
-    request.catalog = CatalogContract::SingleGraphV1;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::SingleGraph)?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 pub(super) fn stage_concern_schema(
@@ -150,9 +206,7 @@ pub(super) fn stage_concern_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let mut request = validate_request(dimension, database_id.get())?;
-    request.generation_marker = CONCERN_V1_CATALOG_GENERATION_MARKER;
-    request.catalog = CatalogContract::ConcernV1;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::Concern)?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 
@@ -161,9 +215,7 @@ pub(super) fn stage_episode_context_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let mut request = validate_request(dimension, database_id.get())?;
-    request.generation_marker = EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER;
-    request.catalog = CatalogContract::EpisodeContextV2;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::EpisodeContext)?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 
@@ -172,10 +224,7 @@ pub(super) fn stage_touchstones_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let mut request = validate_request(dimension, database_id.get())?;
-    request.generation_marker = TOUCHSTONES_V1_CATALOG_GENERATION_MARKER;
-    request.catalog = CatalogContract::TouchstonesV1;
-    request.tag_policy = crate::tag_projection::META_VALUE;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::Touchstones)?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 
@@ -187,9 +236,11 @@ pub(super) fn stage_legacy_touchstones_schema(
     dimension: usize,
     database_id: DatabaseId,
 ) -> Result<()> {
-    let mut request = validate_request(dimension, database_id.get())?;
-    request.generation_marker = TOUCHSTONES_V1_CATALOG_GENERATION_MARKER;
-    request.catalog = CatalogContract::TouchstonesV1;
+    let request = validate_request(
+        dimension,
+        database_id.get(),
+        SchemaTarget::LegacyTouchstones,
+    )?;
     stage_validated_current_schema(database, &request, FailureInjection::NONE)
 }
 pub(super) fn touchstones_memory_schema(dimension: usize) -> String {
@@ -216,6 +267,7 @@ const _: fn(&DbInstance, usize, DatabaseId) -> Result<()> = stage_current_schema
 fn validate_request(
     dimension: usize,
     raw_database_id: Ulid,
+    target: SchemaTarget,
 ) -> Result<ValidatedCurrentSchemaRequest> {
     if !(1..=MAX_TAGGED_VECTOR_DIMENSION).contains(&dimension) {
         return Err(Error::InvalidInput(format!(
@@ -250,9 +302,7 @@ fn validate_request(
     Ok(ValidatedCurrentSchemaRequest {
         dimension,
         database_id: canonical,
-        generation_marker: STRUCT_MAP_CATALOG_GENERATION_MARKER,
-        tag_policy: crate::tag_projection::LEGACY_META_VALUE,
-        catalog: CatalogContract::Predecessor,
+        target,
     })
 }
 
@@ -282,6 +332,7 @@ fn stage_transaction(
     failure: FailureInjection,
 ) -> Result<()> {
     let mut steps = TransactionSteps::new(failure);
+    let catalog = request.target.catalog();
 
     // This rejects every relation and foreign id-zero system key before the
     // first mutation. Exact relation-counter-zero authority belongs to the
@@ -292,7 +343,7 @@ fn stage_transaction(
         .map_err(|error| Error::Backend(format!("preflight fresh relation catalog: {error}")))?;
     steps.complete(transaction, "empty-catalog preflight")?;
 
-    for statement in schema_statements_for(request.dimension, request.catalog) {
+    for statement in schema_statements_for(request.dimension, catalog) {
         let statement = statement
             .strip_prefix('{')
             .and_then(|statement| statement.strip_suffix('}'))
@@ -322,13 +373,11 @@ fn stage_transaction(
     write_initial_metadata(transaction, request)?;
     steps.complete(transaction, "mandatory metadata")?;
 
-    let relation_names = request
-        .catalog
+    let relation_names = catalog
         .relations()
         .map(|relation| relation.name.to_owned())
         .collect::<Vec<_>>();
-    let expected_physical_relations =
-        request.catalog.bases().len() + request.catalog.derived().len();
+    let expected_physical_relations = catalog.bases().len() + catalog.derived().len();
     if relation_names.len() != expected_physical_relations {
         return Err(Error::Backend(
             "current schema lost its exact canonicalization set".into(),
@@ -389,7 +438,10 @@ fn write_current_generation_marker(
 ) -> Result<()> {
     let mut params = BTreeMap::new();
     params.insert("key".into(), data_string(VECTOR_PROJECTION_META_KEY));
-    params.insert("value".into(), data_string(request.generation_marker));
+    params.insert(
+        "value".into(),
+        data_string(request.target.generation_marker()),
+    );
     transaction
         .run_script("?[k, v] <- [[$key, $value]] :put meta {k => v}", params)
         .map_err(|error| {
@@ -404,6 +456,7 @@ fn required_metadata(
     request: &ValidatedCurrentSchemaRequest,
     include_generation: bool,
 ) -> BTreeMap<String, String> {
+    let catalog = request.target.catalog();
     let mut expected = BTreeMap::from([
         ("db_id".to_owned(), request.database_id.clone()),
         ("dim".to_owned(), request.dimension.to_string()),
@@ -421,12 +474,12 @@ fn required_metadata(
         ),
         (
             if matches!(
-                request.catalog,
+                catalog,
                 CatalogContract::EpisodeContextV2 | CatalogContract::TouchstonesV1
             ) {
                 crate::canonical_node_contract::EPISODE_CONTEXT_META_KEY
             } else if matches!(
-                request.catalog,
+                catalog,
                 CatalogContract::SingleGraphV1 | CatalogContract::ConcernV1
             ) {
                 crate::canonical_node_contract::SINGLE_GRAPH_META_KEY
@@ -435,12 +488,12 @@ fn required_metadata(
             }
             .to_owned(),
             if matches!(
-                request.catalog,
+                catalog,
                 CatalogContract::EpisodeContextV2 | CatalogContract::TouchstonesV1
             ) {
                 crate::canonical_node_contract::EPISODE_CONTEXT_META_VALUE
             } else if matches!(
-                request.catalog,
+                catalog,
                 CatalogContract::SingleGraphV1 | CatalogContract::ConcernV1
             ) {
                 crate::canonical_node_contract::SINGLE_GRAPH_META_VALUE
@@ -451,13 +504,13 @@ fn required_metadata(
         ),
         (
             crate::tag_projection::META_KEY.to_owned(),
-            request.tag_policy.to_owned(),
+            request.target.tag_policy().to_owned(),
         ),
     ]);
     if include_generation {
         expected.insert(
             VECTOR_PROJECTION_META_KEY.to_owned(),
-            request.generation_marker.to_owned(),
+            request.target.generation_marker().to_owned(),
         );
     }
     expected
@@ -662,7 +715,7 @@ fn stage_current_schema_failing_after(
             "current-schema failure boundary must be in 1..={total_steps}; got {completed_step}"
         )));
     }
-    let request = validate_request(dimension, database_id.get())?;
+    let request = validate_request(dimension, database_id.get(), SchemaTarget::StructMap)?;
     stage_validated_current_schema(
         database,
         &request,

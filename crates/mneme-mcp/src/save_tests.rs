@@ -128,21 +128,12 @@ async fn save_complete_malformed_admission_precedes_authority_and_checkout() {
 #[test]
 fn save_manual_nonce_is_retained_across_classification() {
     let raw = json!({"db":"project","summary":"One manual operation"});
-    let mut request = ValidatedToolArguments::parse("save", &raw).unwrap();
-    let identity = request
-        .prepared_save
-        .as_ref()
-        .unwrap()
-        .inner
-        .identity()
-        .clone();
-    let id = request
-        .prepared_save
-        .as_ref()
-        .unwrap()
-        .inner
-        .expected_id()
-        .unwrap();
+    let request = ValidatedToolArguments::parse("save", &raw).unwrap();
+    let AdmittedOperation::Save(prepared) = &request.operation else {
+        panic!("SAVE admission must retain its payload");
+    };
+    let identity = prepared.inner.identity().clone();
+    let id = prepared.inner.expected_id().unwrap();
     for _ in 0..4 {
         assert_eq!(
             request.kind(),
@@ -151,16 +142,18 @@ fn save_manual_nonce_is_retained_across_classification() {
         CapabilityPolicy::new(CapabilityProfile::Curator, false)
             .authorize(request.kind())
             .unwrap();
-        assert_eq!(
-            request.prepared_save.as_ref().unwrap().inner.identity(),
-            &identity
-        );
+        assert_eq!(prepared.inner.identity(), &identity);
     }
-    let retained = request.prepared_save.take().unwrap();
+    let AdmittedOperation::Save(retained) = request.operation else {
+        panic!("SAVE dispatch must consume its retained payload");
+    };
     assert_eq!(retained.inner.expected_id().unwrap(), id);
     assert_eq!(retained.inner.identity(), &identity);
     let fresh = ValidatedToolArguments::parse("save", &raw).unwrap();
-    assert_ne!(fresh.prepared_save.unwrap().inner.identity(), &identity);
+    let AdmittedOperation::Save(fresh) = fresh.operation else {
+        panic!("SAVE admission must retain its payload");
+    };
+    assert_ne!(fresh.inner.identity(), &identity);
 }
 
 #[cfg(not(feature = "fastembed"))]

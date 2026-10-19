@@ -280,25 +280,24 @@ impl SummarySnapshot {
     pub fn validate(&self) -> Result<()> {
         // Reuse enclosing-node invariants without including this dummy body,
         // empty tags, neutral ranking or status in the snapshot or digest.
-        let node = Node::try_new(
-            self.id,
-            self.summary.as_str(),
-            crate::BodyRef::new("inline://summary-snapshot-validation").expect("constant body ref"),
-            Vec::<&str>::new(),
-            self.provenance.clone(),
-            0.5,
-            0.5,
-            NodeStatus::Active,
-            self.created,
-        )
-        .map_err(|e| invalid(e.to_string()))?;
-        let node = match &self.memory_kind {
-            MemoryKind::Semantic => node,
-            MemoryKind::Episode(facet) => node
-                .with_episode(facet.clone())
-                .map_err(|e| invalid(e.to_string()))?,
+        let init = crate::NodeInit {
+            id: self.id,
+            summary: self.summary.clone(),
+            body: crate::BodyRef::new("inline://summary-snapshot-validation")
+                .expect("constant body ref"),
+            tags: crate::BoundedTagSet::default(),
+            provenance: self.provenance.clone(),
+            stability: crate::Stability::new(0.5).expect("constant stability"),
+            confidence: crate::Confidence::new(0.5).expect("constant confidence"),
+            status: NodeStatus::Active,
+            created: self.created,
         };
-        node.validate().map_err(|e| invalid(e.to_string()))
+        match &self.memory_kind {
+            MemoryKind::Semantic => Node::new(init),
+            MemoryKind::Episode(facet) => Node::new_episode(init, facet.clone()),
+        }
+        .map(|_| ())
+        .map_err(|e| invalid(e.to_string()))
     }
     pub const fn db_id(&self) -> Ulid {
         self.db_id
@@ -1360,7 +1359,7 @@ mod tests {
         let mut telemetry = original.clone();
         telemetry.record_exposure(9);
         telemetry.record_grounded_use(10);
-        telemetry.set_status(NodeStatus::Archived);
+        telemetry.set_status(NodeStatus::Archived).unwrap();
         telemetry.set_confidence(crate::Confidence::new(0.8).unwrap());
         assert!(validate_touchstone_owner_replacement(&original, &telemetry).is_ok());
         let wire = serde_json::to_value(&original).unwrap();

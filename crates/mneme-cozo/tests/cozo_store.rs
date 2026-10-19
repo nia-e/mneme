@@ -13,7 +13,7 @@ use mneme_core::{
     MAX_NODE_SUMMARY_BYTES, MAX_REMOTE_EDGE_PAGE_SIZE, MergeResolution, Node, NodeId, NodeStatus,
     Provenance, RemoteEdge, Resolution, StrengthParams,
 };
-use mneme_cozo::{CozoStore, MAX_CANONICAL_NODE_JSON_BYTES, MemStore, StoreExportEnvelopeV5};
+use mneme_cozo::{CozoStore, MAX_CANONICAL_NODE_JSON_BYTES, MemStore, StoreExportEnvelopeV6};
 use ulid::Ulid;
 use unordered_pair::UnorderedPair;
 
@@ -36,7 +36,7 @@ const DIM: usize = 8;
 const VECTOR_META_KEY: &str = "vector_projection_v2";
 const PRIOR_V3_VECTOR_META: &str = "status_partitioned_hnsw_mnestic_0_13_v3";
 const CANONICAL_NODE_KEY: &str = "canonical_node_contract_v2";
-const CURRENT_TAG_PROJECTION_META: &str = "canonical_node_tag_membership_v2_f7";
+const CURRENT_TAG_PROJECTION_META: &str = "canonical_node_tag_membership_v2_ascii_slug_v1";
 
 fn remove_sqlite_files(path: &std::path::Path) {
     let base = path.as_os_str().to_string_lossy();
@@ -188,7 +188,7 @@ async fn assert_vector_projection_parity(store: &(impl GraphStore + VectorIndex)
         Some(projected.id())
     );
 
-    projected.set_status(NodeStatus::Archived);
+    projected.set_status(NodeStatus::Archived).unwrap();
     store.put_node(&projected).await.unwrap();
     assert!(
         store
@@ -566,7 +566,7 @@ async fn archived_hnsw_is_exact_beyond_the_active_window() {
     }
 
     let mut archived = node("strong archived neighbor", &[]);
-    archived.set_status(NodeStatus::Archived);
+    archived.set_status(NodeStatus::Archived).unwrap();
     let mut archived_vector = vec![0.0; DIM];
     archived_vector[0] = 1.0;
     archived_vector[1] = 0.8;
@@ -1838,19 +1838,19 @@ async fn failed_vector_import_never_stamps_embedding_identity() {
     source
         .set_embedding_fingerprint(&fingerprint("test:source-v1", DIM))
         .unwrap();
-    let source_node = node("malformed legacy vector", &[]);
+    let source_node = node("malformed snapshot vector", &[]);
     source.put_node(&source_node).await.unwrap();
     source.upsert(source_node.id(), &embed(1.0)).await.unwrap();
 
-    // Loading preserves legacy snapshot bytes rather than silently repairing
-    // them. Corrupt one vector length to emulate an interrupted/foreign snapshot
-    // and prove the destination never receives the compatibility stamp.
+    // Current-format loading preserves malformed vectors for explicit repair.
+    // Corrupt one vector length inside the current envelope so this exercises
+    // import validation, not the earlier refusal of a predecessor format.
     let mut malformed = source.export();
     malformed.vectors[0].1.pop();
     let path = std::env::temp_dir().join(format!("mneme-bad-vector-{}.json", Ulid::new()));
     std::fs::write(
         &path,
-        serde_json::to_vec(&StoreExportEnvelopeV5::new(malformed)).unwrap(),
+        serde_json::to_vec(&StoreExportEnvelopeV6::new(malformed)).unwrap(),
     )
     .unwrap();
     let malformed = MemStore::load(&path).unwrap();
@@ -1880,7 +1880,7 @@ async fn malformed_import_fingerprint_is_rejected_before_any_row_mutates() {
         let path = std::env::temp_dir().join(format!("mneme-bad-fingerprint-{}.json", Ulid::new()));
         std::fs::write(
             &path,
-            serde_json::to_vec(&StoreExportEnvelopeV5::new(export)).unwrap(),
+            serde_json::to_vec(&StoreExportEnvelopeV6::new(export)).unwrap(),
         )
         .unwrap();
         let malformed = MemStore::load(&path).unwrap();

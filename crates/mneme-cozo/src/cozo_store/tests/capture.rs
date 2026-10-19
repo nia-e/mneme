@@ -646,7 +646,7 @@ async fn original_legacy_proof_replays_after_current_node_curation_without_rewri
         )
         .unwrap();
         let mut stored = captured_node(legacy_source);
-        stored.set_status(NodeStatus::Archived);
+        stored.set_status(NodeStatus::Archived).unwrap();
         stored.try_set_confidence(0.9).unwrap();
         store.put_node(&stored).await.unwrap();
         store.upsert(stored.id(), &EMBEDDING).await.unwrap();
@@ -726,7 +726,7 @@ async fn optional_prior_contract(store: &dyn GraphStore) {
             "deleted" => store.delete_node(target.id()).await.unwrap(),
             "archived" => {
                 let mut archived = target.clone();
-                archived.set_status(NodeStatus::Archived);
+                archived.set_status(NodeStatus::Archived).unwrap();
                 store.put_node(&archived).await.unwrap();
             }
             "full" => fill_incident(store, target.id(), MAX_INCIDENT_EDGES).await,

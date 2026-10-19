@@ -9,15 +9,40 @@
 use std::collections::HashSet;
 use std::num::{NonZeroU16, NonZeroU32};
 
+#[cfg(test)]
+use mneme_core::EmbeddingFingerprint;
+#[cfg(test)]
 use mneme_core::episode::{
     EpisodeHeader, EpisodeIdentity, EpisodeRecordingSession, EpisodeThread, EpisodeTime,
     MAX_OCCURRENCE_CONTEXTS_JSON_BYTES, OccurrenceContextRef, OccurrenceContexts, OccurrenceSpan,
 };
+#[cfg(test)]
 use mneme_core::tagged::{TaggedAnnWork, TaggedSeedCoverage};
-use mneme_core::{BodySpan, Edge, EdgeKind, EmbeddingFingerprint, NodeId, NodeSummary, Timestamp};
+#[cfg(test)]
+use mneme_core::{BodySpan, Edge, EdgeKind, NodeSummary};
+use mneme_core::{NodeId, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
+
+mod query;
+use query::minimum_retrieval_metadata;
+pub use query::{
+    ProjectionWatermark, QueryBody, QueryEnvelope, QueryHit, QueryInputError, QueryNodeStatus,
+    RankEvidence, RetrievalLane, RetrievalMetadata, RetrievalMetadataError, RetrievalMode,
+    RetrievalStamp,
+};
+
+mod cards;
+#[cfg(test)]
+use cards::maximum_occurrence_contexts;
+use cards::{ContentTrust, SourceCard, WireCard, worst_episode_metadata};
+pub use cards::{
+    CoreInputCard, EpisodeAnchor, EpisodeCard, EpisodeCardMetadata, EpisodeInputCard,
+    EpisodeOrigin, ExpansionCard, ExpansionInputCard, HitCard, NodeCard, PrimaryInputCard,
+    SummaryText, canonical_episode_origins, canonicalize_episode_origins,
+    validate_episode_card_metadata,
+};
 
 mod timestamp;
 pub use timestamp::{
@@ -29,576 +54,6 @@ mod touchstone;
 pub use touchstone::*;
 
 const CONTEXT_SCHEMA: &str = "mneme.context.v7";
-const QUERY_SCHEMA: &str = "mneme.query.v3";
-const MAX_RETRIEVAL_STAMP_TEXT_BYTES: usize = 256;
-const MAX_PROJECTION_WATERMARKS: usize = 8;
-const MAX_QUERY_HITS_PER_LANE: usize = 256;
-const TAG_MEMBERSHIP_PROJECTION: &str = "tag-membership";
-
-/// Whether a retrieval used ordinary ANN seeds or the bounded tagged path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetrievalMode {
-    Untagged,
-    Tagged,
-}
-
-/// The ordinary searchable retrieval lane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetrievalLane {
-    Primary,
-}
-
-/// Stable ordering evidence for a query hit. Every rank is one-based and local
-/// to its own retrieval leg; absent evidence means that leg did not retain the
-/// node.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct RankEvidence {
-    dense_rank: Option<NonZeroU16>,
-    sparse_rank: Option<NonZeroU16>,
-    graph_rank: Option<NonZeroU16>,
-    rerank_rank: Option<NonZeroU16>,
-}
-
-impl RankEvidence {
-    pub const fn new(
-        dense_rank: Option<NonZeroU16>,
-        sparse_rank: Option<NonZeroU16>,
-        graph_rank: Option<NonZeroU16>,
-        rerank_rank: Option<NonZeroU16>,
-    ) -> Self {
-        Self {
-            dense_rank,
-            sparse_rank,
-            graph_rank,
-            rerank_rank,
-        }
-    }
-
-    pub const fn dense_rank(self) -> Option<NonZeroU16> {
-        self.dense_rank
-    }
-
-    pub const fn sparse_rank(self) -> Option<NonZeroU16> {
-        self.sparse_rank
-    }
-
-    pub const fn graph_rank(self) -> Option<NonZeroU16> {
-        self.graph_rank
-    }
-
-    pub const fn rerank_rank(self) -> Option<NonZeroU16> {
-        self.rerank_rank
-    }
-}
-
-/// Lifecycle label exposed by diagnostic query output.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryNodeStatus {
-    Active,
-    Archived,
-}
-
-/// Optional body state for a diagnostic query hit. Keeping the state typed
-/// prevents `null` from ambiguously meaning "not requested" or "budget ran
-/// out".
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum QueryBody {
-    NotRequested,
-    OmittedBudget,
-    Included {
-        content: String,
-        source_start: u64,
-        source_end: u64,
-        next_offset: Option<u64>,
-        truncated: bool,
-    },
-}
-
-impl QueryBody {
-    pub fn included(
-        content: impl Into<String>,
-        source_start: u64,
-        source_end: u64,
-        next_offset: Option<u64>,
-    ) -> Result<Self, QueryInputError> {
-        let body = Self::Included {
-            content: content.into(),
-            source_start,
-            source_end,
-            next_offset,
-            truncated: next_offset.is_some(),
-        };
-        body.validate()?;
-        Ok(body)
-    }
-
-    const fn is_partial(&self) -> bool {
-        match self {
-            Self::NotRequested => false,
-            Self::OmittedBudget => true,
-            Self::Included { truncated, .. } => *truncated,
-        }
-    }
-
-    fn validate(&self) -> Result<(), QueryInputError> {
-        match self {
-            Self::NotRequested | Self::OmittedBudget => Ok(()),
-            Self::Included {
-                source_start,
-                source_end,
-                next_offset,
-                truncated,
-                ..
-            } if source_end >= source_start
-                && next_offset.is_none_or(|next| next == *source_end)
-                && *truncated == next_offset.is_some() =>
-            {
-                Ok(())
-            }
-            Self::Included { .. } => Err(QueryInputError::InvalidBodyRange),
-        }
-    }
-}
-
-/// One typed diagnostic query hit. `lane_rank` is meaningful only inside the
-/// containing lane; no score is exposed or compared across lanes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct QueryHit {
-    id: NodeId,
-    /// Node creation in Unix epoch milliseconds, not last verification or update.
-    created: Timestamp,
-    created_utc: String,
-    lane_rank: NonZeroU16,
-    evidence: RankEvidence,
-    status: QueryNodeStatus,
-    summary: String,
-    summary_truncated: bool,
-    body: QueryBody,
-}
-
-impl QueryHit {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        id: NodeId,
-        created: Timestamp,
-        lane_rank: NonZeroU16,
-        evidence: RankEvidence,
-        status: QueryNodeStatus,
-        summary: impl Into<String>,
-        summary_truncated: bool,
-        body: QueryBody,
-    ) -> Self {
-        Self {
-            id,
-            created,
-            created_utc: format_timestamp_millis(created),
-            lane_rank,
-            evidence,
-            status,
-            summary: summary.into(),
-            summary_truncated,
-            body,
-        }
-    }
-
-    pub const fn id(&self) -> NodeId {
-        self.id
-    }
-
-    pub const fn lane_rank(&self) -> NonZeroU16 {
-        self.lane_rank
-    }
-
-    pub const fn evidence(&self) -> RankEvidence {
-        self.evidence
-    }
-
-    const fn presentation_partial(&self) -> bool {
-        self.summary_truncated || self.body.is_partial()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct RetrievalPolicyIdentity {
-    contract: String,
-    fingerprint_sha256: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct RetrievalIndexSet {
-    embedding: EmbeddingFingerprint,
-    vector_semantics: String,
-    lexical_semantics: Option<String>,
-    reranker_semantics: Option<String>,
-}
-
-/// One backend-verified projection generation carried by the retrieval stamp.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ProjectionWatermark {
-    projection: String,
-    watermark: String,
-}
-
-impl ProjectionWatermark {
-    pub fn projection(&self) -> &str {
-        &self.projection
-    }
-
-    pub fn watermark(&self) -> &str {
-        &self.watermark
-    }
-}
-
-/// Engine-independent wire identity for the policy and indexes that produced a
-/// retrieval result. Every string is bounded at construction, and fingerprints
-/// remain fixed-size SHA-256 values.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RetrievalStamp {
-    retrieval_policy: RetrievalPolicyIdentity,
-    index_set: RetrievalIndexSet,
-    projection_watermarks: Vec<ProjectionWatermark>,
-}
-
-impl RetrievalStamp {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        policy_contract: impl Into<String>,
-        policy_fingerprint: [u8; 32],
-        embedding: EmbeddingFingerprint,
-        vector_semantics: impl Into<String>,
-        lexical_semantics: Option<String>,
-        reranker_semantics: Option<String>,
-        projection_watermarks: Vec<(String, String)>,
-    ) -> Result<Self, RetrievalMetadataError> {
-        let policy_contract = policy_contract.into();
-        let vector_semantics = vector_semantics.into();
-        validate_stamp_text("retrieval policy contract", &policy_contract)?;
-        embedding
-            .validate()
-            .map_err(RetrievalMetadataError::InvalidEmbeddingFingerprint)?;
-        for (field, value) in [
-            ("embedding id", embedding.embedding_id.as_str()),
-            ("embedding normalization", embedding.normalization.as_str()),
-            ("embedding query mode", embedding.query_mode.as_str()),
-            ("vector semantics", vector_semantics.as_str()),
-        ] {
-            validate_stamp_text(field, value)?;
-        }
-        for (field, value) in [
-            ("lexical semantics", lexical_semantics.as_deref()),
-            ("reranker semantics", reranker_semantics.as_deref()),
-        ] {
-            if let Some(value) = value {
-                validate_stamp_text(field, value)?;
-            }
-        }
-        if projection_watermarks.len() > MAX_PROJECTION_WATERMARKS {
-            return Err(RetrievalMetadataError::TooManyProjectionWatermarks {
-                provided: projection_watermarks.len(),
-                maximum: MAX_PROJECTION_WATERMARKS,
-            });
-        }
-        let mut seen = HashSet::with_capacity(projection_watermarks.len());
-        let mut watermarks = Vec::with_capacity(projection_watermarks.len());
-        for (projection, watermark) in projection_watermarks {
-            validate_stamp_text("projection name", &projection)?;
-            validate_stamp_text("projection watermark", &watermark)?;
-            if !seen.insert(projection.clone()) {
-                return Err(RetrievalMetadataError::DuplicateProjection { projection });
-            }
-            watermarks.push(ProjectionWatermark {
-                projection,
-                watermark,
-            });
-        }
-        Ok(Self {
-            retrieval_policy: RetrievalPolicyIdentity {
-                contract: policy_contract,
-                fingerprint_sha256: hex_digest(&policy_fingerprint),
-            },
-            index_set: RetrievalIndexSet {
-                embedding,
-                vector_semantics,
-                lexical_semantics,
-                reranker_semantics,
-            },
-            projection_watermarks: watermarks,
-        })
-    }
-
-    pub fn projection_watermarks(&self) -> &[ProjectionWatermark] {
-        &self.projection_watermarks
-    }
-
-    fn has_projection(&self, name: &str) -> bool {
-        self.projection_watermarks
-            .iter()
-            .any(|watermark| watermark.projection == name)
-    }
-}
-
-fn validate_stamp_text(field: &'static str, value: &str) -> Result<(), RetrievalMetadataError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-        || value.len() > MAX_RETRIEVAL_STAMP_TEXT_BYTES
-    {
-        return Err(RetrievalMetadataError::InvalidStampText {
-            field,
-            bytes: value.len(),
-            maximum: MAX_RETRIEVAL_STAMP_TEXT_BYTES,
-        });
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct RetrievalLaneMetadata {
-    seed_coverage: Option<TaggedSeedCoverage>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct RetrievalLanesMetadata {
-    primary: RetrievalLaneMetadata,
-}
-
-/// Bounded retrieval omissions and the policy/index stamp that produced them.
-/// Seed coverage describes only tagged seed selection; graph expansion may add
-/// untagged final hits without changing it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RetrievalMetadata {
-    mode: RetrievalMode,
-    lanes: RetrievalLanesMetadata,
-    work: Option<TaggedAnnWork>,
-    stamp: RetrievalStamp,
-    partial: bool,
-}
-
-impl RetrievalMetadata {
-    pub fn untagged(stamp: RetrievalStamp) -> Result<Self, RetrievalMetadataError> {
-        if stamp.has_projection(TAG_MEMBERSHIP_PROJECTION) {
-            return Err(RetrievalMetadataError::UnexpectedTagMembershipWatermark);
-        }
-        Ok(Self {
-            mode: RetrievalMode::Untagged,
-            lanes: RetrievalLanesMetadata {
-                primary: RetrievalLaneMetadata {
-                    seed_coverage: None,
-                },
-            },
-            work: None,
-            stamp,
-            partial: false,
-        })
-    }
-
-    pub fn tagged(
-        stamp: RetrievalStamp,
-        work: TaggedAnnWork,
-        primary_seed_coverage: TaggedSeedCoverage,
-    ) -> Result<Self, RetrievalMetadataError> {
-        if !stamp.has_projection(TAG_MEMBERSHIP_PROJECTION) {
-            return Err(RetrievalMetadataError::MissingTagMembershipWatermark);
-        }
-        work.validate()
-            .map_err(|error| RetrievalMetadataError::InvalidTaggedWork(error.to_string()))?;
-        primary_seed_coverage.validate().map_err(|error| {
-            RetrievalMetadataError::InvalidSeedCoverage {
-                lane: RetrievalLane::Primary,
-                message: error.to_string(),
-            }
-        })?;
-        let partial = primary_seed_coverage.is_partial();
-        Ok(Self {
-            mode: RetrievalMode::Tagged,
-            lanes: RetrievalLanesMetadata {
-                primary: RetrievalLaneMetadata {
-                    seed_coverage: Some(primary_seed_coverage),
-                },
-            },
-            work: Some(work),
-            stamp,
-            partial,
-        })
-    }
-
-    pub const fn mode(&self) -> RetrievalMode {
-        self.mode
-    }
-
-    pub const fn work(&self) -> Option<TaggedAnnWork> {
-        self.work
-    }
-
-    pub const fn stamp(&self) -> &RetrievalStamp {
-        &self.stamp
-    }
-
-    pub const fn partial(&self) -> bool {
-        self.partial
-    }
-
-    pub fn seed_coverage(&self, lane: RetrievalLane) -> Option<&TaggedSeedCoverage> {
-        match lane {
-            RetrievalLane::Primary => self.lanes.primary.seed_coverage.as_ref(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum RetrievalMetadataError {
-    #[error(
-        "invalid {field}: value is {bytes} bytes; maximum is {maximum}, and it must be nonempty, trimmed, and control-free"
-    )]
-    InvalidStampText {
-        field: &'static str,
-        bytes: usize,
-        maximum: usize,
-    },
-    #[error("invalid embedding fingerprint: {0}")]
-    InvalidEmbeddingFingerprint(String),
-    #[error("retrieval stamp has {provided} projection watermarks; maximum is {maximum}")]
-    TooManyProjectionWatermarks { provided: usize, maximum: usize },
-    #[error("retrieval stamp repeats projection {projection:?}")]
-    DuplicateProjection { projection: String },
-    #[error("untagged retrieval must not carry a tag-membership watermark")]
-    UnexpectedTagMembershipWatermark,
-    #[error("tagged retrieval is missing its verified tag-membership watermark")]
-    MissingTagMembershipWatermark,
-    #[error("invalid tagged work counters: {0}")]
-    InvalidTaggedWork(String),
-    #[error("invalid {lane:?} seed coverage: {message}")]
-    InvalidSeedCoverage {
-        lane: RetrievalLane,
-        message: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct QueryLane {
-    seed_coverage: Option<TaggedSeedCoverage>,
-    hits: Vec<QueryHit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct QueryLanes {
-    primary: QueryLane,
-}
-
-/// Versioned diagnostic query output shared by the CLI and MCP adapters.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct QueryEnvelope {
-    schema: &'static str,
-    mode: RetrievalMode,
-    lanes: QueryLanes,
-    work: Option<TaggedAnnWork>,
-    stamp: RetrievalStamp,
-    partial: bool,
-}
-
-impl QueryEnvelope {
-    pub fn new(
-        retrieval: RetrievalMetadata,
-        primary: Vec<QueryHit>,
-    ) -> Result<Self, QueryInputError> {
-        validate_query_hits(RetrievalLane::Primary, &primary)?;
-        validate_query_seed_coverage(&retrieval, RetrievalLane::Primary, &primary)?;
-        let mut ids = HashSet::with_capacity(primary.len());
-        for hit in &primary {
-            if !ids.insert(hit.id) {
-                return Err(QueryInputError::DuplicateNode { id: hit.id });
-            }
-        }
-        let primary_seed_coverage = retrieval.lanes.primary.seed_coverage.clone();
-        let presentation_partial = primary.iter().any(QueryHit::presentation_partial);
-        Ok(Self {
-            schema: QUERY_SCHEMA,
-            mode: retrieval.mode,
-            lanes: QueryLanes {
-                primary: QueryLane {
-                    seed_coverage: primary_seed_coverage,
-                    hits: primary,
-                },
-            },
-            work: retrieval.work,
-            stamp: retrieval.stamp,
-            partial: retrieval.partial || presentation_partial,
-        })
-    }
-
-    pub const fn schema(&self) -> &str {
-        self.schema
-    }
-
-    pub const fn partial(&self) -> bool {
-        self.partial
-    }
-}
-
-fn validate_query_hits(lane: RetrievalLane, hits: &[QueryHit]) -> Result<(), QueryInputError> {
-    if hits.len() > MAX_QUERY_HITS_PER_LANE {
-        return Err(QueryInputError::TooManyHits {
-            lane,
-            provided: hits.len(),
-            maximum: MAX_QUERY_HITS_PER_LANE,
-        });
-    }
-    for hit in hits {
-        hit.body.validate()?;
-    }
-    for pair in hits.windows(2) {
-        if pair[0].lane_rank >= pair[1].lane_rank {
-            return Err(QueryInputError::RanksNotStrictlyIncreasing {
-                lane,
-                previous: pair[0].lane_rank,
-                next: pair[1].lane_rank,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_query_seed_coverage(
-    retrieval: &RetrievalMetadata,
-    lane: RetrievalLane,
-    hits: &[QueryHit],
-) -> Result<(), QueryInputError> {
-    if retrieval.mode() == RetrievalMode::Tagged
-        && !hits.is_empty()
-        && retrieval.seed_coverage(lane).is_none()
-    {
-        return Err(QueryInputError::MissingTaggedSeedCoverage { lane });
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum QueryInputError {
-    #[error("query body range is internally inconsistent")]
-    InvalidBodyRange,
-    #[error("{lane:?} query lane has {provided} hits; maximum is {maximum}")]
-    TooManyHits {
-        lane: RetrievalLane,
-        provided: usize,
-        maximum: usize,
-    },
-    #[error("tagged {lane:?} query hits have no seed_coverage statement")]
-    MissingTaggedSeedCoverage { lane: RetrievalLane },
-    #[error(
-        "{lane:?} query ranks must be strictly increasing, but {previous} was followed by {next}"
-    )]
-    RanksNotStrictlyIncreasing {
-        lane: RetrievalLane,
-        previous: NonZeroU16,
-        next: NonZeroU16,
-    },
-    #[error("node {id:?} occurs more than once across query lanes")]
-    DuplicateNode { id: NodeId },
-}
 
 /// A retrieval lane in the packed context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -1002,59 +457,6 @@ pub enum BudgetError {
     MandatoryEnvelopeTooLarge { required: u32, available: u32 },
 }
 
-macro_rules! input_card {
-    ($name:ident) => {
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub struct $name(SourceCard);
-
-        impl $name {
-            pub fn new(
-                id: NodeId,
-                created: Timestamp,
-                rank: NonZeroU16,
-                summary: impl Into<String>,
-            ) -> Result<Self, InputError> {
-                let mut source = SourceCard::new(id, rank, summary.into())?;
-                source.created = Some(created);
-                Ok(Self(source))
-            }
-
-            /// When the semantic node was recorded; not its last verification.
-            pub fn created(&self) -> Timestamp {
-                self.0
-                    .created
-                    .expect("semantic input always has canonical creation time")
-            }
-
-            pub const fn id(&self) -> NodeId {
-                self.0.id
-            }
-
-            pub const fn rank(&self) -> NonZeroU16 {
-                self.0.rank
-            }
-
-            pub fn summary(&self) -> &str {
-                &self.0.summary
-            }
-
-            pub fn with_touchstone(mut self, view: TouchstoneView) -> Self {
-                self.0.touchstone = Some(view);
-                self
-            }
-
-            pub fn with_rank(mut self, rank: NonZeroU16) -> Self {
-                self.0.rank = rank;
-                self
-            }
-        }
-    };
-}
-
-input_card!(CoreInputCard);
-input_card!(PrimaryInputCard);
-input_card!(ExpansionInputCard);
-
 /// Why an owner could not run an episodic search. Other backend errors are not
 /// absence and must be propagated by the caller rather than encoded here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1299,442 +701,6 @@ impl EpisodeReferenceRetrieval {
     }
 }
 
-/// The exact frozen anchor which exposed a one-hop reference. Episode anchors
-/// name an immutable edition, not a mutable head or newly discovered scene.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EpisodeAnchor {
-    Semantic { node_id: NodeId },
-    Episode { identity: EpisodeIdentity },
-}
-impl EpisodeAnchor {
-    pub const fn node_id(&self) -> NodeId {
-        match self {
-            Self::Semantic { node_id } => *node_id,
-            Self::Episode { identity } => identity.edition_id,
-        }
-    }
-}
-
-/// Query-local navigation evidence. Body anchors always belong to stored
-/// `from`, even when discovery arrived along an incoming edge.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EpisodeOrigin {
-    Lexical,
-    Reference {
-        anchor: EpisodeAnchor,
-        from: NodeId,
-        to: NodeId,
-        edge_kind: EdgeKind,
-        body_anchor: Option<BodySpan>,
-    },
-}
-
-/// Stable public wire ordering, independent of Rust Debug or process hashes.
-pub fn canonical_episode_origins(mut origins: Vec<EpisodeOrigin>) -> Vec<EpisodeOrigin> {
-    origins.sort_by_cached_key(|origin| {
-        serde_json::to_vec(origin).expect("typed episode origin serializes")
-    });
-    origins.dedup();
-    origins
-}
-
-pub fn canonicalize_episode_origins(
-    value: &serde_json::Value,
-) -> Result<serde_json::Value, InputError> {
-    let origins: Vec<EpisodeOrigin> = serde_json::from_value(value.clone())
-        .map_err(|_| InputError::InvalidEpisode("invalid typed origins"))?;
-    if origins.is_empty() {
-        return Err(InputError::InvalidEpisode(
-            "episode origins cannot be empty",
-        ));
-    }
-    Ok(serde_json::to_value(canonical_episode_origins(origins)).expect("typed origins serialize"))
-}
-
-fn valid_episode_identity(identity: EpisodeIdentity) -> bool {
-    (identity.revision.get() == 0) == (identity.episode_id.node_id() == identity.edition_id)
-}
-
-fn validate_episode_origin(origin: &EpisodeOrigin, edition_id: NodeId) -> Result<(), InputError> {
-    if let EpisodeOrigin::Reference {
-        anchor, from, to, ..
-    } = origin
-    {
-        let anchor_id = anchor.node_id();
-        if matches!(anchor, EpisodeAnchor::Episode { identity } if !valid_episode_identity(*identity))
-            || from == to
-            || !((*from == anchor_id && *to == edition_id)
-                || (*to == anchor_id && *from == edition_id))
-        {
-            return Err(InputError::InvalidEpisode(
-                "reference does not name the exact opposite episode endpoint",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// A checked immutable account with query-local origins and observed head.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EpisodeInputCard(SourceCard);
-
-impl EpisodeInputCard {
-    pub fn new(header: EpisodeHeader, rank: NonZeroU16) -> Result<Self, InputError> {
-        if header.identity.edition_id != header.current_edition_id {
-            return Err(InputError::InvalidEpisode(
-                "only current editions can be presented",
-            ));
-        }
-        Self::from_header(header, rank, EpisodeOrigin::Lexical)
-    }
-
-    pub fn referenced(
-        header: EpisodeHeader,
-        rank: NonZeroU16,
-        anchor: EpisodeAnchor,
-        edge: &Edge,
-    ) -> Result<Self, InputError> {
-        let origin = EpisodeOrigin::Reference {
-            anchor,
-            from: edge.from,
-            to: edge.to,
-            edge_kind: edge.kind,
-            body_anchor: edge.anchor,
-        };
-        validate_episode_origin(&origin, header.identity.edition_id)?;
-        Self::from_header(header, rank, origin)
-    }
-
-    fn from_header(
-        header: EpisodeHeader,
-        rank: NonZeroU16,
-        origin: EpisodeOrigin,
-    ) -> Result<Self, InputError> {
-        let is_initial = header.identity.revision.get() == 0;
-        if is_initial != (header.identity.episode_id.node_id() == header.identity.edition_id) {
-            return Err(InputError::InvalidEpisode(
-                "root identity and revision disagree",
-            ));
-        }
-        // Edition ordinals, not wall-clock monotonicity, establish history
-        // order. A later editorial pass may be recorded after clock rollback.
-        if is_initial && header.recorded_at != header.edition_recorded_at {
-            return Err(InputError::InvalidEpisode("recording timestamps disagree"));
-        }
-        header
-            .occurred
-            .validate()
-            .map_err(|error| InputError::InvalidEpisode(error.0))?;
-        let mut source = SourceCard::new(
-            header.identity.edition_id,
-            rank,
-            header.summary.as_str().to_owned(),
-        )?;
-        source.episode = Some(EpisodeCardMetadata {
-            kind: EpisodeCardKind::Episode,
-            identity: header.identity,
-            current_edition_id: header.current_edition_id,
-            occurred: header.occurred,
-            recorded_at: header.recorded_at,
-            edition_recorded_at: header.edition_recorded_at,
-            thread: header.thread,
-            occurrence_contexts: header.occurrence_contexts,
-            recording_session: header.recording_session,
-            origins: vec![origin],
-        });
-        Ok(Self(source))
-    }
-
-    pub const fn id(&self) -> NodeId {
-        self.0.id
-    }
-
-    pub const fn rank(&self) -> NonZeroU16 {
-        self.0.rank
-    }
-
-    pub fn summary(&self) -> &str {
-        &self.0.summary
-    }
-
-    pub fn identity(&self) -> EpisodeIdentity {
-        self.0
-            .episode
-            .as_ref()
-            .expect("episode input metadata")
-            .identity
-    }
-    pub fn origins(&self) -> &[EpisodeOrigin] {
-        &self
-            .0
-            .episode
-            .as_ref()
-            .expect("episode input metadata")
-            .origins
-    }
-    pub fn header(&self) -> EpisodeHeader {
-        let m = self.0.episode.as_ref().expect("episode input metadata");
-        EpisodeHeader {
-            identity: m.identity,
-            summary: NodeSummary::new(&self.0.summary).expect("validated episode summary"),
-            occurred: m.occurred.clone(),
-            recorded_at: m.recorded_at,
-            edition_recorded_at: m.edition_recorded_at,
-            thread: m.thread.clone(),
-            occurrence_contexts: m.occurrence_contexts.clone(),
-            recording_session: m.recording_session.clone(),
-            current_edition_id: m.current_edition_id,
-        }
-    }
-    pub fn with_rank(mut self, rank: NonZeroU16) -> Self {
-        self.0.rank = rank;
-        self
-    }
-    pub fn merge_origins(&mut self, other: &Self) -> Result<(), InputError> {
-        if self.0.summary != other.0.summary {
-            return Err(InputError::InvalidEpisode(
-                "cannot merge different immutable accounts",
-            ));
-        }
-        self.0
-            .episode
-            .as_mut()
-            .expect("episode input metadata")
-            .merge_origins(other.0.episode.as_ref().expect("episode input metadata"))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EpisodeCardKind {
-    Episode,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EpisodeCardMetadata {
-    kind: EpisodeCardKind,
-    #[serde(flatten)]
-    identity: EpisodeIdentity,
-    current_edition_id: NodeId,
-    occurred: OccurrenceSpan,
-    recorded_at: EpisodeTime,
-    edition_recorded_at: EpisodeTime,
-    thread: Option<EpisodeThread>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    occurrence_contexts: Option<OccurrenceContexts>,
-    recording_session: Option<EpisodeRecordingSession>,
-    origins: Vec<EpisodeOrigin>,
-}
-
-impl EpisodeCardMetadata {
-    pub fn time_presentation(&self) -> EpisodeTimePresentation {
-        EpisodeTimePresentation::new(&self.occurred, self.recorded_at, self.edition_recorded_at)
-    }
-
-    pub const fn identity(&self) -> EpisodeIdentity {
-        self.identity
-    }
-
-    pub const fn current_edition_id(&self) -> NodeId {
-        self.current_edition_id
-    }
-
-    pub const fn occurred(&self) -> &OccurrenceSpan {
-        &self.occurred
-    }
-
-    pub const fn recorded_at(&self) -> EpisodeTime {
-        self.recorded_at
-    }
-
-    pub const fn edition_recorded_at(&self) -> EpisodeTime {
-        self.edition_recorded_at
-    }
-
-    pub const fn thread(&self) -> Option<&EpisodeThread> {
-        self.thread.as_ref()
-    }
-
-    pub const fn occurrence_contexts(&self) -> Option<&OccurrenceContexts> {
-        self.occurrence_contexts.as_ref()
-    }
-    pub fn recording_session(&self) -> Option<&EpisodeRecordingSession> {
-        self.recording_session.as_ref()
-    }
-    pub fn origins(&self) -> &[EpisodeOrigin] {
-        &self.origins
-    }
-    pub fn merge_origins(&mut self, other: &Self) -> Result<(), InputError> {
-        let mut account = other.clone();
-        account.current_edition_id = self.current_edition_id;
-        account.origins = self.origins.clone();
-        if *self != account {
-            return Err(InputError::InvalidEpisode(
-                "cannot merge different immutable accounts",
-            ));
-        }
-        let origins =
-            canonical_episode_origins(self.origins.iter().chain(&other.origins).cloned().collect());
-        if origins.contains(&EpisodeOrigin::Lexical)
-            && self.current_edition_id != self.identity.edition_id
-        {
-            return Err(InputError::InvalidEpisode(
-                "lexical origin requires the observed current edition",
-            ));
-        }
-        self.origins = origins;
-        Ok(())
-    }
-}
-
-/// Shared native owner-card validation; library adapters retain their own
-/// summary/trust/ID checks but do not reinterpret historical episode metadata.
-pub fn validate_episode_card_metadata(
-    card: &serde_json::Value,
-    lexical_searched: bool,
-) -> Result<EpisodeCardMetadata, InputError> {
-    if card.get("recording_session").is_none() {
-        return Err(InputError::InvalidEpisode(
-            "recording_session must be explicit",
-        ));
-    }
-    let m: EpisodeCardMetadata = serde_json::from_value(card.clone())
-        .map_err(|_| InputError::InvalidEpisode("invalid typed episode metadata"))?;
-    if !valid_episode_identity(m.identity)
-        || (m.identity.revision.get() == 0 && m.recorded_at != m.edition_recorded_at)
-        || m.origins.is_empty()
-        || m.origins != canonical_episode_origins(m.origins.clone())
-        || (m.origins.contains(&EpisodeOrigin::Lexical)
-            && (!lexical_searched || m.identity.edition_id != m.current_edition_id))
-    {
-        return Err(InputError::InvalidEpisode(
-            "invalid episode identity or origins",
-        ));
-    }
-    m.occurred
-        .validate()
-        .map_err(|e| InputError::InvalidEpisode(e.0))?;
-    for origin in &m.origins {
-        validate_episode_origin(origin, m.identity.edition_id)?;
-    }
-    let display = serde_json::to_value(m.time_presentation()).expect("typed dates serialize");
-    for key in ["occurred_utc", "recorded_at_utc", "edition_recorded_at_utc"] {
-        if card.get(key).is_some_and(|value| value != &display[key]) {
-            return Err(InputError::InvalidEpisode(
-                "calendar presentation disagrees with canonical time",
-            ));
-        }
-    }
-    let canonical = serde_json::to_value(&m).expect("typed metadata serializes");
-    for key in ["origins", "occurrence_contexts", "recording_session"] {
-        if card.get(key) != canonical.get(key) {
-            return Err(InputError::InvalidEpisode("noncanonical episode metadata"));
-        }
-    }
-    Ok(m)
-}
-
-/// Conservative fixed-header reserve plus minimal legal origins. Origin unions
-/// are input-dependent; only runtime packing proves the whole mandatory card
-/// footprint. Never pretend the reference-work ceiling is a small scene quota.
-fn worst_episode_metadata() -> EpisodeCardMetadata {
-    use mneme_core::episode::{EpisodeId, EpisodeRevision, MAX_EPISODE_THREAD_BYTES};
-
-    let last = EpisodeTime::new(i64::MAX as u128).expect("maximum episode timestamp");
-    let before = EpisodeTime::new(i64::MAX as u128 - 1).expect("episode timestamp");
-    let id = NodeId(ulid::Ulid::from(u128::MAX));
-    EpisodeCardMetadata {
-        kind: EpisodeCardKind::Episode,
-        identity: EpisodeIdentity {
-            episode_id: EpisodeId::new(NodeId(ulid::Ulid::from(u128::MAX - 1))),
-            edition_id: id,
-            revision: EpisodeRevision::new(u32::MAX),
-        },
-        current_edition_id: id,
-        occurred: OccurrenceSpan::range(before, last).expect("ordered time range"),
-        recorded_at: last,
-        edition_recorded_at: last,
-        thread: Some(
-            EpisodeThread::new("\"".repeat(MAX_EPISODE_THREAD_BYTES))
-                .expect("bounded thread with worst-case JSON escaping"),
-        ),
-        occurrence_contexts: Some(maximum_occurrence_contexts()),
-        recording_session: Some(
-            EpisodeRecordingSession::new("\"".repeat(mneme_core::MAX_CAPTURE_SESSION_BYTES))
-                .expect("maximum session"),
-        ),
-        origins: vec![EpisodeOrigin::Lexical],
-    }
-}
-
-/// Fill the complete context collection's byte allowance, not an individual
-/// identifier allowance. Runtime cards retain the real collection unchanged.
-fn maximum_occurrence_contexts() -> OccurrenceContexts {
-    let minimum = OccurrenceContexts::new(vec![
-        OccurrenceContextRef::new("x", "x", None).expect("fixed valid context"),
-    ])
-    .expect("fixed valid context collection");
-    let key = "x".repeat(MAX_OCCURRENCE_CONTEXTS_JSON_BYTES - minimum.compact_json_len() + 1);
-    let contexts = OccurrenceContexts::new(vec![
-        OccurrenceContextRef::new("x", key, None).expect("bounded context identifier"),
-    ])
-    .expect("maximum context collection fits its byte allowance");
-    debug_assert_eq!(
-        contexts.compact_json_len(),
-        MAX_OCCURRENCE_CONTEXTS_JSON_BYTES
-    );
-    contexts
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SourceCard {
-    id: NodeId,
-    created: Option<Timestamp>,
-    rank: NonZeroU16,
-    summary: String,
-    source_bytes: u32,
-    episode: Option<EpisodeCardMetadata>,
-    touchstone: Option<TouchstoneView>,
-}
-
-impl SourceCard {
-    fn new(id: NodeId, rank: NonZeroU16, summary: String) -> Result<Self, InputError> {
-        let source_bytes = u32::try_from(summary.len()).map_err(|_| InputError::SummaryTooLarge)?;
-        Ok(Self {
-            id,
-            created: None,
-            rank,
-            summary,
-            source_bytes,
-            episode: None,
-            touchstone: None,
-        })
-    }
-
-    fn skeleton(&self) -> WireCard {
-        WireCard {
-            id: self.id,
-            created: self.created,
-            created_utc: self.created.map(format_timestamp_millis),
-            episode_times_utc: self
-                .episode
-                .as_ref()
-                .map(EpisodeCardMetadata::time_presentation),
-            rank: self.rank,
-            summary: SummaryText {
-                text: String::new(),
-                complete: self.summary.is_empty(),
-                source_bytes: self.source_bytes,
-            },
-            content_trust: ContentTrust::Untrusted,
-            episode: self.episode.clone(),
-            touchstone: self.touchstone.clone(),
-        }
-    }
-}
-
 /// A bounded input window. `further_tail_unknown` distinguishes known omissions
 /// from results outside the caller's considered window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1785,13 +751,13 @@ impl PackingInput {
         primary: LaneWindow<PrimaryInputCard>,
         expansion: LaneWindow<ExpansionInputCard>,
     ) -> Result<Self, InputError> {
-        for (lane, has_cards) in [(RetrievalLane::Primary, !primary.cards.is_empty())] {
-            if retrieval.mode() == RetrievalMode::Tagged
-                && has_cards
-                && retrieval.seed_coverage(lane).is_none()
-            {
-                return Err(InputError::MissingTaggedSeedCoverage { lane });
-            }
+        if retrieval.mode() == RetrievalMode::Tagged
+            && !primary.cards.is_empty()
+            && retrieval.seed_coverage(RetrievalLane::Primary).is_none()
+        {
+            return Err(InputError::MissingTaggedSeedCoverage {
+                lane: RetrievalLane::Primary,
+            });
         }
         let unknown_tail = [
             core.further_tail_unknown,
@@ -1800,9 +766,9 @@ impl PackingInput {
             false,
         ];
         let lanes = [
-            core.cards.into_iter().map(|card| card.0).collect(),
-            primary.cards.into_iter().map(|card| card.0).collect(),
-            expansion.cards.into_iter().map(|card| card.0).collect(),
+            core.cards.into_iter().map(SourceCard::from).collect(),
+            primary.cards.into_iter().map(SourceCard::from).collect(),
+            expansion.cards.into_iter().map(SourceCard::from).collect(),
             Vec::new(),
         ];
         validate_input(&lanes)?;
@@ -1850,7 +816,7 @@ impl PackingInput {
         }
         self.unknown_tail[Lane::Episodic.index()] = episodes.further_tail_unknown;
         self.lanes[Lane::Episodic.index()] =
-            episodes.cards.into_iter().map(|card| card.0).collect();
+            episodes.cards.into_iter().map(SourceCard::from).collect();
         self.episodic_retrieval = retrieval;
         validate_input(&self.lanes)?;
         Ok(self)
@@ -1938,98 +904,6 @@ pub enum InputError {
     DuplicateNode { id: NodeId },
     #[error("tagged {lane:?} presentation cards have no seed_coverage statement")]
     MissingTaggedSeedCoverage { lane: RetrievalLane },
-}
-
-/// UTF-8 summary text with an explicit source-length/completeness contract.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct SummaryText {
-    text: String,
-    complete: bool,
-    source_bytes: u32,
-}
-
-impl SummaryText {
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub const fn complete(&self) -> bool {
-        self.complete
-    }
-
-    pub const fn source_bytes(&self) -> u32 {
-        self.source_bytes
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ContentTrust {
-    Untrusted,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct WireCard {
-    id: NodeId,
-    /// Semantic node creation, not a claim about present-day validity. Episodes
-    /// retain their separate occurrence and account/edition recording times.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    created: Option<Timestamp>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    created_utc: Option<String>,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    episode_times_utc: Option<EpisodeTimePresentation>,
-    rank: NonZeroU16,
-    summary: SummaryText,
-    content_trust: ContentTrust,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    episode: Option<EpisodeCardMetadata>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    touchstone: Option<TouchstoneView>,
-}
-
-macro_rules! output_card {
-    ($name:ident) => {
-        #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-        #[serde(transparent)]
-        pub struct $name(WireCard);
-
-        impl $name {
-            pub const fn id(&self) -> NodeId {
-                self.0.id
-            }
-
-            pub const fn rank(&self) -> NonZeroU16 {
-                self.0.rank
-            }
-
-            pub const fn summary(&self) -> &SummaryText {
-                &self.0.summary
-            }
-
-            pub fn touchstone(&self) -> Option<&TouchstoneView> {
-                self.0.touchstone.as_ref()
-            }
-
-            pub const fn content_is_untrusted(&self) -> bool {
-                true
-            }
-        }
-    };
-}
-
-output_card!(NodeCard);
-output_card!(HitCard);
-output_card!(ExpansionCard);
-output_card!(EpisodeCard);
-
-impl EpisodeCard {
-    pub fn episode(&self) -> &EpisodeCardMetadata {
-        self.0
-            .episode
-            .as_ref()
-            .expect("episode output is constructed only from typed episode input")
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -2335,7 +1209,7 @@ pub fn pack(budget: &PresentationBudget, input: &PackingInput) -> Result<PackPla
         .map_err(PackError::InvalidInput)?;
     for lane in Lane::ALL {
         for source in &input.lanes[lane.index()] {
-            if source.touchstone.is_some() {
+            if source.touchstone().is_some() {
                 if lane == Lane::Episodic || !input.touchstone_retrieval.searched {
                     return Err(PackError::InvalidInput(InputError::InvalidTouchstone(
                         "unsearched or episodic touchstone owner",
@@ -2349,15 +1223,12 @@ pub fn pack(budget: &PresentationBudget, input: &PackingInput) -> Result<PackPla
         }
     }
     for source in &input.lanes[Lane::Episodic.index()] {
-        let metadata = source
-            .episode
-            .as_ref()
-            .expect("typed episodic input metadata");
-        for origin in &metadata.origins {
+        let metadata = source.episode().expect("typed episodic input metadata");
+        for origin in metadata.origins() {
             match origin {
                 EpisodeOrigin::Lexical
                     if input.episodic_retrieval.state() != EpisodicRetrievalState::Searched
-                        || metadata.identity.edition_id != metadata.current_edition_id =>
+                        || metadata.identity().edition_id != metadata.current_edition_id() =>
                 {
                     return Err(PackError::InvalidInput(
                         InputError::EpisodeCardsWithoutSearch,
@@ -3044,20 +1915,6 @@ fn minimum_control_reserve_bytes() -> u32 {
     })
 }
 
-fn minimum_retrieval_metadata() -> RetrievalMetadata {
-    let stamp = RetrievalStamp::new(
-        "x",
-        [0; 32],
-        EmbeddingFingerprint::new("x", 1, "x", "x"),
-        "x",
-        None,
-        None,
-        Vec::new(),
-    )
-    .expect("fixed minimum retrieval stamp is valid");
-    RetrievalMetadata::untagged(stamp).expect("fixed minimum retrieval metadata is valid")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3527,7 +2384,7 @@ mod tests {
             "x",
             None,
             None,
-            vec![(TAG_MEMBERSHIP_PROJECTION.into(), "tag-view".into())],
+            vec![("tag-membership".into(), "tag-view".into())],
         )
         .unwrap();
         let retrieval = RetrievalMetadata::tagged(
@@ -3577,8 +2434,11 @@ mod tests {
             MAX_OCCURRENCE_CONTEXTS_JSON_BYTES
         );
         let with = worst_episode_metadata();
-        let mut without = with.clone();
-        without.occurrence_contexts = None;
+        let mut without = serde_json::to_value(&with).unwrap();
+        without
+            .as_object_mut()
+            .unwrap()
+            .remove("occurrence_contexts");
         assert_eq!(
             compact_len(&with) - compact_len(&without),
             (b",\"occurrence_contexts\":".len() + MAX_OCCURRENCE_CONTEXTS_JSON_BYTES) as u32,
@@ -3690,10 +2550,9 @@ mod tests {
     #[test]
     fn occurrence_contexts_are_never_shed_to_make_an_episode_fit() {
         let old_header = episode_header(None);
-        let mut minimal = EpisodeInputCard::new(old_header.clone(), rank(1))
-            .unwrap()
-            .0
-            .skeleton();
+        let mut minimal =
+            SourceCard::from(EpisodeInputCard::new(old_header.clone(), rank(1)).unwrap())
+                .skeleton();
         minimal.summary.text = "v".into();
         let budget = episodic_budget(compact_len(&minimal));
         let old = pack(&budget, &episode_input(old_header)).unwrap();
@@ -3751,7 +2610,7 @@ mod tests {
     fn semantic_creation_is_mandatory_unchanged_and_charged_before_card_admission() {
         let created = 1_600_000_000_123_u128;
         let card = PrimaryInputCard::new(id(8), created, rank(3), "a lesson").unwrap();
-        let skeleton = card.0.skeleton();
+        let skeleton = SourceCard::from(card.clone()).skeleton();
         let mut without_creation = serde_json::to_value(&skeleton).unwrap();
         without_creation
             .as_object_mut()
@@ -3865,3 +2724,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod card_contract_tests;

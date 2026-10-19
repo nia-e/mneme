@@ -226,10 +226,10 @@ pub(crate) fn codex_configured(
 ) -> Result<bool, AnyErr> {
     // Refuse a workspace symlink BEFORE the device exemption: a project alias
     // into global configuration is not permission to erase its boundary.
-    if let Some(metadata) = inspect(directory)? {
-        if !metadata.is_dir() {
-            return Err("workspace .codex must be a directory".into());
-        }
+    if let Some(metadata) = inspect(directory)?
+        && !metadata.is_dir()
+    {
+        return Err("workspace .codex must be a directory".into());
     }
     // The global device hook is not project enrollment and cannot self-suppress.
     if user_config.is_some_and(|user| {
@@ -273,13 +273,12 @@ pub(crate) fn codex_configured(
                 if has("command") == has("url") {
                     return Err("workspace MCP endpoint requires one command or URL".into());
                 }
-                if let Some(args) = server.get("args") {
-                    if !args
+                if let Some(args) = server.get("args")
+                    && !args
                         .as_array()
                         .is_some_and(|args| args.iter().all(Value::is_string))
-                    {
-                        return Err("invalid workspace MCP arguments".into());
-                    }
+                {
+                    return Err("invalid workspace MCP arguments".into());
                 }
                 configured |= name.to_ascii_lowercase().contains("mneme");
                 for field in ["command", "args"] {

@@ -514,12 +514,8 @@ impl EpisodeFacet {
     pub fn validate_node(&self, node: &Node) -> Result<(), EpisodeValidationError> {
         self.validate()?;
         EpisodeTime::new(node.created())?;
-        if node.summary().len() > MAX_EPISODE_SUMMARY_BYTES {
-            return Err(EpisodeValidationError("summary exceeds episode byte limit"));
-        }
-        if node.has_tag("core") {
-            return Err(EpisodeValidationError("episodes cannot be core memory"));
-        }
+        Self::validate_summary(node.summary())?;
+        Self::validate_tags(node.tag_set())?;
         match node.provenance() {
             crate::Provenance::External { source } if source.node_id() == node.id() => {}
             crate::Provenance::External { .. } => {
@@ -533,11 +529,7 @@ impl EpisodeFacet {
                 ));
             }
         }
-        if !node.is_active() {
-            return Err(EpisodeValidationError(
-                "episode edition requires neutral active status",
-            ));
-        }
+        Self::validate_status(node.status())?;
         if self.revision == EpisodeRevision::INITIAL {
             if self.episode_id.node_id() != node.id() || self.recorded_at.get() != node.created() {
                 return Err(EpisodeValidationError(
@@ -551,6 +543,31 @@ impl EpisodeFacet {
         }
         Ok(())
     }
+    // The same field-admission checks protect initial construction, decoding
+    // and later in-memory mutation. Storage edit authority is a separate rule.
+    pub(crate) fn validate_summary(summary: &str) -> Result<(), EpisodeValidationError> {
+        if summary.len() > MAX_EPISODE_SUMMARY_BYTES {
+            return Err(EpisodeValidationError("summary exceeds episode byte limit"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_tags(tags: &crate::BoundedTagSet) -> Result<(), EpisodeValidationError> {
+        if tags.contains("core") {
+            return Err(EpisodeValidationError("episodes cannot be core memory"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_status(status: crate::NodeStatus) -> Result<(), EpisodeValidationError> {
+        if status != crate::NodeStatus::Active {
+            return Err(EpisodeValidationError(
+                "episode edition requires neutral active status",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn root(&self) -> EpisodeId {
         self.episode_id
     }
@@ -1299,7 +1316,10 @@ pub trait EpisodeStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BodyRef, CaptureRequestCodec, NodeStatus, Provenance};
+    use crate::{
+        BodyRef, BoundedTagSet, CaptureRequestCodec, Confidence, NodeInit, NodeStatus, Provenance,
+        Stability,
+    };
     use serde_json::json;
 
     fn time(ms: u128) -> EpisodeTime {
@@ -1323,7 +1343,7 @@ mod tests {
         )
         .unwrap()
     }
-    fn episode_base(key: &str, now: u128) -> Node {
+    fn episode_init(key: &str, now: u128) -> NodeInit {
         let source = CaptureSource::new_with_codec(
             "episode-test",
             key,
@@ -1334,24 +1354,170 @@ mod tests {
             CaptureRequestCodec::EpisodeV1,
         )
         .unwrap();
-        Node::try_new(
-            source.node_id(),
-            "A bounded account",
-            BodyRef::new("inline://story").unwrap(),
-            ["journal"],
-            Provenance::External { source },
-            0.5,
-            1.0,
-            NodeStatus::Active,
-            now,
-        )
-        .unwrap()
+        NodeInit {
+            id: source.node_id(),
+            summary: NodeSummary::new("A bounded account").unwrap(),
+            body: BodyRef::new("inline://story").unwrap(),
+            tags: BoundedTagSet::try_from_iter(["journal"]).unwrap(),
+            provenance: Provenance::External { source },
+            stability: Stability::new(0.5).unwrap(),
+            confidence: Confidence::new(1.0).unwrap(),
+            status: NodeStatus::Active,
+            created: now,
+        }
     }
+
     fn initial(key: &str, now: u128) -> Node {
-        let node = episode_base(key, now);
+        let init = episode_init(key, now);
         let facet =
-            EpisodeFacet::initial(node.id(), OccurrenceSpan::Unknown, None, time(now)).unwrap();
-        node.with_episode(facet).unwrap()
+            EpisodeFacet::initial(init.id, OccurrenceSpan::Unknown, None, time(now)).unwrap();
+        Node::new_episode(init, facet).unwrap()
+    }
+
+    #[test]
+    fn constructors_validate_the_final_memory_kind() {
+        for codec in [
+            CaptureRequestCodec::CaptureV1,
+            CaptureRequestCodec::CaptureV2,
+            CaptureRequestCodec::TouchstoneV1,
+            CaptureRequestCodec::EpisodeV1,
+            CaptureRequestCodec::EpisodeV2,
+        ] {
+            let mut init = episode_init("final-kind", 3);
+            let source = match &init.provenance {
+                Provenance::External { source } => CaptureSource::new_with_codec(
+                    source.namespace(),
+                    source.key(),
+                    source.reference(),
+                    source.session(),
+                    source.revision(),
+                    source.request_digest(),
+                    codec,
+                )
+                .unwrap(),
+                _ => unreachable!(),
+            };
+            init.provenance = Provenance::External { source };
+            let semantic = !matches!(
+                codec,
+                CaptureRequestCodec::EpisodeV1 | CaptureRequestCodec::EpisodeV2
+            );
+            let result = Node::new(init.clone());
+            assert_eq!(result.is_ok(), semantic, "{codec:?}");
+            if let Ok(node) = result {
+                node.validate().unwrap();
+            }
+            let raw = Node::try_new(
+                init.id,
+                init.summary.as_str(),
+                init.body.clone(),
+                init.tags.iter(),
+                init.provenance.clone(),
+                init.stability.get(),
+                init.confidence.get(),
+                init.status,
+                init.created,
+            );
+            assert_eq!(raw.is_ok(), semantic, "raw {codec:?}");
+            if let Ok(node) = raw {
+                node.validate().unwrap();
+            }
+            let mut facet =
+                EpisodeFacet::initial(init.id, OccurrenceSpan::Unknown, None, time(3)).unwrap();
+            if codec == CaptureRequestCodec::EpisodeV2 {
+                facet = facet.with_occurrence_contexts(
+                    OccurrenceContexts::new(vec![
+                        OccurrenceContextRef::new("world", "canal", None).unwrap(),
+                    ])
+                    .unwrap(),
+                );
+            }
+            let result = Node::new_episode(init, facet);
+            assert_eq!(result.is_ok(), !semantic, "episode {codec:?}");
+            if let Ok(node) = result {
+                node.validate().unwrap();
+                assert_eq!(
+                    node.confidence(),
+                    1.0,
+                    "representational validity is not ranking policy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn episode_construction_rejects_cross_field_mismatches() {
+        let init = episode_init("checked", 3);
+        let facet = EpisodeFacet::initial(init.id, OccurrenceSpan::Unknown, None, time(3)).unwrap();
+        let mut bad = init.clone();
+        bad.summary = NodeSummary::new("x".repeat(MAX_EPISODE_SUMMARY_BYTES + 1)).unwrap();
+        assert!(Node::new_episode(bad, facet.clone()).is_err());
+        let mut bad = init.clone();
+        bad.tags = BoundedTagSet::try_from_iter(["core"]).unwrap();
+        assert!(Node::new_episode(bad, facet.clone()).is_err());
+        let mut bad = init.clone();
+        bad.status = NodeStatus::Archived;
+        assert!(Node::new_episode(bad, facet.clone()).is_err());
+        let mut bad = init.clone();
+        bad.created += 1;
+        assert!(Node::new_episode(bad, facet.clone()).is_err());
+        let mut bad = init.clone();
+        bad.id = NodeId(Ulid::from(99));
+        assert!(Node::new_episode(bad, facet.clone()).is_err());
+        let mut bad = init.clone();
+        bad.provenance = Provenance::derived_empty();
+        assert!(Node::new_episode(bad, facet.clone()).is_err());
+        // A successor-context set requires the distinct v2 codec.
+        let mismatched = facet.with_occurrence_contexts(
+            OccurrenceContexts::new(vec![
+                OccurrenceContextRef::new("world", "canal", None).unwrap(),
+            ])
+            .unwrap(),
+        );
+        assert!(Node::new_episode(init, mismatched).is_err());
+    }
+
+    #[test]
+    fn rejected_episode_mutations_preserve_exact_bytes() {
+        let mut node = initial("atomic-setters", 3);
+        let before = serde_json::to_vec(&node).unwrap();
+        assert!(
+            node.set_summary(NodeSummary::new("x".repeat(MAX_EPISODE_SUMMARY_BYTES + 1)).unwrap())
+                .is_err()
+        );
+        assert_eq!(serde_json::to_vec(&node).unwrap(), before);
+        assert!(
+            node.replace_tags(BoundedTagSet::try_from_iter(["core"]).unwrap())
+                .is_err()
+        );
+        assert_eq!(serde_json::to_vec(&node).unwrap(), before);
+        assert!(node.set_status(NodeStatus::Archived).is_err());
+        assert_eq!(serde_json::to_vec(&node).unwrap(), before);
+        node.validate().unwrap();
+
+        // Historical spelling admission remains separate from present-day
+        // normalization and storage's immutable-edition editing authority.
+        node.replace_tags(BoundedTagSet::try_from_iter(["C++", "Core"]).unwrap())
+            .unwrap();
+        node.set_summary(NodeSummary::new("A still-bounded account").unwrap())
+            .unwrap();
+        node.set_status(NodeStatus::Active).unwrap();
+        node.validate().unwrap();
+        assert_eq!(node.tags().collect::<Vec<_>>(), ["C++", "Core"]);
+        node.replace_tags(BoundedTagSet::try_from_iter(["cpp", "historical-core"]).unwrap())
+            .unwrap();
+        node.validate().unwrap();
+
+        // Semantic nodes retain their broader summary, core and lifecycle domain.
+        let mut semantic = base("semantic-setters", 3);
+        semantic
+            .set_summary(NodeSummary::new("x".repeat(MAX_EPISODE_SUMMARY_BYTES + 1)).unwrap())
+            .unwrap();
+        semantic
+            .replace_tags(BoundedTagSet::try_from_iter(["core"]).unwrap())
+            .unwrap();
+        semantic.set_status(NodeStatus::Archived).unwrap();
+        semantic.validate().unwrap();
     }
 
     #[test]
@@ -1379,9 +1545,7 @@ mod tests {
             EpisodeRevisionReason::new("A separate recorder made this correction").unwrap(),
         )
         .unwrap();
-        let revision = episode_base("recording-revision", 5)
-            .with_episode(facet)
-            .unwrap();
+        let revision = Node::new_episode(episode_init("recording-revision", 5), facet).unwrap();
         let mut wire = serde_json::to_value(&revision).unwrap();
         wire["provenance"]["External"]["source"]["session"] = json!("revision-recorder");
         let revision: Node = serde_json::from_value(wire).unwrap();
@@ -1716,15 +1880,13 @@ mod tests {
         )
         .unwrap();
         facet.validate_successor(&root).unwrap();
-        let revised = episode_base("revision", 40)
-            .with_episode(facet.clone())
-            .unwrap();
+        let revised = Node::new_episode(episode_init("revision", 40), facet).unwrap();
         let header = EpisodeHeader::from_node(&revised, revised.id()).unwrap();
         assert_eq!(header.recorded_at, time(50));
         assert_eq!(header.edition_recorded_at, time(40));
         assert_eq!(header.identity.revision.get(), 1);
         assert_eq!(root.episode().unwrap().edit_reason(), None);
-        assert!(revised.clone().with_episode(facet).is_err());
+        revised.validate().unwrap();
         assert!(serde_json::from_value::<Node>(serde_json::to_value(&revised).unwrap()).is_ok());
         let unrelated = initial("other", 50);
         assert!(

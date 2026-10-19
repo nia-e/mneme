@@ -1,5 +1,8 @@
 //! Catalog-derived snapshot routes. Transport sessions stay with the caller.
-use crate::{Endpoint, LibraryError, LibraryRuntime, err, failure_text, verify_database_row};
+use crate::{
+    Endpoint, LibraryError, LibraryRuntime, catalog_source::newest_configured_replica, err,
+    failure_text, verify_database_row,
+};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
@@ -149,11 +152,8 @@ impl LibraryRuntime {
                 })?;
                 replica
             }
-            None => entry
-                .replicas
-                .iter()
-                .filter(|replica| self.config.replicas.contains_key(&replica.source_device_id))
-                .max_by_key(|replica| (replica.captured_at, replica.generation.as_str()))
+            None => newest_configured_replica(&self.config, entry)
+                .map(|(replica, _)| replica)
                 .ok_or_else(|| err("no configured replica for this project"))?,
         };
         // The emitted pin must resolve uniquely on the next request, including

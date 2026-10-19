@@ -24,9 +24,15 @@ pub mod episode;
 mod feedback;
 pub mod graph_view;
 pub mod neighbor_inspect;
+mod retrieval_policy;
 pub mod touchstone;
 pub use episode::{EpisodeWrite, EpisodeWriteResult};
 pub use feedback::{ObservedRoute, ReceiptFeedback, ReceiptFeedbackResult};
+pub use retrieval_policy::{
+    IndexSetFingerprint, MAX_PROJECTION_WATERMARKS, ProjectionWatermark, ProjectionWatermarks,
+    RetrievalPolicyStamp, RetrievalPolicyVersion, WatermarkLimitError,
+};
+use retrieval_policy::{RetrievalPolicyInput, TaggedPolicyInput};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroU16;
@@ -43,16 +49,15 @@ use mneme_core::ports::{
 };
 use mneme_core::tagged::{
     MAX_TAGGED_QUERY_TAGS, MAX_TAGGED_VECTOR_DIMENSION, RetrievalLifecycleLane,
-    TAGGED_ACTIVE_FALLBACK_CANDIDATES, TaggedAnnLane, TaggedAnnLaneRequest, TaggedAnnRequest,
-    TaggedAnnWork, TaggedAnnWorkLimits, TaggedProjectionGeneration, TaggedSeedCoverage,
+    TAGGED_ACTIVE_FALLBACK_CANDIDATES, TaggedAnnLaneRequest, TaggedAnnRequest, TaggedAnnWork,
+    TaggedAnnWorkLimits, TaggedProjectionGeneration, TaggedSeedCoverage,
 };
 use mneme_core::{
     BodyOwnership, BodyRef, BodySpan, BoundedTagSet, CaptureReplayProof, CaptureRequestCodec,
-    CaptureSource, Confidence, Contradiction, Edge, EdgeKind, EmbeddingFingerprint,
-    MAX_INCIDENT_EDGES, MAX_NODE_HYDRATION_BATCH, MAX_NODE_STATUS_BATCH, MAX_REMOTE_EDGE_PAGE_SIZE,
-    MergeCandidate, MergeResolution, Node, NodeId, NodeInit, NodeStatus, NodeSummary, OriginCommit,
-    Provenance, RemoteEdge, RemoteEdgeCursor, RemoteEdgePage, Resolution, Stability,
-    StrengthParams, Timestamp,
+    CaptureSource, Confidence, Contradiction, Edge, EdgeKind, MAX_INCIDENT_EDGES,
+    MAX_NODE_HYDRATION_BATCH, MAX_NODE_STATUS_BATCH, MAX_REMOTE_EDGE_PAGE_SIZE, MergeCandidate,
+    MergeResolution, Node, NodeId, NodeInit, NodeStatus, NodeSummary, OriginCommit, Provenance,
+    RemoteEdge, RemoteEdgeCursor, RemoteEdgePage, Resolution, Stability, StrengthParams, Timestamp,
 };
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
@@ -76,8 +81,6 @@ pub const MAX_RESOLVED_NEIGHBORS: usize = 64;
 pub const CORE_TAG: &str = "core";
 const MAX_LEXICAL_K: usize = 64;
 const MAX_RETRIEVAL_RANK: usize = u16::MAX as usize;
-pub const MAX_PROJECTION_WATERMARKS: usize = 8;
-const TAGGED_RETRIEVAL_POLICY_GENERATION: &str = "tagged-seed-v3";
 const MAX_DENSE_PRUNE_CHUNKS: usize = MAX_INCIDENT_EDGES.div_ceil(MAX_MAINTENANCE_BATCH_ROWS);
 
 /// Retrieval and edge-learning policy knobs, not correctness invariants.
@@ -811,10 +814,14 @@ impl<'a> TryFrom<Ingest<'a>> for PreparedIngest<'a> {
         let confidence = Confidence::new(request.confidence)
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
 
-        // Provenance and explicit body references are sealed value objects:
-        // accepting them here is the validation step. Invalid derived-source
-        // sets and malformed references cannot be constructed through safe
-        // public code or deserialized into these types.
+        // Sealed provenance/body fields settle lexical validity, but a valid
+        // episode source still cannot belong to semantic ingest. Reject that
+        // cross-field mismatch before inference or body publication.
+        if let Provenance::External { source } = &request.provenance {
+            source
+                .validate_semantic()
+                .map_err(|error| Error::InvalidInput(error.to_string()))?;
+        }
         Ok(Self {
             summary,
             body: request.body,
@@ -853,135 +860,6 @@ pub struct RetrievalHit {
     pub graph_path: Option<Vec<TraversalHop>>,
 }
 
-/// Version of the rank-only retrieval policy. The string is deliberately
-/// opaque to consumers: compare it for equality and treat a change as a new
-/// ordering/admission contract.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RetrievalPolicyVersion {
-    /// Human-readable contract generation.
-    pub contract: &'static str,
-    /// SHA-256 over every runtime knob and enabled leg that changes ranking or
-    /// result admission under this contract.
-    pub fingerprint: [u8; 32],
-}
-
-impl RetrievalPolicyVersion {
-    pub const fn as_str(&self) -> &'static str {
-        self.contract
-    }
-}
-
-/// Runtime identity of the retrieval indexes visible to this engine. This is a
-/// structured transitional fingerprint: the embedding contract is exact, and
-/// enabled retrieval legs expose stable semantic generations rather than
-/// booleans that would equate behavior-changing backend upgrades. Physical
-/// projection generations remain separate below.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IndexSetFingerprint {
-    pub embedding: EmbeddingFingerprint,
-    pub vector_semantics: &'static str,
-    pub lexical_semantics: Option<&'static str>,
-    pub reranker_semantics: Option<&'static str>,
-}
-
-/// One backend-supplied projection watermark. Tagged retrieval supplies the
-/// verified tag-membership generation; paths without a trustworthy generation
-/// leave the bounded list empty rather than manufacturing one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProjectionWatermark {
-    pub projection: String,
-    pub watermark: String,
-}
-
-/// Construction-validated projection watermarks. The private storage makes the
-/// eight-item protocol limit an invariant instead of a comment on a public
-/// `Vec` that any caller could violate after construction.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ProjectionWatermarks(Vec<ProjectionWatermark>);
-
-impl ProjectionWatermarks {
-    pub fn new(values: Vec<ProjectionWatermark>) -> std::result::Result<Self, WatermarkLimitError> {
-        if values.len() > MAX_PROJECTION_WATERMARKS {
-            return Err(WatermarkLimitError {
-                provided: values.len(),
-            });
-        }
-        Ok(Self(values))
-    }
-
-    pub const fn as_slice(&self) -> &[ProjectionWatermark] {
-        self.0.as_slice()
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub const fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WatermarkLimitError {
-    pub provided: usize,
-}
-
-impl std::fmt::Display for WatermarkLimitError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "retrieval policy stamp has {} projection watermarks; maximum is {MAX_PROJECTION_WATERMARKS}",
-            self.provided
-        )
-    }
-}
-
-impl std::error::Error for WatermarkLimitError {}
-
-/// Policy/index identity attached to one typed batch. At most eight projection
-/// watermarks may be carried. Untagged retrieval currently carries none; tagged
-/// retrieval carries the adapter's verified `tag-membership` generation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RetrievalPolicyStamp {
-    pub retrieval_policy: RetrievalPolicyVersion,
-    pub index_set: IndexSetFingerprint,
-    pub projection_watermarks: ProjectionWatermarks,
-}
-
-/// Fixed-size identity of the backend behavior that can affect retrieval. A
-/// configured but disabled optional leg is deliberately absent: it cannot have
-/// influenced this batch, while enabling it produces a different component.
-fn retrieval_index_semantics_fingerprint(
-    vector: &str,
-    lexical: Option<&str>,
-    lexical_enabled: bool,
-    reranker: Option<&str>,
-    reranker_enabled: bool,
-) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-
-    debug_assert!(!lexical_enabled || lexical.is_some());
-    debug_assert!(!reranker_enabled || reranker.is_some());
-    let mut hash = Sha256::new();
-    hash.update(b"mneme:retrieval-index-semantics-v1\0");
-    for semantic_id in [
-        Some(vector),
-        lexical_enabled.then_some(lexical).flatten(),
-        reranker_enabled.then_some(reranker).flatten(),
-    ] {
-        match semantic_id {
-            Some(value) => {
-                hash.update([1]);
-                hash.update((value.len() as u64).to_le_bytes());
-                hash.update(value.as_bytes());
-            }
-            None => hash.update([0]),
-        }
-    }
-    hash.finalize().into()
-}
-
 /// Validate and canonicalize query tags before invoking the embedder. The core
 /// request repeats this check at the adapter boundary; doing it here prevents a
 /// malformed 33-tag or duplicate-tag request from buying model work first.
@@ -997,48 +875,6 @@ fn normalize_tagged_query_tags(tags: &[&str]) -> Result<Vec<String>> {
         .iter()
         .map(str::to_owned)
         .collect())
-}
-
-/// Fingerprint only the declared tagged strategy and quota topology. Observed
-/// work (inspected/matching counts and pivots) belongs in result metadata, not
-/// policy identity.
-fn tagged_coverage_shape_fingerprint(lanes: &[TaggedAnnLane]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-
-    let mut hash = Sha256::new();
-    hash.update(b"mneme:tagged-coverage-shape:v1\0");
-    hash.update((lanes.len() as u64).to_le_bytes());
-    for lane in lanes {
-        let strategy = lane.seed_coverage.strategy_id();
-        hash.update((strategy.len() as u64).to_le_bytes());
-        hash.update(strategy.as_bytes());
-        let physical = match &lane.seed_coverage {
-            TaggedSeedCoverage::ExactCosine => None,
-            TaggedSeedCoverage::LifecycleHnswAndHashedTagSamplePostfilter { physical, .. }
-            | TaggedSeedCoverage::DeterministicHashedTagSamplePostfilter { physical, .. } => {
-                Some(physical.as_slice())
-            }
-        };
-        match physical {
-            None => hash.update([0]),
-            Some(physical) => {
-                hash.update([1]);
-                hash.update((physical.len() as u64).to_le_bytes());
-                for item in physical {
-                    let status = item.status.as_str();
-                    hash.update((status.len() as u64).to_le_bytes());
-                    hash.update(status.as_bytes());
-                    hash.update((item.hnsw_quota as u64).to_le_bytes());
-                    hash.update((item.tag_samples.len() as u64).to_le_bytes());
-                    for sample in &item.tag_samples {
-                        hash.update([sample.query_tag_index]);
-                        hash.update((sample.quota as u64).to_le_bytes());
-                    }
-                }
-            }
-        }
-    }
-    hash.finalize().into()
 }
 
 /// Typed retrieval output for one semantic search population.
@@ -1098,19 +934,6 @@ struct RankedRetrievalBatch {
     stamp: RetrievalPolicyStamp,
     tagged: Option<TaggedRetrievalMetadata>,
     routing: Option<RoutingOutcome>,
-}
-
-#[derive(Clone, Copy)]
-struct RetrievalPolicyInput<'a> {
-    effective_k: usize,
-    budget: Budget,
-    status: StatusFilter,
-    tags: &'a [&'a str],
-    sparse_enabled: bool,
-    reranker_enabled: bool,
-    tagged_request: Option<&'a TaggedAnnRequest<'a>>,
-    tagged_lanes: Option<&'a [TaggedAnnLane]>,
-    tagged_projection_generation: Option<&'a str>,
 }
 
 impl RankedRetrievalBatch {
@@ -1595,6 +1418,7 @@ impl Memory {
             status: NodeStatus::Active,
             created: self.clock.now(),
         })
+        .map_err(|error| Error::InvalidInput(error.to_string()))?
         .with_body_ownership(BodyOwnership::Managed)
         .with_origin_commit(request.origin_commit);
         let edges: Vec<_> = request
@@ -1690,6 +1514,7 @@ impl Memory {
             status: NodeStatus::Active,
             created: now,
         })
+        .map_err(|error| Error::InvalidInput(error.to_string()))?
         .with_body_ownership(if owns_body {
             BodyOwnership::Managed
         } else {
@@ -1919,9 +1744,7 @@ impl Memory {
             tags,
             sparse_enabled,
             reranker_enabled,
-            tagged_request: None,
-            tagged_lanes: None,
-            tagged_projection_generation: None,
+            tagged: None,
         });
         if effective_k == 0 {
             return Ok(RankedRetrievalBatch {
@@ -2056,9 +1879,11 @@ impl Memory {
             tags: request.tags(),
             sparse_enabled: false,
             reranker_enabled: effective_k > 0 && self.reranker.is_some(),
-            tagged_request: Some(&request),
-            tagged_lanes: Some(&batch.lanes),
-            tagged_projection_generation: Some(projection_generation),
+            tagged: Some(TaggedPolicyInput {
+                request: &request,
+                lanes: &batch.lanes,
+                projection_generation,
+            }),
         });
         let mut returned = batch.lanes.into_iter();
         let primary_lane = returned
@@ -2126,139 +1951,6 @@ impl Memory {
         }
         debug_assert!(hydrated.next().is_none());
         Ok(())
-    }
-
-    fn retrieval_policy_stamp(&self, input: RetrievalPolicyInput<'_>) -> RetrievalPolicyStamp {
-        let projection_watermarks = input.tagged_projection_generation.map_or_else(
-            ProjectionWatermarks::default,
-            |generation| {
-                ProjectionWatermarks::new(vec![ProjectionWatermark {
-                    projection: "tag-membership".into(),
-                    watermark: generation.into(),
-                }])
-                .expect("one tagged projection watermark is within the domain limit")
-            },
-        );
-        RetrievalPolicyStamp {
-            retrieval_policy: self.retrieval_policy_version(input),
-            index_set: IndexSetFingerprint {
-                embedding: self.embedder.fingerprint(),
-                vector_semantics: self.vectors.semantic_id(),
-                lexical_semantics: input.sparse_enabled.then(|| {
-                    self.lexical
-                        .as_ref()
-                        .expect("enabled lexical index")
-                        .semantic_id()
-                }),
-                reranker_semantics: input.reranker_enabled.then(|| {
-                    self.reranker
-                        .as_ref()
-                        .expect("enabled reranker")
-                        .semantic_id()
-                }),
-            },
-            projection_watermarks,
-        }
-    }
-
-    fn retrieval_policy_version(&self, input: RetrievalPolicyInput<'_>) -> RetrievalPolicyVersion {
-        use sha2::{Digest, Sha256};
-
-        let RetrievalPolicyInput {
-            effective_k,
-            budget,
-            status,
-            tags,
-            sparse_enabled,
-            reranker_enabled,
-            tagged_request,
-            tagged_lanes,
-            ..
-        } = input;
-
-        let mut hash = Sha256::new();
-        hash.update(
-            b"mneme:rank-only-v6\0semantic-corpus-only\0precise-graph-fusion-direct-winner-ties\0conditional-target-fair-entry-v1\0",
-        );
-        hash.update(retrieval_index_semantics_fingerprint(
-            self.vectors.semantic_id(),
-            self.lexical.as_ref().map(|index| index.semantic_id()),
-            sparse_enabled,
-            self.reranker
-                .as_ref()
-                .map(|reranker| reranker.semantic_id()),
-            reranker_enabled,
-        ));
-        for value in [
-            self.cfg.lexical_k,
-            self.cfg.graph_seed_cap,
-            self.cfg.graph_slot_cap,
-            MAX_LEXICAL_K,
-            MAX_RETRIEVAL_RANK,
-            effective_k,
-            budget.max_nodes,
-        ] {
-            hash.update((value as u64).to_le_bytes());
-        }
-        for value in [
-            self.cfg.rrf_constant,
-            self.cfg.dense_weight,
-            self.cfg.lexical_weight,
-            self.cfg.graph_weight,
-            budget.min_relevance,
-            budget.explore,
-            budget.relevance_ratio,
-            budget.dedup_similarity,
-            budget.query_conditioning,
-        ] {
-            hash.update(value.to_bits().to_le_bytes());
-        }
-        hash.update([budget.max_depth]);
-        hash.update([
-            u8::from(status.active),
-            u8::from(status.archived),
-            u8::from(sparse_enabled),
-            u8::from(reranker_enabled),
-        ]);
-        hash.update((tags.len() as u64).to_le_bytes());
-        for tag in tags {
-            hash.update((tag.len() as u64).to_le_bytes());
-            hash.update(tag.as_bytes());
-        }
-        match (tagged_request, tagged_lanes) {
-            (Some(request), Some(returned_lanes)) => {
-                hash.update([1]);
-                hash.update(TAGGED_RETRIEVAL_POLICY_GENERATION.as_bytes());
-                for value in [
-                    request.limits.max_raw_memberships(),
-                    request.limits.max_unique_exact_ids(),
-                    request.limits.max_exact_vector_components(),
-                    request.limits.exact_hydration_page_ids(),
-                    request.limits.max_fallback_candidates(),
-                    request.limits.max_fallback_hydration_ids(),
-                    request.limits.max_fallback_vector_components(),
-                ] {
-                    hash.update((value as u64).to_le_bytes());
-                }
-                hash.update((request.lanes.len() as u64).to_le_bytes());
-                for lane in request.lanes {
-                    hash.update([match lane.lane {
-                        RetrievalLifecycleLane::Primary => 0,
-                    }]);
-                    hash.update([u8::from(lane.status.active), u8::from(lane.status.archived)]);
-                    hash.update((lane.k as u64).to_le_bytes());
-                    hash.update((lane.fallback_candidates as u64).to_le_bytes());
-                }
-                hash.update(tagged_coverage_shape_fingerprint(returned_lanes));
-            }
-            (None, None) => hash.update([0]),
-            _ => unreachable!("tagged policy request and validated lane coverage travel together"),
-        }
-
-        RetrievalPolicyVersion {
-            contract: "rank-only-v6",
-            fingerprint: hash.finalize().into(),
-        }
     }
 
     /// Page an operation-bounded identity list through the store's positional
@@ -4633,6 +4325,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod retrieval_tests {
     use super::*;
+    use mneme_core::EmbeddingFingerprint;
 
     #[test]
     fn conditional_interleave_preserves_empty_policy_and_derives_rank_only_scores() {
@@ -4702,130 +4395,6 @@ mod retrieval_tests {
         assert_eq!(empty_ordinary[0].0.id(), c.id());
         assert_eq!(empty_ordinary[0].1, 1.0);
         assert_eq!(bindings.len(), 1);
-    }
-
-    #[test]
-    fn retrieval_backend_semantics_are_fingerprinted_only_when_enabled() {
-        let fingerprint = |vector, lexical, lexical_enabled, reranker, reranker_enabled| {
-            retrieval_index_semantics_fingerprint(
-                vector,
-                Some(lexical),
-                lexical_enabled,
-                Some(reranker),
-                reranker_enabled,
-            )
-        };
-        let baseline = fingerprint("vector-v1", "lexical-v1", true, "reranker-v1", true);
-        assert_ne!(
-            baseline,
-            fingerprint("vector-v2", "lexical-v1", true, "reranker-v1", true)
-        );
-        assert_ne!(
-            baseline,
-            fingerprint("vector-v1", "lexical-v2", true, "reranker-v1", true)
-        );
-        assert_ne!(
-            baseline,
-            fingerprint("vector-v1", "lexical-v1", true, "reranker-v2", true)
-        );
-
-        let disabled = fingerprint("vector-v1", "lexical-v1", false, "reranker-v1", false);
-        assert_eq!(
-            disabled,
-            fingerprint("vector-v1", "lexical-v2", false, "reranker-v2", false),
-            "configured but unused legs must not claim to influence the batch"
-        );
-    }
-
-    #[test]
-    fn tagged_policy_fingerprint_tracks_strategy_and_quotas_not_observed_work() {
-        use mneme_core::tagged::{
-            MAX_TAGGED_RAW_MEMBERSHIPS, TaggedExactWorkLimit, TaggedPhysicalSeedCoverage,
-            TaggedPhysicalStatus, TaggedQueryTagSeedCoverage,
-        };
-
-        let lane = |coverage| TaggedAnnLane {
-            lane: RetrievalLifecycleLane::Primary,
-            hits: Vec::new(),
-            seed_coverage: coverage,
-        };
-        let physical = |hnsw_quota, sample_quota, sample_inspected, pivot| {
-            TaggedPhysicalSeedCoverage::new(
-                TaggedPhysicalStatus::Active,
-                hnsw_quota,
-                0,
-                vec![TaggedQueryTagSeedCoverage::new(0, sample_quota, sample_inspected).unwrap()],
-                pivot,
-            )
-            .unwrap()
-        };
-        let partial = |hybrid, physical, checked, matching| {
-            if hybrid {
-                TaggedSeedCoverage::LifecycleHnswAndHashedTagSamplePostfilter {
-                    exceeded_limit: TaggedExactWorkLimit::RawMemberships,
-                    raw_memberships: MAX_TAGGED_RAW_MEMBERSHIPS + 1,
-                    physical: vec![physical],
-                    canonical_candidates_checked: checked,
-                    matching_candidates: matching,
-                }
-            } else {
-                TaggedSeedCoverage::DeterministicHashedTagSamplePostfilter {
-                    exceeded_limit: TaggedExactWorkLimit::RawMemberships,
-                    raw_memberships: MAX_TAGGED_RAW_MEMBERSHIPS + 1,
-                    physical: vec![physical],
-                    canonical_candidates_checked: checked,
-                    matching_candidates: matching,
-                }
-            }
-        };
-
-        let exact = [lane(TaggedSeedCoverage::ExactCosine)];
-        let deterministic = [lane(partial(false, physical(0, 192, 0, 0), 0, 0))];
-        let deterministic_observed = [lane(partial(false, physical(0, 192, 1, 99), 1, 1))];
-        let hybrid = [lane(partial(true, physical(96, 96, 0, 0), 0, 0))];
-        let changed_quota = [lane(partial(true, physical(64, 128, 0, 0), 0, 0))];
-        for lanes in [
-            exact.as_slice(),
-            deterministic.as_slice(),
-            deterministic_observed.as_slice(),
-            hybrid.as_slice(),
-            changed_quota.as_slice(),
-        ] {
-            lanes[0].seed_coverage.validate().unwrap();
-        }
-
-        let digest = tagged_coverage_shape_fingerprint;
-        assert_ne!(digest(&exact), digest(&deterministic));
-        assert_ne!(digest(&deterministic), digest(&hybrid));
-        assert_ne!(digest(&hybrid), digest(&changed_quota));
-        assert_eq!(
-            digest(&deterministic),
-            digest(&deterministic_observed),
-            "observed counters and pivots do not redefine retrieval policy"
-        );
-    }
-
-    #[test]
-    fn projection_watermark_count_is_construction_bounded() {
-        let watermark = || ProjectionWatermark {
-            projection: "dense".into(),
-            watermark: "generation-1".into(),
-        };
-        let bounded = ProjectionWatermarks::new(
-            (0..MAX_PROJECTION_WATERMARKS)
-                .map(|_| watermark())
-                .collect(),
-        )
-        .unwrap();
-        assert_eq!(bounded.len(), MAX_PROJECTION_WATERMARKS);
-        assert!(matches!(
-            ProjectionWatermarks::new(
-                (0..=MAX_PROJECTION_WATERMARKS)
-                    .map(|_| watermark())
-                    .collect()
-            ),
-            Err(WatermarkLimitError { provided }) if provided == MAX_PROJECTION_WATERMARKS + 1
-        ));
     }
 
     struct OrderingFixtureEmbedder;

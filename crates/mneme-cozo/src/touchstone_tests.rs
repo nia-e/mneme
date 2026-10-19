@@ -302,26 +302,25 @@ async fn edition_and_collection(store: &dyn GraphStore) {
         CaptureRequestCodec::EpisodeV1,
     )
     .unwrap();
-    let scene = Node::try_new(
-        source.node_id(),
-        "the exact first account",
-        BodyRef::new("inline://scene").unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        1,
-    )
-    .unwrap();
+    let scene = mneme_core::NodeInit {
+        id: source.node_id(),
+        summary: mneme_core::NodeSummary::new("the exact first account").unwrap(),
+        body: BodyRef::new("inline://scene").unwrap(),
+        tags: mneme_core::BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+        provenance: Provenance::External { source },
+        stability: mneme_core::Stability::new(0.5).unwrap(),
+        confidence: mneme_core::Confidence::new(0.5).unwrap(),
+        status: NodeStatus::Active,
+        created: 1,
+    };
     let facet = EpisodeFacet::initial(
-        scene.id(),
+        scene.id,
         OccurrenceSpan::Unknown,
         None,
         EpisodeTime::new(1).unwrap(),
     )
     .unwrap();
-    let scene = scene.with_episode(facet).unwrap();
+    let scene = Node::new_episode(scene, facet).unwrap();
     let episodes = store.episodes().unwrap();
     episodes
         .commit_episode(EpisodeCommit {
@@ -348,18 +347,17 @@ async fn edition_and_collection(store: &dyn GraphStore) {
         CaptureRequestCodec::EpisodeV1,
     )
     .unwrap();
-    let revised = Node::try_new(
-        source.node_id(),
-        "a corrected account",
-        BodyRef::new("inline://scene-v2").unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        2,
-    )
-    .unwrap();
+    let revised = mneme_core::NodeInit {
+        id: source.node_id(),
+        summary: mneme_core::NodeSummary::new("a corrected account").unwrap(),
+        body: BodyRef::new("inline://scene-v2").unwrap(),
+        tags: mneme_core::BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+        provenance: Provenance::External { source },
+        stability: mneme_core::Stability::new(0.5).unwrap(),
+        confidence: mneme_core::Confidence::new(0.5).unwrap(),
+        status: NodeStatus::Active,
+        created: 2,
+    };
     let before = scene.episode().unwrap();
     let facet = EpisodeFacet::revised(
         before.root(),
@@ -371,7 +369,7 @@ async fn edition_and_collection(store: &dyn GraphStore) {
         EpisodeRevisionReason::new("correct this account").unwrap(),
     )
     .unwrap();
-    let revised = revised.with_episode(facet).unwrap();
+    let revised = Node::new_episode(revised, facet).unwrap();
     episodes
         .commit_episode(EpisodeCommit {
             node: &revised,
@@ -443,17 +441,17 @@ async fn assembled_touchstone_exports_refuse_torn_owner_record_and_vector_joins(
     let (owner, proof) = authored("torn-export", &input);
     capture(&store, &owner, &proof, &input).await.unwrap();
     let complete = store.export();
-    mem_touchstones::validate_touchstone_import(&complete).unwrap();
+    snapshot::validate_touchstone_import(&complete).unwrap();
     let mut orphan_record = complete.clone();
     orphan_record.nodes.retain(|node| node.id() != owner.id());
-    assert!(mem_touchstones::validate_touchstone_import(&orphan_record).is_err());
+    assert!(snapshot::validate_touchstone_import(&orphan_record).is_err());
     assert!(MemStore::from_export(orphan_record).is_err());
     let mut orphan_codec = complete.clone();
     orphan_codec.touchstones.clear();
-    assert!(mem_touchstones::validate_touchstone_import(&orphan_codec).is_err());
+    assert!(snapshot::validate_touchstone_import(&orphan_codec).is_err());
     assert!(MemStore::from_export(orphan_codec).is_err());
     let mut missing_vector = complete;
     missing_vector.vectors.retain(|(id, _)| *id != owner.id());
-    assert!(mem_touchstones::validate_touchstone_import(&missing_vector).is_err());
+    assert!(snapshot::validate_touchstone_import(&missing_vector).is_err());
     assert!(MemStore::from_export(missing_vector).is_err());
 }

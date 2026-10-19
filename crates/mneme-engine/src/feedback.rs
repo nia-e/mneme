@@ -4,7 +4,8 @@
 //! node/edge training through `Memory`. The public facade remains at the crate
 //! root; shared hydration and mutation coordination stay with `Memory`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 
 use mneme_core::ports::{
     Error, FeedbackCommit, FeedbackCommitOutcome, FeedbackEdgeUpdate, FeedbackIdempotency,
@@ -124,6 +125,70 @@ pub struct ReceiptFeedbackResult {
     pub commit: FeedbackCommitOutcome,
     pub reinforced: usize,
     pub interfered: usize,
+}
+
+/// One bounded receipt-batch read, including an observed absence. A present
+/// row owns its immutable compare-and-commit snapshot and at most one pending
+/// replacement; no separate changed-ID set has to agree with another map.
+///
+/// Receipt feedback never creates a missing row. This is deliberately private
+/// to that contract rather than a general mutation or transaction abstraction.
+enum CachedRow<T> {
+    Missing,
+    Present { snapshot: T, pending: Option<T> },
+}
+
+impl<T> CachedRow<T> {
+    fn new(row: Option<T>) -> Self {
+        match row {
+            Some(snapshot) => Self::Present {
+                snapshot,
+                pending: None,
+            },
+            None => Self::Missing,
+        }
+    }
+
+    fn current(&self) -> Option<&T> {
+        match self {
+            Self::Missing => None,
+            Self::Present { snapshot, pending } => Some(pending.as_ref().unwrap_or(snapshot)),
+        }
+    }
+
+    fn is_changed(&self) -> bool {
+        matches!(
+            self,
+            Self::Present {
+                pending: Some(_),
+                ..
+            }
+        )
+    }
+
+    fn into_update(self) -> Option<(T, T)> {
+        match self {
+            Self::Present {
+                snapshot,
+                pending: Some(replacement),
+            } => Some((snapshot, replacement)),
+            _ => None,
+        }
+    }
+}
+
+impl<T: Clone> CachedRow<T> {
+    /// Deduplicate credit without losing the original storage precondition.
+    /// A failed or skipped update must not turn a cached absence into a row.
+    fn update_once(&mut self, update: impl FnOnce(&mut T)) {
+        if let Self::Present { snapshot, pending } = self
+            && pending.is_none()
+        {
+            let mut replacement = snapshot.clone();
+            update(&mut replacement);
+            *pending = Some(replacement);
+        }
+    }
 }
 
 impl Memory {
@@ -290,18 +355,16 @@ impl Memory {
         ids.sort_unstable();
         ids.dedup();
         let hydrated = self.hydrate_nodes(&ids).await?;
-        let mut nodes: BTreeMap<NodeId, Option<Node>> = ids.into_iter().zip(hydrated).collect();
-        let mut expected_nodes = BTreeMap::new();
-        for (id, node) in &nodes {
-            if let Some(node) = node {
+        let mut nodes: BTreeMap<NodeId, CachedRow<Node>> = ids
+            .into_iter()
+            .zip(hydrated.into_iter().map(CachedRow::new))
+            .collect();
+        for row in nodes.values() {
+            if let Some(node) = row.current() {
                 Self::require_semantic(node)?;
-                expected_nodes.insert(*id, node.clone());
             }
         }
-        let mut changed_nodes = HashSet::new();
-        let mut edges: BTreeMap<(NodeId, NodeId), Option<Edge>> = BTreeMap::new();
-        let mut expected_edges: BTreeMap<(NodeId, NodeId), Option<Edge>> = BTreeMap::new();
-        let mut changed_edges = HashSet::new();
+        let mut edges: BTreeMap<(NodeId, NodeId), CachedRow<Edge>> = BTreeMap::new();
         // Several walks can observe the same stored arrow. Count it once per
         // batch; opposing explicit judgments make that route attribution unknown,
         // without discarding either endpoint's node-level judgment.
@@ -320,7 +383,10 @@ impl Memory {
         }
 
         for event in &events {
-            let Some(node) = nodes.get_mut(&event.target).and_then(Option::as_mut) else {
+            let Some(row) = nodes.get_mut(&event.target) else {
+                continue;
+            };
+            let Some(node) = row.current() else {
                 // A receipt can outlive explicit forget. Preserve the existing
                 // harmless semantics without recreating either endpoint.
                 continue;
@@ -329,15 +395,15 @@ impl Memory {
             // deserves its grounded node-level signal, but an archived endpoint
             // must not keep zombie topology strong through an old receipt.
             let target_is_archived = node.is_archived();
-            if event.relevant && changed_nodes.insert(event.target) {
-                node.record_grounded_use(now);
+            if event.relevant {
+                row.update_once(|node| node.record_grounded_use(now));
             }
 
             let Some(route) = event.route else {
                 continue;
             };
 
-            let Some(previous) = nodes.get(&route.previous).and_then(Option::as_ref) else {
+            let Some(previous) = nodes.get(&route.previous).and_then(CachedRow::current) else {
                 continue;
             };
 
@@ -355,17 +421,19 @@ impl Memory {
             // now-incompatible edge kind the same way: future library callers or
             // corrupt state cannot train a hop traversal would not currently show.
             let identity = (route.edge_from, route.edge_to);
-            if changed_edges.contains(&identity)
+            if edges.get(&identity).is_some_and(CachedRow::is_changed)
                 || edge_judgments.get(&identity) != Some(&Some(event.relevant))
             {
                 continue;
             }
-            if let std::collections::btree_map::Entry::Vacant(entry) = edges.entry(identity) {
-                let current = self.graph.get_edge(identity.0, identity.1).await?;
-                expected_edges.insert(identity, current.clone());
-                entry.insert(current);
-            }
-            let Some(edge) = edges.get_mut(&identity).and_then(Option::as_mut) else {
+            let row = match edges.entry(identity) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let current = self.graph.get_edge(identity.0, identity.1).await?;
+                    entry.insert(CachedRow::new(current))
+                }
+            };
+            let Some(edge) = row.current() else {
                 continue;
             };
             let still_traversable = if route.incoming() {
@@ -376,36 +444,32 @@ impl Memory {
             if !still_traversable {
                 continue;
             }
-            if event.relevant {
-                edge.reinforce(now, self.strength_for(edge.kind));
-            } else {
-                edge.mark_interference();
-            }
-            changed_edges.insert(identity);
+            row.update_once(|edge| {
+                if event.relevant {
+                    edge.reinforce(now, self.strength_for(edge.kind));
+                } else {
+                    edge.mark_interference();
+                }
+            });
         }
 
-        let node_updates = changed_nodes
-            .into_iter()
-            .map(|id| FeedbackNodeUpdate {
-                expected: expected_nodes
-                    .remove(&id)
-                    .expect("a changed node had an initial value"),
-                replacement: nodes
-                    .remove(&id)
-                    .flatten()
-                    .expect("a changed node remains present"),
+        // The port commits a set of independent CAS deltas atomically. Keep
+        // their staging order deterministic; retry identity comes from the
+        // canonical events above, not map or update-vector iteration order.
+        let node_updates = nodes
+            .into_values()
+            .filter_map(CachedRow::into_update)
+            .map(|(expected, replacement)| FeedbackNodeUpdate {
+                expected,
+                replacement,
             })
             .collect();
-        let edge_updates = changed_edges
-            .into_iter()
-            .map(|identity| FeedbackEdgeUpdate {
-                expected: expected_edges
-                    .remove(&identity)
-                    .expect("a changed edge was initially cached"),
-                replacement: edges
-                    .remove(&identity)
-                    .flatten()
-                    .expect("a changed edge remains present"),
+        let edge_updates = edges
+            .into_values()
+            .filter_map(CachedRow::into_update)
+            .map(|(expected, replacement)| FeedbackEdgeUpdate {
+                expected: Some(expected),
+                replacement,
             })
             .collect();
         let commit = FeedbackCommit {
@@ -488,6 +552,205 @@ mod tests {
     use super::{
         ObservedRoute, ReceiptFeedback, canonical_receipt_feedback, receipt_feedback_fingerprint,
     };
+
+    /// Receipt staging changes only the order of independent row deltas, not
+    /// their transaction meaning. Exercise both adapters against late node and
+    /// edge conflicts before relying on deterministic cache iteration.
+    async fn assert_delta_order_preserves_atomicity(store: impl mneme_core::ports::GraphStore) {
+        use mneme_core::ports::{
+            Error, FeedbackCommit, FeedbackCommitOutcome, FeedbackEdgeUpdate, FeedbackIdempotency,
+            FeedbackNodeUpdate, FeedbackRetryScope,
+        };
+        use mneme_core::{BodyRef, Edge, EdgeKind, Node, NodeStatus, Provenance, StrengthParams};
+
+        let mut nodes = Vec::new();
+        for id in [1u128, 2, 3] {
+            let node = Node::try_new(
+                NodeId(Ulid::from(id)),
+                "feedback snapshot",
+                BodyRef::new("inline://fixture").unwrap(),
+                std::iter::empty::<&str>(),
+                Provenance::derived_empty(),
+                0.5,
+                0.5,
+                NodeStatus::Active,
+                1,
+            )
+            .unwrap();
+            store.put_node(&node).await.unwrap();
+            nodes.push(node);
+        }
+        let edges = [
+            Edge::new(nodes[0].id(), nodes[1].id(), 0.2, EdgeKind::Associative, 1),
+            Edge::new(nodes[1].id(), nodes[2].id(), 0.4, EdgeKind::Associative, 1),
+        ];
+        for edge in &edges {
+            store.put_edge(edge).await.unwrap();
+        }
+        let commit = FeedbackCommit {
+            idempotency: Some(
+                FeedbackIdempotency::new(
+                    "feedback-order-fixture",
+                    receipt_feedback_fingerprint(&[]),
+                    FeedbackRetryScope::new("feedback-order-epoch", 1, 1).unwrap(),
+                )
+                .unwrap(),
+            ),
+            applied_at: 10,
+            nodes: nodes
+                .iter()
+                .take(2)
+                .map(|expected| {
+                    let mut replacement = expected.clone();
+                    replacement.record_grounded_use(10);
+                    FeedbackNodeUpdate {
+                        expected: expected.clone(),
+                        replacement,
+                    }
+                })
+                .collect(),
+            edges: edges
+                .iter()
+                .map(|expected| {
+                    let mut replacement = expected.clone();
+                    replacement.reinforce(10, &StrengthParams::default());
+                    FeedbackEdgeUpdate {
+                        expected: Some(expected.clone()),
+                        replacement,
+                    }
+                })
+                .collect(),
+            merge_observations: Vec::new(),
+        };
+
+        for reverse_nodes in [false, true] {
+            for reverse_edges in [false, true] {
+                for stale_node in [false, true] {
+                    let mut stale = commit.clone();
+                    if stale_node {
+                        stale.nodes[1].expected.record_grounded_use(2);
+                    } else {
+                        stale.edges[1]
+                            .expected
+                            .as_mut()
+                            .unwrap()
+                            .mark_interference();
+                    }
+                    if reverse_nodes {
+                        stale.nodes.reverse();
+                    }
+                    if reverse_edges {
+                        stale.edges.reverse();
+                    }
+                    assert!(matches!(
+                        store.commit_feedback(&stale).await,
+                        Err(Error::Conflict(_))
+                    ));
+                    for original in &nodes {
+                        assert_eq!(
+                            serde_json::to_value(
+                                store.get_node(original.id()).await.unwrap().unwrap()
+                            )
+                            .unwrap(),
+                            serde_json::to_value(original).unwrap(),
+                            "a node or edge conflict cannot leave a written node prefix",
+                        );
+                    }
+                    for original in &edges {
+                        assert_eq!(
+                            serde_json::to_value(
+                                store
+                                    .get_edge(original.from, original.to)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                            )
+                            .unwrap(),
+                            serde_json::to_value(original).unwrap(),
+                            "a conflict cannot leave a written edge prefix",
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            store.commit_feedback(&commit).await.unwrap(),
+            FeedbackCommitOutcome::Applied,
+            "failed permutations cannot consume the durable retry identity",
+        );
+        let mut reordered_replay = commit.clone();
+        reordered_replay.nodes.reverse();
+        reordered_replay.edges.reverse();
+        assert_eq!(
+            store.commit_feedback(&reordered_replay).await.unwrap(),
+            FeedbackCommitOutcome::AlreadyApplied,
+            "the canonical event identity does not depend on staging order",
+        );
+        for expected in &commit.nodes {
+            assert_eq!(
+                serde_json::to_value(
+                    store
+                        .get_node(expected.replacement.id())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(&expected.replacement).unwrap(),
+            );
+        }
+        for expected in &commit.edges {
+            assert_eq!(
+                serde_json::to_value(
+                    store
+                        .get_edge(expected.replacement.from, expected.replacement.to)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(&expected.replacement).unwrap(),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn feedback_delta_order_preserves_atomicity_mem() {
+        assert_delta_order_preserves_atomicity(mneme_cozo::MemStore::new(4)).await;
+    }
+
+    #[cfg(feature = "cozo")]
+    #[tokio::test]
+    async fn feedback_delta_order_preserves_atomicity_cozo() {
+        assert_delta_order_preserves_atomicity(mneme_cozo::CozoStore::new(4).unwrap()).await;
+    }
+
+    #[test]
+    fn cached_rows_preserve_absence_and_original_snapshot_across_repeated_updates() {
+        let mut missing = super::CachedRow::<Vec<u8>>::new(None);
+        missing.update_once(|_| panic!("receipt feedback must not create a missing row"));
+        assert!(missing.current().is_none());
+        assert!(!missing.is_changed());
+        assert!(missing.into_update().is_none());
+
+        let unchanged = super::CachedRow::new(Some(vec![1, 2]));
+        assert_eq!(unchanged.current().unwrap(), &[1, 2]);
+        assert!(!unchanged.is_changed());
+        assert!(unchanged.into_update().is_none());
+
+        let mut changed = super::CachedRow::new(Some(vec![1, 2]));
+        changed.update_once(|row| row.push(3));
+        changed.update_once(|_| panic!("distinct routes cannot multiply row credit"));
+        assert!(changed.is_changed());
+        assert_eq!(changed.current().unwrap(), &[1, 2, 3]);
+        let (snapshot, replacement) = changed.into_update().unwrap();
+        assert_eq!(
+            snapshot,
+            [1, 2],
+            "CAS keeps the original, not the trained row"
+        );
+        assert_eq!(replacement, [1, 2, 3]);
+    }
 
     #[test]
     fn explicit_negative_start_is_valid_but_opposed_node_judgments_are_not() {

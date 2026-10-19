@@ -26,9 +26,7 @@ from rollout_primitives import decode_json, digest, encoded, read_regular
 import host_files
 import host_process
 import capture_source
-from turn_observer import (Limits, RecordAnchor, TurnAdmission, admit_source_turn,
-                           observation_byte_ceiling, observe_source_turn,
-                           validate_delivery_packet)
+from turn_observer import Limits, validate_delivery_packet
 
 SCHEMA = "mneme.codex-recording.state.v1"
 MAX_JOBS = 64
@@ -483,16 +481,6 @@ def _transaction(config, session, mutate, *, create=False, fresh=False, lock_tim
             os.close(fd)
 
 
-def _pin(admission):
-    value = asdict(admission)
-    return {k: value[k] for k in ("path", "sessions_root", "session_id", "device", "inode", "session_record")}
-
-
-def _admission(value):
-    return TurnAdmission(**{**value, "session_record": RecordAnchor(**value["session_record"]),
-                            "start_record": RecordAnchor(**value["start_record"])})
-
-
 def _count(data, name):
     data["counts"][name] = min(1_000_000, data["counts"][name] + 1)
 
@@ -895,17 +883,11 @@ def notice(config, event):
             return {"outcome": "deferred", "reason": "cancelled_or_invalid_fence"}
         host = capture_source.source_host(config)
         capture_source.assessor(config)
-        if host == "codex":
-            root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
-            result = admit_source_turn(event.get("transcript_path"), sessions_root=root,
-                session_id=session, turn_id=turn, expected_prompt_sha256=digest(prompt.encode()))
-        else:
-            result = capture_source.admit(config, event)
+        result = capture_source.admit(config, event)
         if result["status"] != "admitted":
             return {"outcome": "deferred", "reason": result["reason"]}
         admission = result["admission"]
-        current = (observe_source_turn(admission, limits=Limits(scan_bytes=256 * 1024, events=512))
-                   if host == "codex" else capture_source.observe(config, admission, limits=Limits(scan_bytes=256 * 1024, events=512)))
+        current = capture_source.observe(config, admission, limits=Limits(scan_bytes=256 * 1024, events=512))
         open_reasons = {"source_turn_not_closed"} | ({"source_prompt_pending"} if host == "claude_code" else set())
         if current["reason"] not in open_reasons:
             return {"outcome": "deferred", "reason": "not_current_open_turn"}
@@ -1631,8 +1613,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
             # or failed progress write cannot refund an already performed poll.
             limits = Limits()
             admission = capture_source.restore(config, job["admission"])
-            byte_charge = (observation_byte_ceiling(admission, limits=limits) if host == "codex"
-                           else capture_source.byte_ceiling(config, admission, limits=limits))
+            byte_charge = capture_source.byte_ceiling(config, admission, limits=limits)
             def reserve_poll(data, current):
                 if current["phase"] != "observing":
                     return None
@@ -1649,12 +1630,11 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
             if not ok or reserved is None:
                 return True
             job = reserved
-            observation = (observe_source_turn(admission, limits=limits, delivery=job.get("delivery"))
-                           if host == "codex" else capture_source.observe(config, admission, limits=limits,
-                               delivery=job.get("delivery"), stop_receipt=job.get("stop_receipt"),
-                               boundary_receipt=job.get("boundary_receipt"),
-                               snapshot=job.get("source_snapshot"),
-                               allow_partial=job["polls"] >= MAX_POLLS or time.time() >= job["closed_at"] + FLUSH_SECONDS))
+            observation = capture_source.observe(config, admission, limits=limits,
+                delivery=job.get("delivery"), stop_receipt=job.get("stop_receipt"),
+                boundary_receipt=job.get("boundary_receipt"), snapshot=job.get("source_snapshot"),
+                allow_partial=host == "claude_code" and (
+                    job["polls"] >= MAX_POLLS or time.time() >= job["closed_at"] + FLUSH_SECONDS))
             job["bytes_read"] += observation["work"]["bytes_read"]
             job["records_parsed"] += observation["work"]["records_parsed"]
             def progress(_data, current):

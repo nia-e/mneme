@@ -22,13 +22,19 @@ const fn expected_profile_permission(
 
 #[test]
 fn capability_profile_defaults_and_feedback_compatibility_are_explicit() {
-    let defaults = parse_args_from(std::iter::empty::<String>()).unwrap();
-    assert_eq!(
-        defaults.capability_profile,
-        CapabilityProfile::ReceiptGrounded
-    );
-    assert!(!defaults.allow_direct_feedback);
-    assert!(!defaults.direct_feedback_implied_operator);
+    fn owner(args: startup::Startup) -> startup::OwnerOptions {
+        let StartupMode::Owner(owner) = args.mode else {
+            panic!("owner invocation expected");
+        };
+        owner
+    }
+    let defaults = owner(parse_args_from(std::iter::empty::<String>()).unwrap());
+    assert_eq!(defaults.profile(), CapabilityProfile::ReceiptGrounded);
+    assert!(!defaults.direct_feedback().enabled());
+    assert!(!matches!(
+        defaults.direct_feedback(),
+        DirectFeedback::ImpliedOperator
+    ));
 
     for (spelling, expected) in [
         ("read-only", CapabilityProfile::ReadOnly),
@@ -36,34 +42,44 @@ fn capability_profile_defaults_and_feedback_compatibility_are_explicit() {
         ("curator", CapabilityProfile::Curator),
         ("operator", CapabilityProfile::Operator),
     ] {
-        let parsed = parse_args_from(["--capability-profile", spelling]).unwrap();
-        assert_eq!(parsed.capability_profile, expected);
-        assert!(!parsed.allow_direct_feedback);
+        let parsed = owner(parse_args_from(["--capability-profile", spelling]).unwrap());
+        assert_eq!(parsed.profile(), expected);
+        assert!(!parsed.direct_feedback().enabled());
     }
 
-    let enabled = parse_args_from([
-        "--allow-direct-feedback",
-        "--db",
-        "project=/tmp/mneme-project",
-    ])
-    .unwrap();
-    assert_eq!(enabled.capability_profile, CapabilityProfile::Operator);
-    assert!(enabled.allow_direct_feedback);
-    assert!(enabled.direct_feedback_implied_operator);
+    let enabled = owner(
+        parse_args_from([
+            "--allow-direct-feedback",
+            "--db",
+            "project=/tmp/mneme-project",
+        ])
+        .unwrap(),
+    );
+    assert_eq!(enabled.profile(), CapabilityProfile::Operator);
+    assert!(enabled.direct_feedback().enabled());
+    assert!(matches!(
+        enabled.direct_feedback(),
+        DirectFeedback::ImpliedOperator
+    ));
     assert_eq!(
-        enabled.dbs,
+        enabled.into_databases(),
         vec![("project".into(), PathBuf::from("/tmp/mneme-project"))]
     );
 
-    let explicit = parse_args_from([
-        "--capability-profile",
-        "operator",
-        "--allow-direct-feedback",
-    ])
-    .unwrap();
-    assert_eq!(explicit.capability_profile, CapabilityProfile::Operator);
-    assert!(explicit.allow_direct_feedback);
-    assert!(!explicit.direct_feedback_implied_operator);
+    let explicit = owner(
+        parse_args_from([
+            "--capability-profile",
+            "operator",
+            "--allow-direct-feedback",
+        ])
+        .unwrap(),
+    );
+    assert_eq!(explicit.profile(), CapabilityProfile::Operator);
+    assert!(explicit.direct_feedback().enabled());
+    assert!(!matches!(
+        explicit.direct_feedback(),
+        DirectFeedback::ImpliedOperator
+    ));
 
     for profile in ["read-only", "receipt-grounded", "curator"] {
         let error = parse_args_from(["--allow-direct-feedback", "--capability-profile", profile])

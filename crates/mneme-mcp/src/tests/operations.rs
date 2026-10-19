@@ -7,10 +7,11 @@ use crate::*;
 fn library_mode_cli_is_exclusive_of_owner_authority() {
     let args = parse_args_from(["--library-config", "/tmp/library.json"]).unwrap();
     assert_eq!(
-        args.library_config,
-        Some(PathBuf::from("/tmp/library.json"))
+        args.mode,
+        StartupMode::Library {
+            config: PathBuf::from("/tmp/library.json")
+        }
     );
-    assert!(args.dbs.is_empty());
     for extra in [
         vec!["--db", "project=/tmp/project.db"],
         vec!["--capability-profile", "read-only"],

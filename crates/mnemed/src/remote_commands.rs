@@ -11,25 +11,10 @@ use crate::{
     AnyErr, Command, KindArg, MergeAction, SignalArg, cli_body_limit, cli_remote_limit, parse_id,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RequestAccess {
-    ReadOnly,
-    Mutation,
-}
+mod request;
 
-pub(crate) struct Request {
-    pub access: RequestAccess,
-    pub tool: &'static str,
-    pub arguments: Value,
-    /// A server predating atomic capture links would silently discard this
-    /// unknown field; the caller must check its advertised capture schema.
-    pub requires_capture_links: bool,
-    pub save: Option<mneme_app::save::PreparedSave>,
-    pub concern: Option<crate::cli_concern::PreparedConcern>,
-    pub edit_body: Option<crate::cli_edit_body::Prepared>,
-    pub edit_summary: Option<crate::cli_edit_summary::Prepared>,
-    pub retag: Option<crate::cli_retag::Prepared>,
-}
+use request::PreparedOperation;
+pub(crate) use request::{Request, RequestAccess};
 
 fn unsupported(operation: &str, reason: &str) -> AnyErr {
     format!(
@@ -103,13 +88,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
     if db.is_empty() {
         return Err("remote database name must not be empty".into());
     }
-    let mut requires_capture_links = false;
-    let mut save = None;
-    let mut concern = None;
-    let mut retag = None;
-    let mut edit_body = None;
-    let mut edit_summary = None;
-    let (tool, arguments) = match command {
+    let (operation, arguments) = match command {
         Command::Config(_) | Command::Client(_) | Command::TagFormatMigration(_) => {
             return Err("client is a standalone local process, not a remote CLI operation".into());
         }
@@ -124,12 +103,12 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
         }
         Command::Snapshot {
             action: crate::SnapshotAction::Create,
-        } => ("snapshot_create", json!({})),
+        } => (PreparedOperation::SnapshotCreate, json!({})),
         Command::Library(_) => {
             return Err("library reads require --config PATH and cannot use --remote".into());
         }
-        Command::Status => ("status", json!({})),
-        Command::Core => ("core", json!({})),
+        Command::Status => (PreparedOperation::Status, json!({})),
+        Command::Core => (PreparedOperation::Core, json!({})),
         Command::Query(a) => {
             if a.bodies {
                 return Err(unsupported(
@@ -143,7 +122,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
             if let Some(limit) = a.summary_max_bytes {
                 request["summary_max_bytes"] = json!(limit);
             }
-            ("query", request)
+            (PreparedOperation::Query, request)
         }
         Command::RecallContext(a) => {
             if a.max_content_bytes
@@ -155,7 +134,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                 ));
             }
             (
-                "recall_context",
+                PreparedOperation::RecallContext,
                 query_input(&a.text, a.k, a.depth, a.max_nodes, a.min_relevance, &a.tags)?,
             )
         }
@@ -165,7 +144,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                 cli_body_limit(a.max_body_bytes)?;
             }
             (
-                "get",
+                PreparedOperation::Get,
                 json!({"id": a.id, "body": a.body, "body_offset": a.body_offset, "max_body_bytes": a.max_body_bytes, "edges": a.edges}),
             )
         }
@@ -176,11 +155,11 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
             }
             cli_body_limit(a.max_bytes)?;
             (
-                "get",
+                PreparedOperation::Get,
                 json!({"id": a.id, "body": true, "body_offset": a.offset, "max_body_bytes": a.max_bytes}),
             )
         }
-        Command::Neighbors(a) => ("neighbors", a.prepare()?.into_json()),
+        Command::Neighbors(a) => (PreparedOperation::Neighbors, a.prepare()?.into_json()),
         Command::Remote(a) => {
             id(&a.id)?;
             cli_remote_limit(a.limit)?;
@@ -196,45 +175,48 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                     .map_err(|error| format!("invalid --after remote-edge cursor: {error}"))?;
             }
             (
-                "remote_edges",
+                PreparedOperation::RemoteEdges,
                 json!({"id": a.id, "limit": a.limit, "after": after}),
             )
         }
-        Command::Ingest(args) => ("ingest", crate::cli_ingest::prepare_remote(args)?),
+        Command::Ingest(args) => (
+            PreparedOperation::Ingest,
+            crate::cli_ingest::prepare_remote(args)?,
+        ),
         Command::EditBody(args) => {
             let frozen = crate::cli_edit_body::Prepared::read(args)?;
             let payload = frozen.payload();
-            edit_body = Some(frozen);
-            ("edit_body", payload)
+            (PreparedOperation::EditBody(frozen), payload)
         }
         Command::EditSummary(args) => {
             let frozen = crate::cli_edit_summary::Prepared::read(args)?;
             let payload = frozen.payload();
-            edit_summary = Some(frozen);
-            ("edit_summary", payload)
+            (PreparedOperation::EditSummary(frozen), payload)
         }
         Command::Retag(args) => {
             let frozen = crate::cli_retag::Prepared::read(args)?;
             let payload = frozen.payload();
-            retag = Some(frozen);
-            ("retag", payload)
+            (PreparedOperation::Retag(frozen), payload)
         }
         Command::Concern(args) => {
             let frozen = crate::cli_concern::PreparedConcern::read(args)?;
             let payload = frozen.payload();
-            concern = Some(frozen);
-            ("concern", payload)
+            (PreparedOperation::Concern(Box::new(frozen)), payload)
         }
         Command::Save(args) => {
             let frozen = crate::cli_save::PreparedSave::read(args)?;
-            save = Some(frozen.prepared);
-            ("save", frozen.payload)
+            (
+                PreparedOperation::Save(Box::new(frozen.prepared)),
+                frozen.payload,
+            )
         }
         Command::Capture { action } => match action {
             crate::cli_capture::CaptureAction::Add(args) => {
                 let prepared = crate::cli_capture::PreparedCapture::read(args)?;
-                requires_capture_links = prepared.has_links();
-                ("capture", prepared.into_json())
+                let operation = PreparedOperation::Capture {
+                    requires_links: prepared.has_links(),
+                };
+                (operation, prepared.into_json())
             }
             crate::cli_capture::CaptureAction::Init
             | crate::cli_capture::CaptureAction::Inspect => {
@@ -244,7 +226,13 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                 ));
             }
         },
-        Command::Episode { action } => ("episode", action.prepare()?.into_json()),
+        Command::Episode { action } => {
+            let prepared = action.prepare()?;
+            (
+                PreparedOperation::Episode(prepared.action()),
+                prepared.into_json(),
+            )
+        }
         Command::Link(a) => {
             id(&a.from)?;
             id(&a.to)?;
@@ -277,20 +265,13 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                             .into(),
                     );
                 }
-                return Ok(Request {
-                    access: RequestAccess::Mutation,
-                    tool: "link",
-                    arguments: with_db(
+                return Ok(Request::new(
+                    PreparedOperation::Link,
+                    with_db(
                         json!({"from":a.from,"to":a.to,"to_db":target,"weight":a.weight}),
                         db,
                     ),
-                    requires_capture_links: false,
-                    save: None,
-                    concern: None,
-                    retag: None,
-                    edit_body: None,
-                    edit_summary: None,
-                });
+                ));
             }
             let anchor = a.anchor.as_deref().map(crate::parse_span).transpose()?;
             if anchor.is_some_and(|span| span.start > span.end) {
@@ -303,18 +284,21 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                 KindArg::DerivedFrom => "derived_from",
             };
             (
-                "link",
+                PreparedOperation::Link,
                 json!({"from": a.from, "to": a.to, "kind": kind, "weight": a.weight,
                 "anchor_start": anchor.map(|span| span.start), "anchor_end": anchor.map(|span| span.end)}),
             )
         }
         Command::Supersede { winner, loser } => (
-            "supersede",
+            PreparedOperation::Supersede,
             json!({"winner": id(winner)?, "loser": id(loser)?}),
         ),
-        Command::Contradict { a, b } => ("contradict", json!({"a": id(a)?, "b": id(b)?})),
+        Command::Contradict { a, b } => (
+            PreparedOperation::Contradict,
+            json!({"a": id(a)?, "b": id(b)?}),
+        ),
         Command::Reconcile { a, b, resolution } => match (a, b, resolution) {
-            (None, None, None) => ("contradictions", json!({})),
+            (None, None, None) => (PreparedOperation::Contradictions, json!({})),
             (Some(a), Some(b), Some(resolution)) => {
                 crate::parse_resolution(resolution)?;
                 let canonical = if resolution == "context" {
@@ -323,7 +307,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                     resolution
                 };
                 (
-                    "reconcile",
+                    PreparedOperation::Reconcile,
                     json!({"a": id(a)?, "b": id(b)?, "resolution": canonical}),
                 )
             }
@@ -341,24 +325,25 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
                 SignalArg::Irrelevant => "irrelevant",
             };
             (
-                "feedback",
+                PreparedOperation::Feedback,
                 json!({"from": a.from.as_deref().map(id).transpose()?, "to": id(&a.to)?, "signal": signal}),
             )
         }
-        Command::Merges => ("merges", json!({})),
+        Command::Merges => (PreparedOperation::Merges, json!({})),
         Command::Merge { action } => match action {
             MergeAction::Full { winner, loser } => (
-                "merge",
+                PreparedOperation::Merge,
                 json!({"mode": "full", "winner": id(winner)?, "loser": id(loser)?}),
             ),
-            MergeAction::Keep { a, b } => {
-                ("merge", json!({"mode": "keep", "a": id(a)?, "b": id(b)?}))
-            }
+            MergeAction::Keep { a, b } => (
+                PreparedOperation::Merge,
+                json!({"mode": "keep", "a": id(a)?, "b": id(b)?}),
+            ),
         },
-        Command::Forget { id: node } => ("forget", json!({"id": id(node)?})),
-        Command::Decay => ("decay", json!({})),
-        Command::Prune => ("prune", json!({})),
-        Command::List(a) => ("list", a.prepare()?.into_json()),
+        Command::Forget { id: node } => (PreparedOperation::Forget, json!({"id": id(node)?})),
+        Command::Decay => (PreparedOperation::Decay, json!({})),
+        Command::Prune => (PreparedOperation::Prune, json!({})),
+        Command::List(a) => (PreparedOperation::List, a.prepare()?.into_json()),
         Command::Repl(_) => {
             return Err(unsupported(
                 "repl",
@@ -378,39 +363,7 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
             ));
         }
     };
-    // Closed, fail-closed policy for implicit owner routing. Keep read/write
-    // meaning here beside the adapter instead of guessing from command names.
-    let access = match tool {
-        "status" | "core" | "query" | "recall_context" | "get" | "neighbors" | "remote_edges"
-        | "contradictions" | "merges" | "list" => RequestAccess::ReadOnly,
-        "episode" => match arguments["action"].as_str() {
-            Some("list" | "search" | "get" | "history" | "references") => RequestAccess::ReadOnly,
-            Some("append" | "revise") => RequestAccess::Mutation,
-            _ => return Err("remote episode action has no owner-routing policy".into()),
-        },
-        "concern"
-            if concern
-                .as_ref()
-                .is_some_and(|prepared| !prepared.request.is_mutation()) =>
-        {
-            RequestAccess::ReadOnly
-        }
-        "edit_body" | "edit_summary" | "retag" | "save" | "capture" | "ingest" | "concern"
-        | "link" | "supersede" | "contradict" | "reconcile" | "feedback" | "merge" | "forget"
-        | "decay" | "prune" | "snapshot_create" => RequestAccess::Mutation,
-        _ => return Err("remote tool has no owner-routing policy".into()),
-    };
-    Ok(Request {
-        access,
-        tool,
-        arguments: with_db(arguments, db),
-        requires_capture_links,
-        save,
-        concern,
-        retag,
-        edit_body,
-        edit_summary,
-    })
+    Ok(Request::new(operation, with_db(arguments, db)))
 }
 
 fn s<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -902,7 +855,7 @@ mod tests {
         // This is a read filter: keep submitted text until the shared engine
         // normalizes it; admission must not impose historical-node spelling.
         assert_eq!(
-            request.arguments["tags"],
+            request.arguments()["tags"],
             json!([" Smoke / Fixture ", "smoke-fixture"])
         );
         assert!(prepare(&command(&["query", "hello", "--tag", "C++"]), "project").is_err());
@@ -911,7 +864,7 @@ mod tests {
     #[test]
     fn query_summary_bound_is_forwarded_without_changing_remote_defaults() {
         let default = prepare(&command(&["query", "hello"]), "project").unwrap();
-        assert!(default.arguments.get("summary_max_bytes").is_none());
+        assert!(default.arguments().get("summary_max_bytes").is_none());
         for bytes in ["1", "320", "16384"] {
             let request = prepare(
                 &command(&["query", "hello", "--summary-max-bytes", bytes]),
@@ -919,10 +872,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                request.arguments["summary_max_bytes"],
+                request.arguments()["summary_max_bytes"],
                 bytes.parse::<u64>().unwrap()
             );
-            assert_eq!(request.tool, "query");
+            assert_eq!(request.tool(), "query");
         }
     }
 
@@ -955,11 +908,11 @@ mod tests {
         ];
         for (argv, expected) in cases {
             let request = prepare(&command(argv), "project").unwrap();
-            assert_eq!(request.tool, *expected, "{argv:?}");
-            assert_eq!(request.arguments["db"], "project", "{argv:?}");
+            assert_eq!(request.tool(), *expected, "{argv:?}");
+            assert_eq!(request.arguments()["db"], "project", "{argv:?}");
             assert!(
                 request
-                    .arguments
+                    .arguments()
                     .as_object()
                     .unwrap()
                     .values()
@@ -971,7 +924,7 @@ mod tests {
             "user",
         )
         .unwrap();
-        assert_eq!(request.arguments["resolution"], "context-dependent");
+        assert_eq!(request.arguments()["resolution"], "context-dependent");
     }
 
     #[test]
@@ -1022,7 +975,7 @@ mod tests {
             vec!["episode", "references", A],
         ] {
             assert_eq!(
-                prepare(&command(&argv), "project").unwrap().access,
+                prepare(&command(&argv), "project").unwrap().access(),
                 RequestAccess::ReadOnly,
                 "{argv:?}"
             );
@@ -1043,7 +996,7 @@ mod tests {
             vec!["prune"],
         ] {
             assert_eq!(
-                prepare(&command(&argv), "project").unwrap().access,
+                prepare(&command(&argv), "project").unwrap().access(),
                 RequestAccess::Mutation,
                 "{argv:?}"
             );
@@ -1053,8 +1006,8 @@ mod tests {
     #[test]
     fn snapshot_create_is_one_owner_native_request() {
         let request = prepare(&command(&["snapshot", "create"]), "workshop").unwrap();
-        assert_eq!(request.tool, "snapshot_create");
-        assert_eq!(request.arguments, json!({"db": "workshop"}));
+        assert_eq!(request.tool(), "snapshot_create");
+        assert_eq!(request.arguments(), &json!({"db": "workshop"}));
         assert!(
             prepare(
                 &command(&["library", "--config", "x", "catalog"]),

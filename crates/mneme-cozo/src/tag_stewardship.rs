@@ -32,7 +32,9 @@ impl MemStore {
             ));
         }
         let mut replacement = current.clone();
-        replacement.replace_tags(tags.clone());
+        replacement
+            .replace_tags(tags.clone())
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
         if g.touchstones.contains_key(&id) {
             validate_touchstone_owner_replacement(current, &replacement)?;
         }
@@ -135,8 +137,9 @@ mod tests {
     use super::*;
     fn tagged(id: NodeId, tags: &[&str], status: NodeStatus) -> Node {
         let mut node = crate::touchstone_tests::target(id, "vocabulary fixture");
-        node.replace_tags(mneme_core::BoundedTagSet::try_from_iter(tags.iter().copied()).unwrap());
-        node.set_status(status);
+        node.replace_tags(mneme_core::BoundedTagSet::try_from_iter(tags.iter().copied()).unwrap())
+            .unwrap();
+        node.set_status(status).unwrap();
         node
     }
     async fn vocabulary_contract(store: &dyn GraphStore) {
@@ -198,26 +201,26 @@ mod tests {
             mneme_core::CaptureRequestCodec::EpisodeV1,
         )
         .unwrap();
-        let edition = Node::try_new(
-            source.node_id(),
-            "historical event, not semantic vocabulary",
-            mneme_core::BodyRef::new("inline://episode").unwrap(),
-            ["episode-only"],
-            Provenance::External { source },
-            0.5,
-            0.5,
-            NodeStatus::Active,
-            1,
-        )
-        .unwrap();
+        let init = mneme_core::NodeInit {
+            id: source.node_id(),
+            summary: mneme_core::NodeSummary::new("historical event, not semantic vocabulary")
+                .unwrap(),
+            body: mneme_core::BodyRef::new("inline://episode").unwrap(),
+            tags: mneme_core::BoundedTagSet::try_from_iter(["episode-only"]).unwrap(),
+            provenance: Provenance::External { source },
+            stability: mneme_core::Stability::new(0.5).unwrap(),
+            confidence: mneme_core::Confidence::new(0.5).unwrap(),
+            status: NodeStatus::Active,
+            created: 1,
+        };
         let facet = mneme_core::EpisodeFacet::initial(
-            edition.id(),
+            init.id,
             mneme_core::OccurrenceSpan::Unknown,
             None,
             mneme_core::EpisodeTime::new(1).unwrap(),
         )
         .unwrap();
-        let edition = edition.with_episode(facet).unwrap();
+        let edition = Node::new_episode(init, facet).unwrap();
         store
             .episodes()
             .unwrap()
@@ -293,7 +296,9 @@ mod tests {
             }],
         };
         // A changed summary with unchanged tags must invalidate classifier work.
-        target.set_summary(mneme_core::NodeSummary::new("changed target meaning").unwrap());
+        target
+            .set_summary(mneme_core::NodeSummary::new("changed target meaning").unwrap())
+            .unwrap();
         store.put_node(&target).await.unwrap();
         assert!(matches!(
             store
@@ -312,7 +317,9 @@ mod tests {
         );
         let mut fresh = guards.clone();
         fresh.target_fingerprint = routing_content_fingerprint(&target);
-        guide.set_summary(mneme_core::NodeSummary::new("changed guide meaning").unwrap());
+        guide
+            .set_summary(mneme_core::NodeSummary::new("changed guide meaning").unwrap())
+            .unwrap();
         store.put_node(&guide).await.unwrap();
         assert!(matches!(
             store

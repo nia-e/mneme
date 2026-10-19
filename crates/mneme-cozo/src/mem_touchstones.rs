@@ -1,59 +1,6 @@
 //! Summary-only authored snapshots. Target changes never update these records.
 use super::*;
 
-pub(crate) fn validate_pre_touchstone_export(export: &StoreExport) -> Result<()> {
-    if !export.touchstones.is_empty()
-        || export.nodes.iter().any(|node| {
-            matches!(node.provenance(), Provenance::External { source }
-            if source.request_codec() == mneme_core::CaptureRequestCodec::TouchstoneV1)
-        })
-    {
-        return Err(Error::InvalidInput(
-            "predecessor export cannot contain touchstones or touchstone_v1 codec".into(),
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_touchstone_import(export: &StoreExport) -> Result<()> {
-    let nodes = export
-        .nodes
-        .iter()
-        .map(|node| (node.id(), node))
-        .collect::<BTreeMap<_, _>>();
-    let vectors = export
-        .vectors
-        .iter()
-        .map(|(id, _)| *id)
-        .collect::<BTreeSet<_>>();
-    let mut owners = BTreeSet::new();
-    for record in &export.touchstones {
-        if !owners.insert(record.owner()) {
-            return Err(Error::InvalidInput("duplicate touchstone owner".into()));
-        }
-        let node = nodes
-            .get(&record.owner())
-            .ok_or_else(|| Error::InvalidInput("touchstone has missing owner".into()))?;
-        record.validate_owner(export.db_id, node)?;
-        if !vectors.contains(&record.owner()) {
-            return Err(Error::InvalidInput(
-                "touchstone owner has no searchable vector projection".into(),
-            ));
-        }
-    }
-    for node in &export.nodes {
-        if matches!(node.provenance(), Provenance::External {source}
-            if source.request_codec() == mneme_core::CaptureRequestCodec::TouchstoneV1)
-            && !owners.contains(&node.id())
-        {
-            return Err(Error::InvalidInput(
-                "touchstone capture owner is missing immutable record".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Called after replay admission and before any writes, under the backend's
 /// canonical writer lock. No target body, tags or current episode head is read.
 pub(crate) fn prepare_touchstone(

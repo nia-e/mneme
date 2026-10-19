@@ -440,23 +440,25 @@ impl Memory {
             .await?;
         let id = request.capture.source.node_id();
         let source = request.capture.source.clone();
-        let node = Node::new(NodeInit {
-            id,
-            summary: request.capture.summary,
-            body: body_ref.clone(),
-            tags,
-            provenance: Provenance::External {
-                source: request.capture.source,
+        let node = Node::new_episode(
+            NodeInit {
+                id,
+                summary: request.capture.summary,
+                body: body_ref.clone(),
+                tags,
+                provenance: Provenance::External {
+                    source: request.capture.source,
+                },
+                stability: Stability::new(0.5).expect("constant stability"),
+                confidence: Confidence::new(0.5).expect("constant confidence"),
+                status: NodeStatus::Active,
+                created: now.get(),
             },
-            stability: Stability::new(0.5).expect("constant stability"),
-            confidence: Confidence::new(0.5).expect("constant confidence"),
-            status: NodeStatus::Active,
-            created: now.get(),
-        })
+            facet,
+        )
+        .map_err(|error| Error::InvalidInput(error.to_string()))?
         .with_body_ownership(BodyOwnership::Managed)
-        .with_origin_commit(request.capture.origin_commit)
-        .with_episode(facet)
-        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+        .with_origin_commit(request.capture.origin_commit);
         let links: Vec<_> = request
             .capture
             .links

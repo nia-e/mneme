@@ -305,10 +305,12 @@ pub(crate) fn normalized_node(node: &Node, options: &TagFormatMigrationOptions) 
         .map(|tag| options.replacement(tag).map_err(Error::InvalidInput))
         .collect::<Result<BTreeSet<_>>>()?;
     let mut replacement = node.clone();
-    replacement.replace_tags(
-        BoundedTagSet::try_from_iter(tags)
-            .map_err(|error| Error::InvalidInput(error.to_string()))?,
-    );
+    replacement
+        .replace_tags(
+            BoundedTagSet::try_from_iter(tags)
+                .map_err(|error| Error::InvalidInput(error.to_string()))?,
+        )
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
     // This narrow format operation has no authority to alter any other field.
     let mut before = serde_json::to_value(node).map_err(serialize_error)?;
     let mut after = serde_json::to_value(&replacement).map_err(serialize_error)?;
@@ -401,7 +403,7 @@ mod tests {
             ["cpp", "rust-compiler"]
         );
         let mut restored = export.nodes[0].clone();
-        restored.replace_tags(before.tag_set().clone());
+        restored.replace_tags(before.tag_set().clone()).unwrap();
         assert_eq!(
             serde_json::to_value(restored).unwrap(),
             serde_json::to_value(before).unwrap()

@@ -91,7 +91,9 @@ fn replace_tags_checked(
                 "node tags changed; inspect current tags before retrying".into(),
             ));
         }
-        replacement.replace_tags(tags.clone());
+        replacement
+            .replace_tags(tags.clone())
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
         touchstones::tx_validate_owner_replacement(&tx, &replacement)?;
         tx_run(
             &tx,
@@ -165,7 +167,8 @@ impl GraphStore for CozoStore {
                     if node.summary() == summary.as_str() {
                         return Err(Error::InvalidInput("summary is unchanged".into()));
                     }
-                    node.set_summary(summary);
+                    node.set_summary(summary)
+                        .map_err(|error| Error::InvalidInput(error.to_string()))?;
                     params.insert("data".into(), dv_str(&encode_canonical_node(&node)?));
                     params.insert("status".into(), dv_str(status_str(node.status())));
                     tx_run(&tx,
@@ -526,7 +529,10 @@ impl GraphStore for CozoStore {
     }
 
     async fn set_status(&self, id: NodeId, status: NodeStatus) -> Result<()> {
-        self.mutate_node(id, |n| n.set_status(status)).await
+        let mut node = self.get_node(id).await?.ok_or(Error::NotFound)?;
+        node.set_status(status)
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
+        self.put_node(&node).await
     }
 
     async fn maintenance_node_upper_bound(&self, _: ColdPath) -> Result<Option<NodeId>> {
@@ -1518,19 +1524,18 @@ mod episode_guard_tests {
         )
         .unwrap();
         let id = source.node_id();
-        Node::try_new(
-            id,
-            "a scene, not a lesson",
-            BodyRef::new("inline://scene").unwrap(),
-            std::iter::empty::<&str>(),
-            Provenance::External { source },
-            0.5,
-            0.5,
-            NodeStatus::Active,
-            1,
-        )
-        .unwrap()
-        .with_episode(
+        Node::new_episode(
+            mneme_core::NodeInit {
+                id,
+                summary: mneme_core::NodeSummary::new("a scene, not a lesson").unwrap(),
+                body: BodyRef::new("inline://scene").unwrap(),
+                tags: mneme_core::BoundedTagSet::default(),
+                provenance: Provenance::External { source },
+                stability: mneme_core::Stability::new(0.5).unwrap(),
+                confidence: mneme_core::Confidence::new(0.5).unwrap(),
+                status: NodeStatus::Active,
+                created: 1,
+            },
             EpisodeFacet::initial(
                 id,
                 OccurrenceSpan::Unknown,
@@ -2088,7 +2093,7 @@ mod summary_edit_tests {
             assert_ne!(after[i], original[i]);
         }
         let mut expected_node = before.clone();
-        expected_node.set_summary(summary);
+        expected_node.set_summary(summary).unwrap();
         assert_eq!(
             serde_json::to_value(changed).unwrap(),
             serde_json::to_value(expected_node).unwrap()

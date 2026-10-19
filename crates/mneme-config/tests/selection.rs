@@ -665,7 +665,7 @@ fn every_operation_subtree_is_independent_and_exclusions_still_win() {
         std::fs::write(&user, format!(
             "schema='mneme.config.v1'\n{}applicability.{scope}={{subtree_roots=[{}],excluded_roots=[{}]}}\n",
             entry("personal", FIRST, "workspace='any'"),
-            path_list_toml(&[parent.clone()]), path_list_toml(&[excluded.clone()])
+            path_list_toml(std::slice::from_ref(&parent)), path_list_toml(std::slice::from_ref(&excluded))
         )).unwrap();
         for (cwd, scoped) in [(&child, true), (&outside, false), (&excluded, false)] {
             let selected = select_workspace(&user, cwd, None).unwrap();
@@ -782,7 +782,7 @@ fn subtree_selectors_suppress_both_overlay_default_root_inference_paths() {
             THIRD,
             &format!(
                 "workspace='project',subtree_roots=[{}]",
-                path_list_toml(&[elsewhere.clone()])
+                path_list_toml(std::slice::from_ref(&elsewhere))
             )
         )
     );

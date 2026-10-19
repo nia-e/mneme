@@ -1,16 +1,14 @@
 use super::*;
 use mneme_core::ports::EpisodeStore;
-use mneme_core::{BodyRef, CaptureReplayProof, CaptureRequestCodec, EdgeKind};
+use mneme_core::{
+    BodyRef, BoundedTagSet, CaptureReplayProof, CaptureRequestCodec, Confidence, EdgeKind,
+    NodeInit, NodeSummary, Stability,
+};
 
 fn time(n: u128) -> EpisodeTime {
     EpisodeTime::new(n).unwrap()
 }
-fn authored_with_codec(
-    key: &str,
-    summary: &str,
-    created: u128,
-    codec: CaptureRequestCodec,
-) -> Node {
+fn authored_init(key: &str, summary: &str, created: u128, codec: CaptureRequestCodec) -> NodeInit {
     let source = CaptureSource::new_with_codec(
         "episode-tests",
         key,
@@ -21,21 +19,26 @@ fn authored_with_codec(
         codec,
     )
     .unwrap();
-    Node::try_new(
-        source.node_id(),
-        summary,
-        BodyRef::new(format!("inline://{key}")).unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
+    NodeInit {
+        id: source.node_id(),
+        summary: NodeSummary::new(summary).unwrap(),
+        body: BodyRef::new(format!("inline://{key}")).unwrap(),
+        tags: BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+        provenance: Provenance::External { source },
+        stability: Stability::new(0.5).unwrap(),
+        confidence: Confidence::new(0.5).unwrap(),
+        status: NodeStatus::Active,
         created,
-    )
-    .unwrap()
+    }
 }
 fn authored(key: &str, summary: &str, created: u128) -> Node {
-    authored_with_codec(key, summary, created, CaptureRequestCodec::CaptureV2)
+    Node::new(authored_init(
+        key,
+        summary,
+        created,
+        CaptureRequestCodec::CaptureV2,
+    ))
+    .unwrap()
 }
 fn episode(
     key: &str,
@@ -44,15 +47,15 @@ fn episode(
     occurrence: OccurrenceSpan,
     thread: Option<&str>,
 ) -> Node {
-    let node = authored_with_codec(key, summary, created, CaptureRequestCodec::EpisodeV1);
+    let init = authored_init(key, summary, created, CaptureRequestCodec::EpisodeV1);
     let facet = EpisodeFacet::initial(
-        node.id(),
+        init.id,
         occurrence,
         thread.map(|t| EpisodeThread::new(t).unwrap()),
         time(created),
     )
     .unwrap();
-    node.with_episode(facet).unwrap()
+    Node::new_episode(init, facet).unwrap()
 }
 fn revision(previous: &Node, key: &str, summary: &str, created: u128) -> Node {
     let before = previous.episode().unwrap();
@@ -66,9 +69,11 @@ fn revision(previous: &Node, key: &str, summary: &str, created: u128) -> Node {
         EpisodeRevisionReason::new("Correct the account").unwrap(),
     )
     .unwrap();
-    authored_with_codec(key, summary, created, CaptureRequestCodec::EpisodeV1)
-        .with_episode(facet)
-        .unwrap()
+    Node::new_episode(
+        authored_init(key, summary, created, CaptureRequestCodec::EpisodeV1),
+        facet,
+    )
+    .unwrap()
 }
 #[test]
 fn named_legacy_episode_decoder_derives_old_codec_without_changing_proof() {
@@ -85,7 +90,8 @@ fn named_legacy_episode_decoder_derives_old_codec_without_changing_proof() {
         .as_object_mut()
         .unwrap()
         .remove("request_codec");
-    let (decoded, original_status) = crate::decode_legacy_node_v1(&wire.to_string()).unwrap();
+    let (decoded, original_status) =
+        crate::snapshot::decode_legacy_node_v1(&wire.to_string()).unwrap();
     assert_eq!(original_status, "active");
     assert_eq!(decoded.episode(), old.episode());
     assert_eq!(
@@ -769,11 +775,11 @@ fn contexts(key: &str) -> OccurrenceContexts {
 }
 
 fn contextual_episode(key: &str, metadata: OccurrenceContexts) -> Node {
-    let node = authored_with_codec(key, "Contextual scene", 10, CaptureRequestCodec::EpisodeV2);
-    let facet = EpisodeFacet::initial(node.id(), OccurrenceSpan::Unknown, None, time(10))
+    let init = authored_init(key, "Contextual scene", 10, CaptureRequestCodec::EpisodeV2);
+    let facet = EpisodeFacet::initial(init.id, OccurrenceSpan::Unknown, None, time(10))
         .unwrap()
         .with_occurrence_contexts(metadata);
-    node.with_episode(facet).unwrap()
+    Node::new_episode(init, facet).unwrap()
 }
 
 #[tokio::test]
@@ -803,13 +809,15 @@ async fn contextual_editions_roundtrip_replay_and_headers_without_inheriting_con
     )
     .unwrap()
     .with_occurrence_contexts(final_context.clone());
-    let third = authored_with_codec(
-        "context-roundtrip-third",
-        "Contextual final scene",
-        12,
-        CaptureRequestCodec::EpisodeV2,
+    let third = Node::new_episode(
+        authored_init(
+            "context-roundtrip-third",
+            "Contextual final scene",
+            12,
+            CaptureRequestCodec::EpisodeV2,
+        ),
+        facet,
     )
-    .with_episode(facet)
     .unwrap();
     revise(&store, &second, &third).await;
     let before = store.export().canonical_value().unwrap();
@@ -961,7 +969,7 @@ async fn every_historical_json_boundary_refuses_context_presence_and_new_codec()
             .as_object_mut()
             .unwrap()
             .remove("request_codec");
-        assert!(crate::decode_legacy_node_v1(&legacy_node.to_string()).is_err());
+        assert!(crate::snapshot::decode_legacy_node_v1(&legacy_node.to_string()).is_err());
         let mut flat = forged["store"].clone();
         flat["nodes"][0] = legacy_node;
         let legacy: LegacyStoreExportV1 = serde_json::from_value(flat.clone()).unwrap();
@@ -1032,19 +1040,20 @@ fn linked_recorded_in(node: Node, session: &str) -> Node {
         source.request_codec(),
     )
     .unwrap();
-    Node::try_new(
-        node.id(),
-        node.summary(),
-        node.body().clone(),
-        node.tags(),
-        Provenance::External { source },
-        node.stability(),
-        node.confidence(),
-        node.status(),
-        node.created(),
+    Node::new_episode(
+        NodeInit {
+            id: node.id(),
+            summary: NodeSummary::new(node.summary()).unwrap(),
+            body: node.body().clone(),
+            tags: BoundedTagSet::try_from_iter(node.tags()).unwrap(),
+            provenance: Provenance::External { source },
+            stability: Stability::new(node.stability()).unwrap(),
+            confidence: Confidence::new(node.confidence()).unwrap(),
+            status: node.status(),
+            created: node.created(),
+        },
+        node.episode().unwrap().clone(),
     )
-    .unwrap()
-    .with_episode(node.episode().unwrap().clone())
     .unwrap()
 }
 

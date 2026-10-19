@@ -72,7 +72,7 @@ class EpisodeProjectionTests(unittest.TestCase):
             self.assertEqual(payload["cards"], [{**basic, "kind": "semantic"}])
 
     def test_linked_historical_scene_keeps_typed_origins_without_teaching_a_lesson(self):
-        from test_hook_recall import reference_origin
+        from fixture_recall_owner import reference_origin
         edition = "3" * 26
         origins = [reference_origin(edition, episode_anchor=True), reference_origin(edition)]
         origins[0].update(**{"from": edition, "to": origins[0]["anchor"]["identity"]["edition_id"],
@@ -89,7 +89,7 @@ class EpisodeProjectionTests(unittest.TestCase):
         self.assertNotIn("lesson", payload["cards"][0])
 
     def test_malformed_origins_and_recording_coordinates_fail_closed(self):
-        from test_hook_recall import reference_origin
+        from fixture_recall_owner import reference_origin
         origin = reference_origin("3" * 26)
         for origins in (None, [], {}, [{"kind": "unknown"}], [{"kind": "lexical", "extra": "x"}],
                         [{"kind": "lexical"}] * 2, [{**origin, "to": "wrong-edition"}],
@@ -107,7 +107,7 @@ class EpisodeProjectionTests(unittest.TestCase):
                     self.episode(recording_session=recording_session)]), (None, "invalid_input"))
 
     def test_only_origins_and_recording_session_overflow_omit_the_complete_card(self):
-        from test_hook_recall import reference_origin
+        from fixture_recall_owner import reference_origin
         from types import SimpleNamespace
         episode = self.episode()
         later = {"id": "later", "kind": "semantic", "summary": "Small lesson"}
@@ -234,7 +234,7 @@ class ConcernSelectionTests(unittest.TestCase):
             contract.validate_answer({"selected_ids": ids}, {"ids": ids})
 
     def test_historical_finding_projection_hides_meaning_hashes(self):
-        from test_turn_observer import concern_row
+        from fixture_source_turn import concern_row
         finding = {"scope": "Earlier environment", "observation": "Historical outcome",
                    "evidence": [{"source_ref": "fixture", "digest": "c" * 64}]}
         row = concern_row(finding=finding)

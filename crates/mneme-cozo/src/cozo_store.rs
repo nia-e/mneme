@@ -68,6 +68,9 @@ use mneme_core::{
 use ulid::Ulid;
 use unordered_pair::UnorderedPair;
 
+use crate::snapshot::{
+    FeedbackRetryRecord, StoreExport, validate_pre_context_node_value, validate_touchstone_import,
+};
 use crate::storage_contract::conventional_unmanaged::spec::{
     CAPTURE_V1_CATALOG_GENERATION_MARKER, CONCERN_V1_CATALOG_GENERATION_MARKER,
     EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER, LEGACY_CATALOG_GENERATION_MARKER,
@@ -1806,7 +1809,7 @@ impl CozoStore {
             for node in &export.nodes {
                 let raw = serde_json::to_value(node)
                     .map_err(|error| Error::InvalidInput(error.to_string()))?;
-                crate::validate_pre_context_node_value(&raw)?;
+                validate_pre_context_node_value(&raw)?;
             }
         }
         if export
@@ -1846,7 +1849,7 @@ impl CozoStore {
         }
         crate::validate_graph_import(&export, export.db_id)?;
         crate::validate_concern_import(&export)?;
-        crate::mem_touchstones::validate_touchstone_import(&export)?;
+        validate_touchstone_import(&export)?;
         if !export.touchstones.is_empty() && !self.touchstones_generation()? {
             return Err(Error::InvalidInput(
                 "touchstones require touchstones-v1 generation".into(),
@@ -1945,7 +1948,7 @@ impl CozoStore {
     /// Re-export every canonical relation and compare it to the source snapshot.
     /// Migration invokes this after closing and reopening sqlite, so it proves the
     /// data made it to disk rather than merely surviving in a connection cache.
-    pub async fn verify_import(&self, expected: &crate::StoreExport) -> Result<()> {
+    pub async fn verify_import(&self, expected: &StoreExport) -> Result<()> {
         self.verify_episode_import(expected)?;
         let actual = self.export().await?;
         let mut expected = expected.clone();
@@ -2027,12 +2030,12 @@ impl CozoStore {
     /// Losslessly export canonical graph data and the live vector projection.
     /// Derived lexical rows are rebuilt from nodes by import and deliberately do
     /// not become a second source of truth.
-    pub async fn export(&self) -> Result<crate::StoreExport> {
+    pub async fn export(&self) -> Result<StoreExport> {
         self.export_with_nodes(self.all_nodes(ColdPath::acquire()).await?)
             .await
     }
 
-    async fn export_with_nodes(&self, nodes: Vec<Node>) -> Result<crate::StoreExport> {
+    async fn export_with_nodes(&self, nodes: Vec<Node>) -> Result<StoreExport> {
         let vectors = self
             .run("?[id, e] := *node_vec{id, e}", BTreeMap::new(), false)?
             .rows
@@ -2155,7 +2158,7 @@ impl CozoStore {
             .rows
             .iter()
             .map(|row| {
-                Ok(crate::FeedbackRetryRecord {
+                Ok(FeedbackRetryRecord {
                     key: want_str(&row[0])?.to_string(),
                     fingerprint: want_str(&row[1])?.to_string(),
                     epoch: want_str(&row[2])?.to_string(),
@@ -2164,7 +2167,7 @@ impl CozoStore {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let export = crate::StoreExport {
+        let export = StoreExport {
             db_id: self.db_id,
             dim: self.dim,
             embedding_fingerprint: self.embedding_fingerprint()?,
@@ -2194,7 +2197,7 @@ impl CozoStore {
         // Inherited export reads several snapshots, not one global snapshot.
         // A concurrent owner capture/delete may therefore require retry. Never
         // acknowledge a torn typed owner/record/vector join as a valid export.
-        crate::mem_touchstones::validate_touchstone_import(&export)?;
+        validate_touchstone_import(&export)?;
         Ok(export)
     }
 
@@ -2452,13 +2455,6 @@ impl CozoStore {
             neighbors.truncate(candidate_cap);
         }
         Ok(oriented)
-    }
-
-    /// Read-modify-write a node through its encapsulated API.
-    async fn mutate_node(&self, id: NodeId, f: impl FnOnce(&mut Node)) -> Result<()> {
-        let mut node = self.get_node(id).await?.ok_or(Error::NotFound)?;
-        f(&mut node);
-        self.put_node(&node).await
     }
 
     fn upsert_remote_edge_for_source_database(
@@ -3250,12 +3246,12 @@ fn edge_pair_input(
     (format!("{name}[from, to] <- [{rows}]"), params)
 }
 
-fn canonical_export_value(export: crate::StoreExport) -> Result<serde_json::Value> {
+fn canonical_export_value(export: StoreExport) -> Result<serde_json::Value> {
     export.canonical_value()
 }
 
 fn normalize_tag_arrays(value: &mut serde_json::Value) {
-    crate::normalize_export_tag_arrays(value);
+    crate::snapshot::normalize_export_tag_arrays(value);
 }
 
 #[cfg(unix)]

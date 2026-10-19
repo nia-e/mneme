@@ -196,7 +196,7 @@ class RoutingRecordingTests(unittest.TestCase):
     def prepared(self, *, overlap=None, route=True, conditional=False):
         import recording_contract as c
         from test_recording_contract import memory_marker, observation, statement
-        from test_turn_observer import refresh_delivery_packet
+        from fixture_source_turn import refresh_delivery_packet
         marker = memory_marker()
         card = marker['packet']['displayed'][0]
         card.update(db_id=DB, node_id=TARGET)

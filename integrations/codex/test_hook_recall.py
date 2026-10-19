@@ -1661,7 +1661,7 @@ class ReaderConcernNativeTests(unittest.TestCase, RecallOwnerFixture):
         self.context["expansions"] = []
         self.context["observation"] = {"schema": 1, "learning": "disabled", "cards": [
             {"node_id": i, "lane": "primary", "card_sha256": "a" * 64, "graph_path": None} for i in (ID1, ID2)]}
-        from test_turn_observer import concern_row
+        from fixture_source_turn import concern_row
         self.row = concern_row(ID1, ID2)
         for e in self.row["notice"]["binding"]["endpoints"]:
             self.nodes[e["id"]]["concern_endpoint"] = e

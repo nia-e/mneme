@@ -126,7 +126,10 @@ impl BodyStore for PublicationCountingBodies {
 #[tokio::test]
 async fn legacy_episode_tag_receipts_replay_before_new_materialization_policy() {
     use mneme_core::episode::{EpisodeCommit, EpisodeFacet, EpisodeStore, EpisodeWriteExpectation};
-    use mneme_core::{BodyOwnership, Node, NodeStatus, Provenance};
+    use mneme_core::{
+        BodyOwnership, BoundedTagSet, Confidence, Node, NodeInit, NodeStatus, NodeSummary,
+        Provenance, Stability,
+    };
 
     for (old_tag, repaired_tag) in [("C++", "cpp"), ("Core", "historical-core")] {
         let store = Arc::new(MemStore::new(DEFAULT_DIM));
@@ -150,20 +153,18 @@ async fn legacy_episode_tag_receipts_replay_before_new_materialization_policy() 
         // Simulate a retained original receipt after explicit canonical tag repair.
         // Core cannot be an episode tag: historical Core therefore needs an
         // explicit ordinary spelling, not an automatic alias to protected core.
-        let node = Node::try_new(
-            id,
-            raw("old-edition").summary,
-            body,
-            [repaired_tag],
-            Provenance::External { source },
-            0.5,
-            0.5,
-            NodeStatus::Active,
-            0,
-        )
-        .unwrap()
-        .with_body_ownership(BodyOwnership::Managed)
-        .with_episode(
+        let node = Node::new_episode(
+            NodeInit {
+                id,
+                summary: NodeSummary::new(raw("old-edition").summary).unwrap(),
+                body,
+                tags: BoundedTagSet::try_from_iter([repaired_tag]).unwrap(),
+                provenance: Provenance::External { source },
+                stability: Stability::new(0.5).unwrap(),
+                confidence: Confidence::new(0.5).unwrap(),
+                status: NodeStatus::Active,
+                created: 0,
+            },
             EpisodeFacet::initial(
                 id,
                 raw("old-edition").occurrence,
@@ -172,7 +173,8 @@ async fn legacy_episode_tag_receipts_replay_before_new_materialization_policy() 
             )
             .unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .with_body_ownership(BodyOwnership::Managed);
         store
             .commit_episode(EpisodeCommit {
                 node: &node,
@@ -413,6 +415,64 @@ async fn edition_links_are_explicit_and_replay_never_infers_more() {
         Err(Error::Conflict(_))
     ));
     assert_eq!(store.all_edges(ColdPath::acquire()).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn semantic_ingest_rejects_episode_provenance_before_any_effects() {
+    use mneme_core::Provenance;
+    use mneme_engine::Ingest;
+
+    for codec in [
+        CaptureRequestCodec::EpisodeV1,
+        CaptureRequestCodec::EpisodeV2,
+    ] {
+        let store = Arc::new(MemStore::new(DEFAULT_DIM));
+        let bodies = Arc::new(PublicationCountingBodies::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mem = memory(
+            store.clone(),
+            bodies.clone(),
+            Arc::new(TestClock::default()),
+            calls.clone(),
+        );
+        let source = mneme_core::CaptureSource::new_with_codec(
+            "codex",
+            "semantic-mismatch",
+            "fixture://episode",
+            None,
+            None,
+            [0; 32],
+            codec,
+        )
+        .unwrap();
+        let result = mem
+            .ingest(Ingest::new(
+                "An episode source is not semantic provenance",
+                b"not published",
+                &[],
+                Provenance::External { source },
+            ))
+            .await;
+        assert!(matches!(result, Err(Error::InvalidInput(message))
+            if message == "invalid capture source request_codec: codec does not match enclosing memory kind"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(bodies.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(bodies.deletes.load(Ordering::SeqCst), 0);
+        assert!(
+            store
+                .all_nodes(ColdPath::acquire())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .all_edges(ColdPath::acquire())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 #[tokio::test]

@@ -35,6 +35,7 @@ fn node(index: u128, summary: &str, tags: Vec<String>, status: NodeStatus) -> No
         status,
         created: index,
     })
+    .unwrap()
 }
 
 async fn page(memory: &Memory, db_id: Ulid, args: Value) -> Value {

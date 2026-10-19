@@ -518,7 +518,7 @@ where
         for node in &expected.nodes {
             let raw = serde_json::to_value(node)
                 .map_err(|error| not_published("historical_generation_preflight", error))?;
-            crate::validate_pre_context_node_value(&raw)
+            crate::snapshot::validate_pre_context_node_value(&raw)
                 .map_err(|error| not_published("historical_generation_preflight", error))?;
         }
     }
@@ -1163,7 +1163,8 @@ mod tests {
         let mut export = crate::MemStore::new(4).export();
         let mut historical = node(42, "historical spelling is not new intent");
         historical
-            .replace_tags(mneme_core::BoundedTagSet::try_from_iter(["Old_Tag", "C++"]).unwrap());
+            .replace_tags(mneme_core::BoundedTagSet::try_from_iter(["Old_Tag", "C++"]).unwrap())
+            .unwrap();
         export.nodes.push(historical.clone());
         export
             .vectors
@@ -1191,7 +1192,7 @@ mod tests {
         let actual = current.get_node(historical.id()).await.unwrap().unwrap();
         assert_eq!(actual.tags().collect::<Vec<_>>(), ["cpp", "old-tag"]);
         let mut restored = actual;
-        restored.replace_tags(historical.tag_set().clone());
+        restored.replace_tags(historical.tag_set().clone()).unwrap();
         assert_eq!(
             serde_json::to_value(restored).unwrap(),
             serde_json::to_value(historical).unwrap()

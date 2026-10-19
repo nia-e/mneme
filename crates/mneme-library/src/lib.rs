@@ -14,9 +14,13 @@ use std::{
     time::Duration,
 };
 
+mod catalog_source;
 mod context;
+use catalog_source::CatalogSource;
 mod source_routes;
 pub use source_routes::{ReplicaPin, ReplicaRoute};
+#[cfg(test)]
+mod catalog_source_tests;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]
@@ -564,17 +568,7 @@ impl LibraryRuntime {
             .min(64);
         let timeout = Duration::from_millis(self.config.limits.timeout_ms);
         let source = self.source.clone();
-        let mut configured = self.config.clone();
-        for entry in &cat.entries {
-            if let Some(owner) = self.native_owners.get(&entry.db_id) {
-                configured
-                    .owner_routes
-                    .entry(entry.owner_device_id.clone())
-                    .or_default()
-                    .insert(entry.db_id.clone(), owner.endpoint.clone());
-            }
-        }
-        let cfg = Arc::new(configured);
+        let cfg = Arc::new(self.config.clone());
         let native_owners = Arc::new(self.native_owners.clone());
         let results = stream::iter(selected.into_iter().map(|entry| {
             let source = source.clone();
@@ -738,52 +732,10 @@ impl LibraryRuntime {
             .iter()
             .find(|e| e.project_id == g.project_id && !e.withdrawn)
             .ok_or_else(|| err("project is not enrolled or is withdrawn"))?;
-        let (endpoint, db, source_kind, generation, asof, expected_path) = if g.source_device_id
-            == e.owner_device_id
-            && g.generation.is_none()
-        {
-            let ep = self.configured_endpoint(e)
-                .ok_or_else(|| err("live route not configured for this project; provision owner_routes or query a snapshot"))?;
-            (
-                ep,
-                &e.database,
-                "live",
-                None,
-                None,
-                self.native_owners
-                    .get(&e.db_id)
-                    .and_then(|owner| owner.expected_path.as_deref()),
-            )
-        } else {
-            let generation = g
-                .generation
-                .as_deref()
-                .ok_or_else(|| err("replica reference requires generation"))?;
-            let replica = e
-                .replicas
-                .iter()
-                .find(|r| r.source_device_id == g.source_device_id && r.generation == generation)
-                .ok_or_else(|| err("snapshot generation expired; run library_query again"))?;
-            let ep = self
-                .config
-                .replicas
-                .get(&replica.source_device_id)
-                .ok_or_else(|| err("replica endpoint is not configured"))?;
-            (
-                ep,
-                &replica.database,
-                "snapshot",
-                Some(replica.generation.as_str()),
-                Some(replica.captured_at),
-                Some(replica.resolved_path.as_path()),
-            )
-        };
+        let catalog_source = CatalogSource::exact(&self.config, &self.native_owners, e, &g)?;
         let alias = verify_db(
             &*self.source,
-            endpoint,
-            db,
-            &e.db_id,
-            expected_path,
+            &catalog_source,
             Duration::from_millis(self.config.limits.timeout_ms),
         )
         .await
@@ -796,7 +748,7 @@ impl LibraryRuntime {
         let value = self
             .source
             .call(
-                endpoint,
+                catalog_source.endpoint(),
                 "get",
                 json!({"db":alias,"id":g.id,"body":true,"max_body_bytes":4096}),
                 Duration::from_millis(self.config.limits.timeout_ms),
@@ -804,7 +756,7 @@ impl LibraryRuntime {
             .await
             .map_err(|f| err(failure_text(f)))?;
         Ok(
-            json!({"schema":"mneme.library.get.v1","project_id":e.project_id,"db_id":e.db_id,"source":{"device_id":g.source_device_id,"kind":source_kind,"generation":generation,"captured_at":asof},"node":value}),
+            json!({"schema":"mneme.library.get.v1","project_id":e.project_id,"db_id":e.db_id,"source":catalog_source.provenance(),"node":value}),
         )
     }
 }
@@ -879,14 +831,18 @@ struct One {
 }
 async fn verify_db(
     source: &dyn Source,
-    ep: &Endpoint,
-    db: &str,
-    expected: &str,
-    expected_path: Option<&Path>,
+    catalog_source: &CatalogSource<'_>,
     timeout: Duration,
 ) -> Result<String, SourceFailure> {
-    let list = source.call(ep, "databases", json!({}), timeout).await?;
-    verify_database_rows(&list, db, expected, expected_path)
+    let list = source
+        .call(catalog_source.endpoint(), "databases", json!({}), timeout)
+        .await?;
+    verify_database_rows(
+        &list,
+        catalog_source.database(),
+        catalog_source.expected_db_id(),
+        catalog_source.expected_path(),
+    )
 }
 
 fn verify_database_rows(
@@ -962,22 +918,11 @@ async fn retrieve_one(
     timeout: Duration,
     context: bool,
 ) -> One {
-    let mut state = "live";
-    let mut device = e.owner_device_id.as_str();
-    let mut db = e.database.as_str();
-    let mut generation: Option<&str> = None;
-    let mut asof: Option<u64> = None;
-    let mut endpoint = owner_endpoint(&cfg, &e);
-    let mut result = match endpoint {
-        Some(ep) => {
+    let mut result = match CatalogSource::live(&cfg, &native_owners, &e) {
+        Some(catalog_source) => {
             query_source_bounded(
                 &*source,
-                ep,
-                db,
-                &e.db_id,
-                native_owners
-                    .get(&e.db_id)
-                    .and_then(|owner| owner.expected_path.as_deref()),
+                catalog_source,
                 &text,
                 &tags,
                 per,
@@ -995,37 +940,22 @@ async fn retrieve_one(
         _ => None,
     };
     if owner_failure.is_some() {
-        if let Some(r) = e
-            .replicas
-            .iter()
-            .filter(|r| cfg.replicas.contains_key(&r.source_device_id))
-            .max_by_key(|r| (r.captured_at, r.generation.as_str()))
-        {
-            state = "snapshot";
-            device = &r.source_device_id;
-            db = &r.database;
-            generation = Some(&r.generation);
-            asof = Some(r.captured_at);
-            endpoint = cfg.replicas.get(device);
+        if let Some(catalog_source) = CatalogSource::newest_snapshot(&cfg, &e) {
             result = query_source_bounded(
                 &*source,
-                endpoint.unwrap(),
-                db,
-                &e.db_id,
-                Some(&r.resolved_path),
+                catalog_source,
                 &text,
                 &tags,
                 per,
                 timeout,
                 context,
             )
-            .await
+            .await;
         }
     }
-    let source_ref =
-        json!({"device_id":device,"kind":state,"generation":generation,"captured_at":asof});
     match result {
-        Ok(v) => {
+        Ok((catalog_source, v)) => {
+            let source_ref = catalog_source.provenance();
             let mut primary = Vec::new();
             let mut episodes = Vec::new();
             for (lane, out) in [("primary", &mut primary)] {
@@ -1045,7 +975,7 @@ async fn retrieve_one(
                     }
                 }
             }
-            let mut coverage = json!({"project_id":e.project_id,"db_id":e.db_id,"state":state,"source":source_ref,"partial":v["partial"],"owner_unavailable":owner_failure});
+            let mut coverage = json!({"project_id":e.project_id,"db_id":e.db_id,"state":catalog_source.kind(),"source":source_ref,"partial":v["partial"],"owner_unavailable":owner_failure});
             if context {
                 coverage["context_schema"] = v["schema"].clone();
                 coverage["episodic"] = context::coverage(&v);
@@ -1088,32 +1018,29 @@ async fn retrieve_one(
 }
 async fn query_source(
     source: &dyn Source,
-    ep: &Endpoint,
-    db: &str,
-    expected: &str,
-    expected_path: Option<&Path>,
+    catalog_source: &CatalogSource<'_>,
     text: &str,
     tags: &[String],
     per: usize,
     timeout: Duration,
     context: bool,
 ) -> Result<Value, SourceFailure> {
-    let alias = verify_db(source, ep, db, expected, expected_path, timeout).await?;
+    let alias = verify_db(source, catalog_source, timeout).await?;
     if context {
         let value = source
             .call(
-                ep,
+                catalog_source.endpoint(),
                 "recall_context",
                 json!({"db":alias,"text":text,"tags":tags,"depth":0,"max_nodes":per,"k":per}),
                 timeout,
             )
             .await?;
-        context::validate_source(&value, per, expected)?;
+        context::validate_source(&value, per, catalog_source.expected_db_id())?;
         return Ok(value);
     }
     let v = source
         .call(
-            ep,
+            catalog_source.endpoint(),
             "query",
             json!({"db":alias,"text":text,"tags":tags,"depth":0,"max_nodes":per,"k":per}),
             timeout,
@@ -1161,39 +1088,26 @@ async fn query_source(
     }
     Ok(v)
 }
-async fn query_source_bounded(
+async fn query_source_bounded<'a>(
     source: &dyn Source,
-    ep: &Endpoint,
-    db: &str,
-    expected: &str,
-    expected_path: Option<&Path>,
+    catalog_source: CatalogSource<'a>,
     text: &str,
     tags: &[String],
     per: usize,
     timeout: Duration,
     context: bool,
-) -> Result<Value, SourceFailure> {
-    tokio::time::timeout(
+) -> Result<(CatalogSource<'a>, Value), SourceFailure> {
+    let value = tokio::time::timeout(
         timeout,
-        query_source(
-            source,
-            ep,
-            db,
-            expected,
-            expected_path,
-            text,
-            tags,
-            per,
-            timeout,
-            context,
-        ),
+        query_source(source, &catalog_source, text, tags, per, timeout, context),
     )
     .await
     .unwrap_or_else(|_| {
         Err(SourceFailure::Availability(
             "source query deadline exceeded".into(),
         ))
-    })
+    })?;
+    Ok((catalog_source, value))
 }
 
 pub fn tool_definitions() -> Value {

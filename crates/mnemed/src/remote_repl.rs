@@ -155,33 +155,17 @@ async fn run_session(
     if let Some(session) = active.take() {
         let _ = tokio::time::timeout(
             CLEANUP_TIMEOUT,
-            call(
+            call_walk(
                 client,
                 selected.owner.as_ref(),
                 &selected.remote.database,
-                "walk",
                 json!({"action":"abort","session":session}),
-                RequestAccess::ReadOnly,
             ),
         )
         .await;
     }
     let _ = tokio::time::timeout(CLEANUP_TIMEOUT, client.close()).await;
     result
-}
-
-fn request(tool: &'static str, arguments: Value, access: RequestAccess) -> Request {
-    Request {
-        tool,
-        arguments,
-        access,
-        requires_capture_links: false,
-        save: None,
-        concern: None,
-        retag: None,
-        edit_body: None,
-        edit_summary: None,
-    }
 }
 
 async fn admit(
@@ -192,16 +176,16 @@ async fn admit(
 ) -> Result<(), AnyErr> {
     if let ReplClient::Configured { client, name, .. } = client {
         let selected = client.selection().explicit_store(name)?;
-        selected.require_operation(match request.access {
+        selected.require_operation(match request.access() {
             RequestAccess::ReadOnly => mneme_config::Operation::ExplicitRead,
             RequestAccess::Mutation => mneme_config::Operation::ExplicitWrite,
         })?;
-        request.arguments["expected_db_id"] = json!(selected.store.id);
+        request.guard_database(selected.store.id.parse()?);
     }
-    if !client.advertises(request.tool) {
+    if !client.advertises(request.tool()) {
         return Err(format!(
             "remote repl requires advertised {} tool; no fallback attempted",
-            request.tool
+            request.tool()
         )
         .into());
     }
@@ -215,22 +199,20 @@ async fn admit(
     Ok(())
 }
 
-async fn call(
+async fn call_walk(
     client: &mut ReplClient,
     owner: Option<&OwnerBinding>,
     database: &str,
-    tool: &'static str,
     arguments: Value,
-    access: RequestAccess,
 ) -> Result<Value, AnyErr> {
-    let mut request = request(tool, arguments, access);
+    let mut request = Request::walk(arguments);
     admit(client, owner, database, &mut request).await?;
     let result = client
-        .call_tool(request.tool, request.arguments)
+        .call_tool(request.tool(), request.into_arguments())
         .await
         .map_err(|error| -> AnyErr { error })?;
     if let Some(owner) = owner {
-        owner.check_result(access, &result, database)?;
+        owner.check_result(RequestAccess::ReadOnly, &result, database)?;
     }
     Ok(result)
 }
@@ -349,15 +331,7 @@ async fn shell(
     if let Some(query) = query {
         arguments["query"] = json!(query);
     }
-    let started = call(
-        client,
-        owner,
-        database,
-        "walk",
-        arguments,
-        RequestAccess::ReadOnly,
-    )
-    .await?;
+    let started = call_walk(client, owner, database, arguments).await?;
     let session = started["session"]
         .as_str()
         .filter(|s| !s.is_empty() && s.len() <= 128)
@@ -415,16 +389,7 @@ async fn shell(
                 if let Some(target) = target {
                     arguments["to"] = json!(target);
                 }
-                match call(
-                    client,
-                    owner,
-                    database,
-                    "walk",
-                    arguments,
-                    RequestAccess::ReadOnly,
-                )
-                .await
-                {
+                match call_walk(client, owner, database, arguments).await {
                     Ok(value) => {
                         if matches!(action, "look" | "go" | "back") {
                             observe_view(&value, &mut visited)?;
@@ -445,19 +410,14 @@ async fn shell(
                     return Err("done used ID was not visited; no training submitted".into());
                 }
                 // Prove reflect is available/guardable before issuing a receipt.
-                let mut reflection = request(
-                    "reflect",
-                    json!({"db":database,"receipts":[],"used":used}),
-                    RequestAccess::Mutation,
-                );
+                let mut reflection =
+                    Request::reflection(json!({"db":database,"receipts":[],"used":used}));
                 admit(client, owner, database, &mut reflection).await?;
-                let done = call(
+                let done = call_walk(
                     client,
                     owner,
                     database,
-                    "walk",
                     json!({"action":"done","session":session}),
-                    RequestAccess::ReadOnly,
                 )
                 .await?;
                 *active = None;
@@ -467,8 +427,9 @@ async fn shell(
                     .ok_or(
                         "remote walk done response lacks a bounded receipt; no reflect submitted",
                     )?;
-                reflection.arguments["receipts"] = json!([receipt]);
-                let reflected = client.call_tool("reflect", reflection.arguments).await
+                let mut reflection_arguments = reflection.into_arguments();
+                reflection_arguments["receipts"] = json!([receipt]);
+                let reflected = client.call_tool("reflect", reflection_arguments).await
                     .map_err(|error| -> AnyErr { format!("remote reflect failed: {error}; a submitted write may have completed, do not blindly retry").into() })?;
                 if let Some(owner) = owner {
                     owner.check_result(RequestAccess::Mutation, &reflected, database)?;
@@ -486,13 +447,11 @@ async fn shell(
                 // Do not automatically resend an abort whose response is lost.
                 // Session close/expiry is the fallback for an ambiguous terminal call.
                 *active = None;
-                let done = call(
+                let done = call_walk(
                     client,
                     owner,
                     database,
-                    "walk",
                     json!({"action":"abort","session":session}),
-                    RequestAccess::ReadOnly,
                 )
                 .await?;
                 *active = None;

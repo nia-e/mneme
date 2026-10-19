@@ -10,6 +10,7 @@
 //! All modes use JSON-RPC over bounded stdio or Streamable HTTP transport.
 
 mod activity;
+mod capability;
 mod capture;
 mod concern;
 mod configured_server;
@@ -29,9 +30,15 @@ mod router_response;
 mod router_server;
 mod save;
 mod snapshot;
+mod startup;
 mod touchstone;
 
-use mneme_app::query::SummaryMaxBytes;
+use capability::{CapabilityClass, CapabilityProfile};
+#[cfg(test)]
+use startup::parse_args_from;
+use startup::{DirectFeedback, StartupMode, Transport};
+
+use mneme_app::query::{SummaryMaxBytes, present_query_hit};
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::num::{NonZeroU16, NonZeroU32};
@@ -48,10 +55,9 @@ use mneme_core::{
     BodySpan, EdgeKind, MAX_REMOTE_EDGE_PAGE_SIZE, MergeResolution, Node, NodeId, NodeStatus,
     Provenance, RemoteEdgeCursor, Resolution, Signal,
 };
-use mneme_engine::{Ingest, RetrievalEvidence, RetrievalHit};
+use mneme_engine::Ingest;
 use mneme_present::{
     BodyBudget, LaneBudgets, LaneLimit, PresentationBudget, QueryBody, QueryEnvelope, QueryHit,
-    QueryNodeStatus, RankEvidence,
 };
 use mneme_walk::{WalkSession, kind_str, status_str};
 use receipts::{McpSession, SessionState, claim_walk_receipts, complete_walk};
@@ -255,70 +261,6 @@ impl Registry {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum CapabilityProfile {
-    ReadOnly,
-    #[default]
-    ReceiptGrounded,
-    Curator,
-    Operator,
-}
-
-impl CapabilityProfile {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::ReceiptGrounded => "receipt-grounded",
-            Self::Curator => "curator",
-            Self::Operator => "operator",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, AnyErr> {
-        match value {
-            "read-only" => Ok(Self::ReadOnly),
-            "receipt-grounded" => Ok(Self::ReceiptGrounded),
-            "curator" => Ok(Self::Curator),
-            "operator" => Ok(Self::Operator),
-            other => Err(format!(
-                "--capability-profile must be read-only|receipt-grounded|curator|operator, got {other:?}"
-            )
-            .into()),
-        }
-    }
-
-    const fn permits(self, required: CapabilityClass) -> bool {
-        match (self, required) {
-            (Self::ReadOnly, CapabilityClass::ReadOnly) => true,
-            (
-                Self::ReceiptGrounded,
-                CapabilityClass::ReadOnly | CapabilityClass::ReceiptGrounded,
-            ) => true,
-            (
-                Self::Curator,
-                CapabilityClass::ReadOnly
-                | CapabilityClass::ReceiptGrounded
-                | CapabilityClass::Curator,
-            ) => true,
-            (
-                Self::Operator,
-                CapabilityClass::ReadOnly
-                | CapabilityClass::ReceiptGrounded
-                | CapabilityClass::Curator
-                | CapabilityClass::Operator,
-            ) => true,
-            (
-                Self::ReadOnly,
-                CapabilityClass::ReceiptGrounded
-                | CapabilityClass::Curator
-                | CapabilityClass::Operator,
-            )
-            | (Self::ReceiptGrounded, CapabilityClass::Curator | CapabilityClass::Operator)
-            | (Self::Curator, CapabilityClass::Operator) => false,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CapabilityPolicy {
     profile: CapabilityProfile,
@@ -409,153 +351,142 @@ struct Server {
     capability: CapabilityPolicy,
 }
 
-struct Args {
-    dbs: Vec<(String, PathBuf)>,
-    library_config: Option<PathBuf>,
-    router_config: Option<PathBuf>,
-    memory_config: Option<PathBuf>,
-    cwd: Option<PathBuf>,
-    configured_library: Option<String>,
-    http: Option<String>,
-    capability_profile: CapabilityProfile,
-    /// Explicitly expose the unreceipted direct-feedback compatibility tool.
-    /// A bare legacy flag implies operator for backwards compatibility; an
-    /// explicit weaker profile is rejected rather than silently escalated.
-    allow_direct_feedback: bool,
-    /// Whether the deprecated feedback spelling implicitly selected operator.
-    direct_feedback_implied_operator: bool,
-    /// Environment variable containing the HTTP bearer token. Taking the secret
-    /// by variable name keeps it out of process listings and shell history.
-    #[cfg_attr(not(feature = "http"), allow(dead_code))]
-    http_token_env: Option<String>,
-    /// Exact browser Origin allowed to use the HTTP endpoint. No CORS headers are
-    /// emitted by default; non-browser MCP clients do not need them.
-    #[cfg_attr(not(feature = "http"), allow(dead_code))]
-    cors_origin: Option<String>,
-}
-
-#[tokio::main]
-async fn main() -> Result<(), AnyErr> {
-    let mut args = parse_args()?;
-    if let Some(path) = args.memory_config.as_deref() {
-        let cwd = args
-            .cwd
-            .as_deref()
-            .expect("declarative startup cwd captured by argument admission");
-        let coordinator = if let Some(name) = args.configured_library.as_deref() {
-            let client = mneme_store_client::ConfiguredClient::new(
-                mneme_config::select_workspace(path, cwd, None)?,
-            )?;
-            Coordinator::Library(library_server::LibraryServer::from_runtime(
-                client.library(name)?,
-            ))
-        } else {
-            Coordinator::Configured(configured_server::ConfiguredServer::from_path(path, cwd)?)
-        };
-        let server = Server {
+impl Server {
+    /// Coordinator startup deliberately creates neither an owner registry nor
+    /// an inference runtime. Existing runtime representation stays shared.
+    fn coordinator(coordinator: Coordinator) -> Self {
+        Self {
             registry: Registry {
-                activity: crate::activity::ActivityRing::default(),
+                activity: activity::ActivityRing::default(),
                 dbs: BTreeMap::new(),
             },
             library: Some(coordinator),
             sessions: std::sync::Arc::new(Mutex::new(SessionState::default())),
             cold_work: ColdWorkGate::default(),
             capability: CapabilityPolicy::new(CapabilityProfile::ReadOnly, false),
-        };
-        return serve_selected_transport(server, args, "declarative configured stores").await;
-    }
-    if let Some(path) = args.router_config.as_deref() {
-        let server = Server {
-            registry: Registry {
-                activity: crate::activity::ActivityRing::default(),
-                dbs: BTreeMap::new(),
-            },
-            library: Some(Coordinator::Router(
-                router_server::RouterServer::from_path(path).await?,
-            )),
-            sessions: std::sync::Arc::new(Mutex::new(SessionState::default())),
-            cold_work: ColdWorkGate::default(),
-            capability: CapabilityPolicy::new(CapabilityProfile::ReadOnly, false),
-        };
-        return serve_selected_transport(server, args, "configured owners and read-only replicas")
-            .await;
-    }
-    if let Some(path) = args.library_config.as_deref() {
-        // This branch intentionally never calls build_registry or constructs an
-        // InferenceRuntime. Owner mode cannot be reached by this process.
-        let server = Server {
-            registry: Registry {
-                activity: crate::activity::ActivityRing::default(),
-                dbs: BTreeMap::new(),
-            },
-            library: Some(Coordinator::Library(
-                library_server::LibraryServer::from_path(path)?,
-            )),
-            sessions: std::sync::Arc::new(Mutex::new(SessionState::default())),
-            cold_work: ColdWorkGate::default(),
-            capability: CapabilityPolicy::new(CapabilityProfile::ReadOnly, false),
-        };
-        return serve_selected_transport(server, args, "library snapshots").await;
-    }
-    let mut sessions = SessionState::default();
-    let registry = build_registry(std::mem::take(&mut args.dbs), &mut sessions)?;
-    let server = Server {
-        registry,
-        sessions: std::sync::Arc::new(Mutex::new(sessions)),
-        cold_work: ColdWorkGate::default(),
-        capability: CapabilityPolicy::new(args.capability_profile, args.allow_direct_feedback),
-        library: None,
-    };
-    let names = server
-        .registry
-        .dbs
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    eprintln!(
-        "mneme-mcp: capability profile {} (ambient authority only; not caller authentication)",
-        server.capability.profile.as_str()
-    );
-    if server.capability.allow_direct_feedback {
-        if args.direct_feedback_implied_operator {
-            eprintln!(
-                "mneme-mcp: WARNING: --allow-direct-feedback is deprecated and selected --capability-profile operator for legacy compatibility"
-            );
-        } else {
-            eprintln!(
-                "mneme-mcp: WARNING: --allow-direct-feedback is a deprecated operator-only compatibility switch"
-            );
         }
-        eprintln!(
-            "mneme-mcp: WARNING: exposing unreceipted direct feedback (--allow-direct-feedback)"
-        );
     }
-    serve_selected_transport(server, args, &format!("databases [{names}]")).await
 }
 
-async fn serve_selected_transport(server: Server, args: Args, subject: &str) -> Result<(), AnyErr> {
-    match args.http {
-        Some(addr) => {
+#[tokio::main]
+async fn main() -> Result<(), AnyErr> {
+    let startup = startup::parse_args()?;
+    match startup.mode {
+        StartupMode::Configured {
+            config,
+            cwd,
+            library,
+        } => {
+            let coordinator = if let Some(name) = library {
+                let client = mneme_store_client::ConfiguredClient::new(
+                    mneme_config::select_workspace(&config, &cwd, None)?,
+                )?;
+                Coordinator::Library(library_server::LibraryServer::from_runtime(
+                    client.library(&name)?,
+                ))
+            } else {
+                Coordinator::Configured(configured_server::ConfiguredServer::from_path(
+                    &config, &cwd,
+                )?)
+            };
+            serve_selected_transport(
+                Server::coordinator(coordinator),
+                startup.transport,
+                "declarative configured stores",
+            )
+            .await
+        }
+        StartupMode::Router { config } => {
+            let server = Server::coordinator(Coordinator::Router(
+                router_server::RouterServer::from_path(&config).await?,
+            ));
+            serve_selected_transport(
+                server,
+                startup.transport,
+                "configured owners and read-only replicas",
+            )
+            .await
+        }
+        StartupMode::Library { config } => {
+            let server = Server::coordinator(Coordinator::Library(
+                library_server::LibraryServer::from_path(&config)?,
+            ));
+            serve_selected_transport(server, startup.transport, "library snapshots").await
+        }
+        StartupMode::Owner(options) => {
+            let capability =
+                CapabilityPolicy::new(options.profile(), options.direct_feedback().enabled());
+            let direct_feedback = options.direct_feedback();
+            let mut sessions = SessionState::default();
+            let registry = build_registry(options.into_databases(), &mut sessions)?;
+            let server = Server {
+                registry,
+                sessions: std::sync::Arc::new(Mutex::new(sessions)),
+                cold_work: ColdWorkGate::default(),
+                capability,
+                library: None,
+            };
+            let names = server
+                .registry
+                .dbs
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "mneme-mcp: capability profile {} (ambient authority only; not caller authentication)",
+                server.capability.profile.as_str()
+            );
+            match direct_feedback {
+                DirectFeedback::Disabled => {}
+                DirectFeedback::ImpliedOperator => eprintln!(
+                    "mneme-mcp: WARNING: --allow-direct-feedback is deprecated and selected --capability-profile operator for legacy compatibility"
+                ),
+                DirectFeedback::ExplicitOperator => eprintln!(
+                    "mneme-mcp: WARNING: --allow-direct-feedback is a deprecated operator-only compatibility switch"
+                ),
+            }
+            if direct_feedback.enabled() {
+                eprintln!(
+                    "mneme-mcp: WARNING: exposing unreceipted direct feedback (--allow-direct-feedback)"
+                );
+            }
+            serve_selected_transport(server, startup.transport, &format!("databases [{names}]"))
+                .await
+        }
+    }
+}
+
+async fn serve_selected_transport(
+    server: Server,
+    transport: Transport,
+    subject: &str,
+) -> Result<(), AnyErr> {
+    match transport {
+        Transport::Http {
+            addr,
+            token_env,
+            cors_origin,
+        } => {
             #[cfg(feature = "http")]
             {
                 let token =
-                    match args.http_token_env.as_deref() {
+                    match token_env.as_deref() {
                         Some(name) => Some(std::env::var(name).map_err(|_| {
                             format!("--http-token-env names unset variable {name:?}")
                         })?),
                         None => None,
                     };
                 eprintln!("mneme-mcp: serving {subject} over HTTP at {addr}");
-                http::serve(server, &addr, token, args.cors_origin.as_deref()).await
+                http::serve(server, &addr, token, cors_origin.as_deref()).await
             }
             #[cfg(not(feature = "http"))]
             {
-                let _ = (addr, subject);
+                let _ = (addr, token_env, cors_origin, subject);
                 Err("--http needs the `http` feature (rebuild with --features http)".into())
             }
         }
-        None => {
+        Transport::Stdio => {
             // Claim the real stdout for protocol output, then point fd 1 at stderr
             // so any library that writes to stdout (ONNX Runtime, fastembed's
             // progress bar) can't corrupt the JSON-RPC stream. Before any embedder.
@@ -564,168 +495,6 @@ async fn serve_selected_transport(server: Server, args: Args, subject: &str) -> 
             run_stdio(server, out).await
         }
     }
-}
-
-/// `--db NAME=PATH` (repeatable) and optional hardened HTTP transport settings.
-fn parse_args() -> Result<Args, AnyErr> {
-    parse_args_from(std::env::args().skip(1))
-}
-
-fn parse_args_from<I, S>(args: I) -> Result<Args, AnyErr>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let mut dbs = Vec::new();
-    let mut library_config = None;
-    let mut router_config = None;
-    let mut memory_config = None;
-    let mut cwd = None;
-    let mut configured_library = None;
-    let mut http = None;
-    let mut http_token_env = None;
-    let mut cors_origin = None;
-    let mut capability_profile = None;
-    let mut allow_direct_feedback = false;
-    let mut it = args.into_iter().map(Into::into);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--db" => {
-                let spec = it.next().ok_or("--db needs NAME=PATH")?;
-                let (name, path) = spec
-                    .split_once('=')
-                    .ok_or_else(|| format!("--db expects NAME=PATH, got {spec:?}"))?;
-                dbs.push((name.to_string(), PathBuf::from(path)));
-            }
-            "--memory-config" => {
-                if memory_config.is_some() {
-                    return Err("--memory-config may be specified only once".into());
-                }
-                memory_config = Some(PathBuf::from(
-                    it.next().ok_or("--memory-config needs PATH")?,
-                ));
-            }
-            "--cwd" => {
-                if cwd.is_some() {
-                    return Err("--cwd may be specified only once".into());
-                }
-                cwd = Some(PathBuf::from(it.next().ok_or("--cwd needs WORKSPACE")?));
-            }
-            "--library" => {
-                if configured_library.is_some() {
-                    return Err("--library may be specified only once".into());
-                }
-                configured_library = Some(it.next().ok_or("--library needs NAME")?);
-            }
-            "--router-config" => {
-                if router_config.is_some() {
-                    return Err("--router-config may be specified only once".into());
-                }
-                router_config = Some(PathBuf::from(
-                    it.next().ok_or("--router-config needs PATH")?,
-                ));
-            }
-            "--library-config" => {
-                if library_config.is_some() {
-                    return Err("--library-config may be specified only once".into());
-                }
-                library_config = Some(PathBuf::from(
-                    it.next().ok_or("--library-config needs PATH")?,
-                ));
-            }
-            "--http" => http = Some(it.next().ok_or("--http needs ADDR (e.g. 127.0.0.1:8080)")?),
-            "--http-token-env" => {
-                http_token_env = Some(
-                    it.next()
-                        .ok_or("--http-token-env needs an environment variable name")?,
-                )
-            }
-            "--cors-origin" => {
-                cors_origin = Some(
-                    it.next()
-                        .ok_or("--cors-origin needs one exact Origin URL")?,
-                )
-            }
-            "--capability-profile" => {
-                if capability_profile.is_some() {
-                    return Err("--capability-profile may be specified only once".into());
-                }
-                capability_profile = Some(CapabilityProfile::parse(
-                    &it.next()
-                        .ok_or("--capability-profile needs a profile name")?,
-                )?)
-            }
-            "--allow-direct-feedback" => allow_direct_feedback = true,
-            "--help" | "-h" => {
-                return Err(
-                    "usage: mneme-mcp --memory-config PATH [--cwd WORKSPACE] [--library NAME] [--http IP:PORT] | mneme-mcp [--db NAME=PATH]... [--capability-profile read-only|receipt-grounded|curator|operator] [--allow-direct-feedback (deprecated; operator only)] [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --library-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --router-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]]"
-                        .into(),
-                );
-            }
-            other => return Err(format!("unknown argument {other:?}").into()),
-        }
-    }
-    if http.is_none() && (http_token_env.is_some() || cors_origin.is_some()) {
-        return Err("--http-token-env and --cors-origin require --http".into());
-    }
-    if memory_config.is_some() {
-        if cwd.is_none() {
-            cwd = Some(
-                std::env::current_dir()
-                    .map_err(|_| "cannot capture declarative MCP startup workspace")?,
-            );
-        }
-        if router_config.is_some()
-            || library_config.is_some()
-            || !dbs.is_empty()
-            || capability_profile.is_some()
-            || allow_direct_feedback
-        {
-            return Err("--memory-config cannot combine owner/legacy coordinator settings".into());
-        }
-    } else if cwd.is_some() || configured_library.is_some() {
-        return Err("--cwd and --library require --memory-config".into());
-    }
-    if router_config.is_some()
-        && (library_config.is_some()
-            || !dbs.is_empty()
-            || capability_profile.is_some()
-            || allow_direct_feedback)
-    {
-        return Err("--router-config cannot be combined with --library-config, --db, --capability-profile, or --allow-direct-feedback".into());
-    }
-    if library_config.is_some()
-        && (!dbs.is_empty() || capability_profile.is_some() || allow_direct_feedback)
-    {
-        return Err("--library-config cannot be combined with --db, --capability-profile, or --allow-direct-feedback".into());
-    }
-    let direct_feedback_implied_operator = allow_direct_feedback && capability_profile.is_none();
-    let capability_profile = capability_profile.unwrap_or_else(|| {
-        if allow_direct_feedback {
-            CapabilityProfile::Operator
-        } else {
-            CapabilityProfile::default()
-        }
-    });
-    if allow_direct_feedback && capability_profile != CapabilityProfile::Operator {
-        return Err(
-            "--allow-direct-feedback is only valid with --capability-profile operator".into(),
-        );
-    }
-    Ok(Args {
-        dbs,
-        library_config,
-        router_config,
-        memory_config,
-        cwd,
-        configured_library,
-        http,
-        capability_profile,
-        allow_direct_feedback,
-        direct_feedback_implied_operator,
-        http_token_env,
-        cors_origin,
-    })
 }
 
 /// Returns a writer to the *real* stdout and redirects fd 1 to stderr, so only
@@ -993,12 +762,7 @@ async fn call_tool_authorized(
     // database checkout. This type-state boundary keeps malformed optionals,
     // lossy integer narrowing, and arguments from the wrong conditional variant
     // from reaching a lease, inference runtime, or durable mutation.
-    let mut request = ValidatedToolArguments::parse(name, a)?;
-    let prepared_save = request.prepared_save.take();
-    let prepared_concern = request.prepared_concern.take();
-    let prepared_retag = request.prepared_retag.take();
-    let prepared_body_edit = request.prepared_body_edit.take();
-    let prepared_summary_edit = request.prepared_summary_edit.take();
+    let request = ValidatedToolArguments::parse(name, a)?;
     let kind = request.kind();
     let name = kind.tool_name();
     let raw = request.arguments();
@@ -1024,24 +788,26 @@ async fn call_tool_authorized(
     let _cold_admission = metered_cold_tool(name)
         .then(|| cold_work.admit(name))
         .transpose()?;
-    match kind {
-        ToolRequestKind::Activity { after, limit } => {
+    match request.operation {
+        AdmittedOperation::Activity { after, limit } => {
             Ok(serde_json::to_value(reg.activity.page(after, limit))?)
         }
-        ToolRequestKind::Databases => Ok(json!(
+        AdmittedOperation::Databases => Ok(json!(
             reg.catalog()?
                 .into_iter()
                 .map(|(name, status)| database_status_json(&name, &status))
                 .collect::<Vec<_>>()
         )),
 
-        ToolRequestKind::DatabaseControl(action) => {
+        AdmittedOperation::DatabaseControl(action) => {
             database_control_tool(reg, sessions, cold_work, action, a).await
         }
 
-        ToolRequestKind::SnapshotCreate => snapshot_create_tool(reg, sessions, cold_work, a).await,
+        AdmittedOperation::SnapshotCreate => {
+            snapshot_create_tool(reg, sessions, cold_work, a).await
+        }
 
-        ToolRequestKind::Status => {
+        AdmittedOperation::Status => {
             let h = db(reg, a)?;
             let st = h.mem.status(ColdPath::acquire()).await?;
             Ok(json!({
@@ -1056,7 +822,7 @@ async fn call_tool_authorized(
             }))
         }
 
-        ToolRequestKind::Query => {
+        AdmittedOperation::Query => {
             let request = PublicQueryInput::parse(a, true)?;
             let h = db(reg, a)?;
             let base = h.mem.config().budget;
@@ -1084,11 +850,12 @@ async fn call_tool_authorized(
                 .primary
                 .into_iter()
                 .map(|hit| {
-                    mcp_query_hit(
-                        hit,
+                    present_query_hit(
+                        &hit,
                         request
                             .summary_max_bytes
                             .unwrap_or(SummaryMaxBytes::MCP_DEFAULT),
+                        QueryBody::NotRequested,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1103,7 +870,7 @@ async fn call_tool_authorized(
             Ok(response)
         }
 
-        ToolRequestKind::RecallContext => {
+        AdmittedOperation::RecallContext => {
             let request = PublicQueryInput::parse(a, false)?;
             let observe = optional_bool(a, "observe")?;
             let routing_hints = context_observation::parse_hints(a);
@@ -1159,7 +926,7 @@ async fn call_tool_authorized(
             Ok(Value::String(rendered))
         }
 
-        ToolRequestKind::Get => {
+        AdmittedOperation::Get => {
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             let id = parse_id(req_s(a, "id")?)?;
             let node = h.mem.get_node(id).await?.ok_or("node not found")?;
@@ -1209,7 +976,7 @@ async fn call_tool_authorized(
             Ok(v)
         }
 
-        ToolRequestKind::List => {
+        AdmittedOperation::List => {
             let prepared = touchstone::prepare_list(a)?;
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             let mut result = prepared.run(&h.mem, h.db_id).await?;
@@ -1217,7 +984,7 @@ async fn call_tool_authorized(
             Ok(result)
         }
 
-        ToolRequestKind::Graph => {
+        AdmittedOperation::Graph => {
             let prepared = prepare_graph(a)?;
             let h = db(reg, a)?;
             owner_response(
@@ -1227,7 +994,7 @@ async fn call_tool_authorized(
             )
         }
 
-        ToolRequestKind::Neighbors => {
+        AdmittedOperation::Neighbors => {
             let prepared = prepare_neighbors(a)?;
             let h = db(reg, a)?;
             owner_response(
@@ -1237,7 +1004,7 @@ async fn call_tool_authorized(
             )
         }
 
-        ToolRequestKind::RemoteEdges => {
+        AdmittedOperation::RemoteEdges => {
             let h = db(reg, a)?;
             let id = parse_id(req_s(a, "id")?)?;
             remote_page_json(
@@ -1251,7 +1018,7 @@ async fn call_tool_authorized(
             .await
         }
 
-        ToolRequestKind::Core => {
+        AdmittedOperation::Core => {
             let h = db(reg, a)?;
             let all = h.mem.core(ColdPath::acquire()).await?;
             let total = all.len();
@@ -1292,7 +1059,7 @@ async fn call_tool_authorized(
             }))
         }
 
-        ToolRequestKind::Ingest(_) => {
+        AdmittedOperation::Ingest(_) => {
             let h = db(reg, a)?;
             let summary = bounded_required(a, "summary", MAX_SUMMARY_BYTES)?;
             let body = optional_string(a, "body")?
@@ -1325,8 +1092,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, json!({ "id": id.0.to_string() }))
         }
 
-        ToolRequestKind::EditBody => {
-            let prepared = prepared_body_edit.expect("edit_body admission retains its request");
+        AdmittedOperation::EditBody(prepared) => {
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             let path = reg.slot(selected_db_name(a)?)?.status()?.resolved_path;
             if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
@@ -1340,9 +1106,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, result)
         }
 
-        ToolRequestKind::EditSummary => {
-            let prepared =
-                prepared_summary_edit.expect("edit_summary admission retains its request");
+        AdmittedOperation::EditSummary(prepared) => {
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             let path = reg.slot(selected_db_name(a)?)?.status()?.resolved_path;
             if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
@@ -1356,8 +1120,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, result)
         }
 
-        ToolRequestKind::Retag(_) => {
-            let prepared = prepared_retag.expect("retag admission retains its request");
+        AdmittedOperation::Retag(prepared) => {
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             let path = reg.slot(selected_db_name(a)?)?.status()?.resolved_path;
             if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
@@ -1370,11 +1133,10 @@ async fn call_tool_authorized(
             }
             mutation_response(a, &h, result)
         }
-        ToolRequestKind::Concern(action) => {
-            let prepared = prepared_concern.expect("concern admission retains its request");
+        AdmittedOperation::Concern(prepared) => {
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             let is_mutation = matches!(
-                action,
+                prepared.action(),
                 concern::ConcernAction::Notice | concern::ConcernAction::RecordFinding
             );
             if is_mutation {
@@ -1396,10 +1158,9 @@ async fn call_tool_authorized(
             Ok(result)
         }
 
-        ToolRequestKind::Save(_) => {
+        AdmittedOperation::Save(prepared) => {
             // Admission generated a manual identity at most once, and this
             // retained request is the one whose authority was classified.
-            let prepared = prepared_save.expect("SAVE admission retains its request");
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             // Reference startup may register an in-memory empty snapshot for an
             // absent path. SAVE never turns that owner into an implicit create.
@@ -1417,11 +1178,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, result)
         }
 
-        ToolRequestKind::Capture(_) => {
-            // Classification already parsed the complete envelope and rejected
-            // absent authority before this checkout. Retain a typed value for
-            // the execution path rather than probing raw JSON field-by-field.
-            let prepared = capture::PreparedCapture::parse(a)?;
+        AdmittedOperation::Capture(prepared) => {
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             h.require_current_generation()?;
             let commit = h.origin_commit();
@@ -1435,8 +1192,15 @@ async fn call_tool_authorized(
             )
         }
 
-        ToolRequestKind::Episode { .. } => {
-            let prepared = episode::PreparedEpisode::parse(a)?;
+        AdmittedOperation::Episode(prepared) => {
+            // Omitted read scope gains an owner name after admission. Preserve
+            // the episode envelope's validation of that configured name before
+            // checkout; explicitly scoped requests keep their admitted payload.
+            let prepared = if raw.get("db").is_none() {
+                episode::PreparedEpisode::parse(a)?
+            } else {
+                prepared
+            };
             let is_mutation = prepared.is_mutation();
             let h = db_with_expected_id(reg, a, request.expected_db_id)?;
             if is_mutation {
@@ -1463,7 +1227,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, result)
         }
 
-        ToolRequestKind::Feedback => {
+        AdmittedOperation::Feedback => {
             let h = db(reg, a)?;
             let from = optional_string(a, "from")?.map(parse_id).transpose()?;
             let to = parse_id(req_s(a, "to")?)?;
@@ -1482,7 +1246,7 @@ async fn call_tool_authorized(
             )
         }
 
-        ToolRequestKind::Forget => {
+        AdmittedOperation::Forget => {
             let h = db(reg, a)?;
             let existed = h
                 .mem
@@ -1492,7 +1256,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, json!({ "forgotten": existed }))
         }
 
-        ToolRequestKind::Link(link_request) => {
+        AdmittedOperation::Link(link_request) => {
             // Pin and guard the source before inspecting any remote target.
             let h = db(reg, a)?;
             let from = parse_id(req_s(a, "from")?)?;
@@ -1539,7 +1303,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, json!({ "ok": true }))
         }
 
-        ToolRequestKind::Supersede => {
+        AdmittedOperation::Supersede => {
             let h = db(reg, a)?;
             h.mem
                 .supersede(
@@ -1552,7 +1316,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, json!({ "ok": true }))
         }
 
-        ToolRequestKind::Contradict => {
+        AdmittedOperation::Contradict => {
             let h = db(reg, a)?;
             h.mem
                 .observe_contradiction(
@@ -1565,7 +1329,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, json!({ "ok": true }))
         }
 
-        ToolRequestKind::Contradictions => {
+        AdmittedOperation::Contradictions => {
             let h = db(reg, a)?;
             let triage = h.mem.reconciliation_triage(ColdPath::acquire()).await?;
             Ok(json!({
@@ -1583,7 +1347,7 @@ async fn call_tool_authorized(
             }))
         }
 
-        ToolRequestKind::Reconcile => {
+        AdmittedOperation::Reconcile => {
             let h = db(reg, a)?;
             h.mem
                 .reconcile(
@@ -1597,7 +1361,7 @@ async fn call_tool_authorized(
             mutation_response(a, &h, json!({ "ok": true }))
         }
 
-        ToolRequestKind::Merges => {
+        AdmittedOperation::Merges => {
             let h = db(reg, a)?;
             let open = h.mem.open_merge_candidates(ColdPath::acquire()).await?;
             Ok(json!(
@@ -1611,7 +1375,7 @@ async fn call_tool_authorized(
             ))
         }
 
-        ToolRequestKind::Merge(merge_request) => match merge_request {
+        AdmittedOperation::Merge(merge_request) => match merge_request {
             MergeRequest::Full => {
                 let h = db(reg, a)?;
                 h.mem
@@ -1639,7 +1403,7 @@ async fn call_tool_authorized(
             }
         },
 
-        ToolRequestKind::Recall => {
+        AdmittedOperation::Recall => {
             let h = db(reg, a)?;
             let expand_top =
                 optional_bounded_usize(a, "expand_top", 1, MAX_RECALL_EXPAND)?.unwrap_or(3);
@@ -1678,7 +1442,7 @@ async fn call_tool_authorized(
             ))
         }
 
-        ToolRequestKind::Decay => {
+        AdmittedOperation::Decay => {
             let h = db(reg, a)?;
             let r = h.mem.decay_sweep(ColdPath::acquire()).await?;
             h.save()?;
@@ -1693,7 +1457,7 @@ async fn call_tool_authorized(
             )
         }
 
-        ToolRequestKind::Prune => {
+        AdmittedOperation::Prune => {
             let h = db(reg, a)?;
             let r = h.mem.prune_dense(ColdPath::acquire()).await?;
             h.save()?;
@@ -1712,12 +1476,12 @@ async fn call_tool_authorized(
             )
         }
 
-        ToolRequestKind::Walk(action) => {
+        AdmittedOperation::Walk(action) => {
             let mut sessions = sessions.lock().await;
             walk_tool(reg, &mut sessions, action, a).await
         }
 
-        ToolRequestKind::Reflect => reflect_tool(reg, sessions.as_ref(), cold_work, a).await,
+        AdmittedOperation::Reflect => reflect_tool(reg, sessions.as_ref(), cold_work, a).await,
     }
 }
 
@@ -2356,98 +2120,30 @@ fn mcp_recall_neighbor(neighbor: &mneme_engine::RecalledNeighbor) -> Value {
     })
 }
 
-fn mcp_query_hit(hit: RetrievalHit, limit: SummaryMaxBytes) -> QueryHit {
-    let (summary, summary_truncated) = limit.prefix(hit.node.summary());
-    let status = match hit.node.status() {
-        NodeStatus::Active => QueryNodeStatus::Active,
-        NodeStatus::Archived => QueryNodeStatus::Archived,
-    };
-    QueryHit::new(
-        hit.node.id(),
-        hit.node.created(),
-        hit.lane_rank,
-        mcp_rank_evidence(hit.evidence),
-        status,
-        summary,
-        summary_truncated,
-        QueryBody::NotRequested,
-    )
-}
-
-fn mcp_rank_evidence(evidence: RetrievalEvidence) -> RankEvidence {
-    RankEvidence::new(
-        evidence.dense_rank,
-        evidence.sparse_rank,
-        evidence.graph_rank,
-        evidence.rerank_rank,
-    )
-}
-
 // ---- arg helpers ------------------------------------------------------------
 
-/// Proof that one public tool call has passed the complete schema, domain, and
-/// conditional-variant boundary. Keep this tiny wrapper even though handlers
-/// mostly consume the original JSON: the exhaustive retained `kind` is the
-/// one action-sensitive classification hook for dispatch and capability policy.
-/// SAVE retains its admitted payload so a generated identity cannot drift;
-/// concern keeps the exact checked action/expectation through atomic execution.
+/// One completely admitted public tool call. The operation owns its checked
+/// payload, so dispatch cannot pair an action with an absent or different request.
 struct ValidatedToolArguments<'a> {
     raw: &'a Value,
-    kind: ToolRequestKind,
+    operation: AdmittedOperation,
     // Routing metadata stays outside the shared domain payload and its source
     // digest. Parsing it here also precedes capability/cold/checkout admission.
     expected_db_id: Option<ulid::Ulid>,
-    prepared_save: Option<save::PreparedSave>,
-    prepared_concern: Option<concern::PreparedConcern>,
-    prepared_retag: Option<retag::PreparedRetag>,
-    prepared_body_edit: Option<edit_body::PreparedBodyEdit>,
-    prepared_summary_edit: Option<edit_summary::PreparedSummaryEdit>,
 }
 
 impl<'a> ValidatedToolArguments<'a> {
     fn parse(name: &str, raw: &'a Value) -> Result<Self, AnyErr> {
         validate_tool_arguments(name, raw)?;
-        let prepared_save = (name == "save")
-            .then(|| save::PreparedSave::parse(raw))
-            .transpose()?;
-        let prepared_concern = (name == "concern")
-            .then(|| concern::PreparedConcern::parse(raw))
-            .transpose()?;
-        let prepared_retag = (name == "retag")
-            .then(|| retag::PreparedRetag::parse(raw))
-            .transpose()?;
-        let prepared_body_edit = (name == "edit_body")
-            .then(|| edit_body::PreparedBodyEdit::parse(raw))
-            .transpose()?;
-        let prepared_summary_edit = (name == "edit_summary")
-            .then(|| edit_summary::PreparedSummaryEdit::parse(raw))
-            .transpose()?;
-        let kind = if prepared_summary_edit.is_some() {
-            ToolRequestKind::EditSummary
-        } else if prepared_body_edit.is_some() {
-            ToolRequestKind::EditBody
-        } else if let Some(prepared) = &prepared_retag {
-            ToolRequestKind::Retag(if prepared.inner.requires_operator() {
-                IngestRequest::Core
-            } else {
-                IngestRequest::Ordinary
-            })
-        } else {
-            classify_tool_request(name, raw, prepared_save.as_ref(), prepared_concern.as_ref())?
-        };
-        if kind.requires_explicit_db() && raw.get("db").is_none() {
+        let operation = admit_tool_operation(name, raw)?;
+        if operation.kind().requires_explicit_db() && raw.get("db").is_none() {
             return Err("missing required argument `db`".into());
         }
         let expected_db_id = optional_expected_db_id(raw)?;
         Ok(Self {
             raw,
-            kind,
+            operation,
             expected_db_id,
-            prepared_save,
-            prepared_concern,
-            prepared_retag,
-            prepared_body_edit,
-            prepared_summary_edit,
         })
     }
 
@@ -2455,8 +2151,103 @@ impl<'a> ValidatedToolArguments<'a> {
         self.raw
     }
 
-    const fn kind(&self) -> ToolRequestKind {
-        self.kind
+    fn kind(&self) -> ToolRequestKind {
+        self.operation.kind()
+    }
+}
+
+/// The admitted operation, including any payload whose identity or checked
+/// expectations must survive authorization and execution unchanged. Keep this
+/// exhaustive: a new operation needs both dispatch and an explicit policy kind.
+enum AdmittedOperation {
+    Databases,
+    Activity { after: u64, limit: usize },
+    DatabaseControl(DatabaseControlRequest),
+    SnapshotCreate,
+    Status,
+    Query,
+    RecallContext,
+    Recall,
+    Get,
+    List,
+    Graph,
+    Neighbors,
+    RemoteEdges,
+    Core,
+    Ingest(IngestRequest),
+    Capture(capture::PreparedCapture),
+    Retag(retag::PreparedRetag),
+    EditBody(edit_body::PreparedBodyEdit),
+    EditSummary(edit_summary::PreparedSummaryEdit),
+    Save(save::PreparedSave),
+    Concern(concern::PreparedConcern),
+    Episode(episode::PreparedEpisode),
+    Feedback,
+    Forget,
+    Link(LinkRequest),
+    Supersede,
+    Contradict,
+    Contradictions,
+    Reconcile,
+    Merges,
+    Merge(MergeRequest),
+    Decay,
+    Prune,
+    Walk(WalkRequest),
+    Reflect,
+}
+
+impl AdmittedOperation {
+    fn kind(&self) -> ToolRequestKind {
+        match self {
+            Self::Databases => ToolRequestKind::Databases,
+            Self::Activity { after, limit } => ToolRequestKind::Activity {
+                after: *after,
+                limit: *limit,
+            },
+            Self::DatabaseControl(action) => ToolRequestKind::DatabaseControl(*action),
+            Self::SnapshotCreate => ToolRequestKind::SnapshotCreate,
+            Self::Status => ToolRequestKind::Status,
+            Self::Query => ToolRequestKind::Query,
+            Self::RecallContext => ToolRequestKind::RecallContext,
+            Self::Recall => ToolRequestKind::Recall,
+            Self::Get => ToolRequestKind::Get,
+            Self::List => ToolRequestKind::List,
+            Self::Graph => ToolRequestKind::Graph,
+            Self::Neighbors => ToolRequestKind::Neighbors,
+            Self::RemoteEdges => ToolRequestKind::RemoteEdges,
+            Self::Core => ToolRequestKind::Core,
+            Self::Ingest(action) => ToolRequestKind::Ingest(*action),
+            Self::Capture(prepared) => ToolRequestKind::Capture(prepared.authority()),
+            Self::Retag(prepared) => {
+                ToolRequestKind::Retag(if prepared.inner.requires_operator() {
+                    IngestRequest::Core
+                } else {
+                    IngestRequest::Ordinary
+                })
+            }
+            Self::EditBody(_) => ToolRequestKind::EditBody,
+            Self::EditSummary(_) => ToolRequestKind::EditSummary,
+            Self::Save(prepared) => ToolRequestKind::Save(prepared.authority()),
+            Self::Concern(prepared) => ToolRequestKind::Concern(prepared.action()),
+            Self::Episode(prepared) => ToolRequestKind::Episode {
+                action: prepared.action(),
+                capability: prepared.capability(),
+            },
+            Self::Feedback => ToolRequestKind::Feedback,
+            Self::Forget => ToolRequestKind::Forget,
+            Self::Link(action) => ToolRequestKind::Link(*action),
+            Self::Supersede => ToolRequestKind::Supersede,
+            Self::Contradict => ToolRequestKind::Contradict,
+            Self::Contradictions => ToolRequestKind::Contradictions,
+            Self::Reconcile => ToolRequestKind::Reconcile,
+            Self::Merges => ToolRequestKind::Merges,
+            Self::Merge(action) => ToolRequestKind::Merge(*action),
+            Self::Decay => ToolRequestKind::Decay,
+            Self::Prune => ToolRequestKind::Prune,
+            Self::Walk(action) => ToolRequestKind::Walk(*action),
+            Self::Reflect => ToolRequestKind::Reflect,
+        }
     }
 }
 
@@ -2505,29 +2296,6 @@ enum WalkRequest {
 enum IngestRequest {
     Ordinary,
     Core,
-}
-
-/// Minimum ambient authority required by one fully parsed public action.
-///
-/// Keep the mapping exhaustive: adding a tool or conditional action must make
-/// this file fail to compile until its authority is deliberately classified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CapabilityClass {
-    ReadOnly,
-    ReceiptGrounded,
-    Curator,
-    Operator,
-}
-
-impl CapabilityClass {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::ReceiptGrounded => "receipt-grounded",
-            Self::Curator => "curator",
-            Self::Operator => "operator",
-        }
-    }
 }
 
 /// Exhaustive public request taxonomy. Mode-dependent tools retain the parsed
@@ -3317,7 +3085,7 @@ fn set_tool_schema_keyword(tools: &mut [Value], name: &str, keyword: &str, value
     schema["inputSchema"][keyword] = value;
 }
 
-/// Publish the same conditional language enforced by `classify_tool_request`.
+/// Publish the same conditional language enforced by `admit_tool_operation`.
 /// Closed top-level properties are insufficient here: without these variants,
 /// clients would be told that ignored/mode-inapplicable arguments are valid.
 fn attach_conditional_tool_schemas(tools: &mut [Value]) {
@@ -3468,8 +3236,8 @@ fn validate_tool_arguments(name: &str, arguments: &Value) -> Result<(), AnyErr> 
     if name == "episode" {
         // The shared app parser owns episode unions and conditional fields
         // (`body` is write text or a read boolean). Do not reinterpret that
-        // grammar with the legacy flat scalar-schema validator below.
-        episode::PreparedEpisode::parse(arguments)?;
+        // grammar with the legacy flat scalar-schema validator below. The
+        // complete shared admission is retained by admit_tool_operation.
         return Ok(());
     }
     static SCHEMAS: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
@@ -3564,18 +3332,13 @@ fn validate_advertised_value(key: &str, value: &Value, schema: &Value) -> Result
 }
 
 /// Validate every domain value and every action/mode-specific shape while the
-/// request has no database access. Existing routes duplicate some cheap parses
-/// in their handlers; SAVE instead retains its admitted request across this
-/// boundary because reconstruction could generate a different manual identity.
-fn classify_tool_request(
-    name: &str,
-    arguments: &Value,
-    prepared_save: Option<&save::PreparedSave>,
-    prepared_concern: Option<&concern::PreparedConcern>,
-) -> Result<ToolRequestKind, AnyErr> {
+/// request has no database access. Retain prepared domain payloads through
+/// authorization and dispatch, including SAVE's single generated identity.
+/// Legacy handlers still repeat some cheap, deterministic field parses.
+fn admit_tool_operation(name: &str, arguments: &Value) -> Result<AdmittedOperation, AnyErr> {
     match name {
-        "databases" => Ok(ToolRequestKind::Databases),
-        "activity" => Ok(ToolRequestKind::Activity {
+        "databases" => Ok(AdmittedOperation::Databases),
+        "activity" => Ok(AdmittedOperation::Activity {
             after: arguments.get("after").map_or(Ok(0), |value| {
                 value
                     .as_u64()
@@ -3584,20 +3347,20 @@ fn classify_tool_request(
             limit: optional_bounded_usize(arguments, "limit", 1, activity::MAX_PAGE)?
                 .unwrap_or(activity::MAX_PAGE),
         }),
-        "snapshot_create" => Ok(ToolRequestKind::SnapshotCreate),
-        "status" => Ok(ToolRequestKind::Status),
-        "decay" => Ok(ToolRequestKind::Decay),
-        "prune" => Ok(ToolRequestKind::Prune),
-        "contradictions" => Ok(ToolRequestKind::Contradictions),
-        "merges" => Ok(ToolRequestKind::Merges),
+        "snapshot_create" => Ok(AdmittedOperation::SnapshotCreate),
+        "status" => Ok(AdmittedOperation::Status),
+        "decay" => Ok(AdmittedOperation::Decay),
+        "prune" => Ok(AdmittedOperation::Prune),
+        "contradictions" => Ok(AdmittedOperation::Contradictions),
+        "merges" => Ok(AdmittedOperation::Merges),
         "database_control" => match req_s(arguments, "action")? {
-            "status" => Ok(ToolRequestKind::DatabaseControl(
+            "status" => Ok(AdmittedOperation::DatabaseControl(
                 DatabaseControlRequest::Status,
             )),
-            "release" => Ok(ToolRequestKind::DatabaseControl(
+            "release" => Ok(AdmittedOperation::DatabaseControl(
                 DatabaseControlRequest::Release,
             )),
-            "resume" => Ok(ToolRequestKind::DatabaseControl(
+            "resume" => Ok(AdmittedOperation::DatabaseControl(
                 DatabaseControlRequest::Resume,
             )),
             other => Err(format!(
@@ -3605,17 +3368,17 @@ fn classify_tool_request(
             )
             .into()),
         },
-        "query" => PublicQueryInput::parse(arguments, true).map(|_| ToolRequestKind::Query),
+        "query" => PublicQueryInput::parse(arguments, true).map(|_| AdmittedOperation::Query),
         "recall_context" => {
             let _ = context_observation::parse_hints(arguments);
             optional_bool(arguments, "observe")?;
-            PublicQueryInput::parse(arguments, false).map(|_| ToolRequestKind::RecallContext)
+            PublicQueryInput::parse(arguments, false).map(|_| AdmittedOperation::RecallContext)
         }
         "recall" => {
             bounded_required(arguments, "text", MAX_QUERY_BYTES)?;
             optional_bounded_usize(arguments, "expand_top", 1, MAX_RECALL_EXPAND)?;
             optional_bounded_usize(arguments, "neighbors_each", 1, MAX_NEIGHBORS_EACH)?;
-            Ok(ToolRequestKind::Recall)
+            Ok(AdmittedOperation::Recall)
         }
         "get" => {
             parse_id(req_s(arguments, "id")?)?;
@@ -3631,19 +3394,19 @@ fn classify_tool_request(
                     "get without body:true",
                 )?;
             }
-            Ok(ToolRequestKind::Get)
+            Ok(AdmittedOperation::Get)
         }
         "list" => {
             touchstone::prepare_list(arguments)?;
-            Ok(ToolRequestKind::List)
+            Ok(AdmittedOperation::List)
         }
         "graph" => {
             prepare_graph(arguments)?;
-            Ok(ToolRequestKind::Graph)
+            Ok(AdmittedOperation::Graph)
         }
         "neighbors" => {
             prepare_neighbors(arguments)?;
-            Ok(ToolRequestKind::Neighbors)
+            Ok(AdmittedOperation::Neighbors)
         }
         "remote_edges" => {
             let source = parse_id(req_s(arguments, "id")?)?;
@@ -3654,11 +3417,11 @@ fn classify_tool_request(
                     .map_err(|error| format!("invalid remote edge cursor: {error}"))?;
             }
             optional_bool(arguments, "resolve")?;
-            Ok(ToolRequestKind::RemoteEdges)
+            Ok(AdmittedOperation::RemoteEdges)
         }
         "core" => {
             body_limit(arguments)?;
-            Ok(ToolRequestKind::Core)
+            Ok(AdmittedOperation::Core)
         }
         "ingest" => {
             let summary = bounded_required(arguments, "summary", MAX_SUMMARY_BYTES)?;
@@ -3679,59 +3442,50 @@ fn classify_tool_request(
             } else {
                 IngestRequest::Ordinary
             };
-            Ok(ToolRequestKind::Ingest(action))
+            Ok(AdmittedOperation::Ingest(action))
         }
-        "concern" => Ok(ToolRequestKind::Concern(
-            prepared_concern
-                .expect("concern retained before classification")
-                .action(),
-        )),
-        "save" => Ok(ToolRequestKind::Save(
-            prepared_save
-                .expect("SAVE is retained before classification")
-                .authority(),
-        )),
-        "capture" => Ok(ToolRequestKind::Capture(
-            capture::PreparedCapture::parse(arguments)?.authority(),
-        )),
-        "episode" => {
-            let prepared = episode::PreparedEpisode::parse(arguments)?;
-            Ok(ToolRequestKind::Episode {
-                action: prepared.action(),
-                capability: prepared.capability(),
-            })
+        "concern" => concern::PreparedConcern::parse(arguments).map(AdmittedOperation::Concern),
+        "save" => save::PreparedSave::parse(arguments).map(AdmittedOperation::Save),
+        "retag" => retag::PreparedRetag::parse(arguments).map(AdmittedOperation::Retag),
+        "edit_body" => {
+            edit_body::PreparedBodyEdit::parse(arguments).map(AdmittedOperation::EditBody)
         }
+        "edit_summary" => {
+            edit_summary::PreparedSummaryEdit::parse(arguments).map(AdmittedOperation::EditSummary)
+        }
+        "capture" => capture::PreparedCapture::parse(arguments).map(AdmittedOperation::Capture),
+        "episode" => episode::PreparedEpisode::parse(arguments).map(AdmittedOperation::Episode),
         "feedback" => {
             optional_string(arguments, "from")?
                 .map(parse_id)
                 .transpose()?;
             parse_id(req_s(arguments, "to")?)?;
             parse_signal(req_s(arguments, "signal")?)?;
-            Ok(ToolRequestKind::Feedback)
+            Ok(AdmittedOperation::Feedback)
         }
         "forget" => {
             parse_id(req_s(arguments, "id")?)?;
-            Ok(ToolRequestKind::Forget)
+            Ok(AdmittedOperation::Forget)
         }
-        "link" => validate_link_arguments(arguments).map(ToolRequestKind::Link),
+        "link" => validate_link_arguments(arguments).map(AdmittedOperation::Link),
         "supersede" => {
             parse_id(req_s(arguments, "winner")?)?;
             parse_id(req_s(arguments, "loser")?)?;
-            Ok(ToolRequestKind::Supersede)
+            Ok(AdmittedOperation::Supersede)
         }
         "contradict" => {
             parse_id(req_s(arguments, "a")?)?;
             parse_id(req_s(arguments, "b")?)?;
-            Ok(ToolRequestKind::Contradict)
+            Ok(AdmittedOperation::Contradict)
         }
         "reconcile" => {
             parse_id(req_s(arguments, "a")?)?;
             parse_id(req_s(arguments, "b")?)?;
             parse_resolution(req_s(arguments, "resolution")?)?;
-            Ok(ToolRequestKind::Reconcile)
+            Ok(AdmittedOperation::Reconcile)
         }
-        "merge" => validate_merge_arguments(arguments).map(ToolRequestKind::Merge),
-        "walk" => validate_walk_arguments(arguments).map(ToolRequestKind::Walk),
+        "merge" => validate_merge_arguments(arguments).map(AdmittedOperation::Merge),
+        "walk" => validate_walk_arguments(arguments).map(AdmittedOperation::Walk),
         "reflect" => {
             let receipts = strs(arguments, "receipts")?;
             if receipts.is_empty() || receipts.len() > MAX_REFLECT_RECEIPTS {
@@ -3747,7 +3501,7 @@ fn classify_tool_request(
                 }
             }
             reflection_judgments(arguments)?;
-            Ok(ToolRequestKind::Reflect)
+            Ok(AdmittedOperation::Reflect)
         }
         other => Err(format!("unknown tool {other:?}").into()),
     }

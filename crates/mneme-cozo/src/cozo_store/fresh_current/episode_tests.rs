@@ -165,7 +165,7 @@ async fn episodic_target_appearing_after_verification_is_not_clobbered() {
     assert_eq!(fs::read(&fixture.target).unwrap(), b"another owner arrived");
 }
 
-fn materialization_episode_node(key: &str, summary: &str, created: u128) -> Node {
+fn materialization_episode_init(key: &str, summary: &str, created: u128) -> mneme_core::NodeInit {
     let source = CaptureSource::new_with_codec(
         "episode-materialization",
         key,
@@ -176,18 +176,17 @@ fn materialization_episode_node(key: &str, summary: &str, created: u128) -> Node
         mneme_core::CaptureRequestCodec::EpisodeV1,
     )
     .unwrap();
-    Node::try_new(
-        source.node_id(),
-        summary,
-        BodyRef::new(format!("inline://{key}")).unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
+    mneme_core::NodeInit {
+        id: source.node_id(),
+        summary: mneme_core::NodeSummary::new(summary).unwrap(),
+        body: BodyRef::new(format!("inline://{key}")).unwrap(),
+        tags: mneme_core::BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+        provenance: Provenance::External { source },
+        stability: mneme_core::Stability::new(0.5).unwrap(),
+        confidence: mneme_core::Confidence::new(0.5).unwrap(),
+        status: NodeStatus::Active,
         created,
-    )
-    .unwrap()
+    }
 }
 
 async fn materialization_episode_source() -> (crate::MemStore, Node, Node) {
@@ -196,15 +195,15 @@ async fn materialization_episode_source() -> (crate::MemStore, Node, Node) {
         EpisodeTime, EpisodeWriteExpectation, OccurrenceSpan,
     };
     let source = exact_component_source().await;
-    let root = materialization_episode_node("initial", "I thought the bridge was broken", 100);
+    let root = materialization_episode_init("initial", "I thought the bridge was broken", 100);
     let facet = EpisodeFacet::initial(
-        root.id(),
+        root.id,
         OccurrenceSpan::Unknown,
         Some(EpisodeThread::new("field-notes").unwrap()),
         EpisodeTime::new(100).unwrap(),
     )
     .unwrap();
-    let root = root.with_episode(facet).unwrap();
+    let root = Node::new_episode(root, facet).unwrap();
     let lesson = NodeId(Ulid::from(1_u128));
     source
         .commit_episode(EpisodeCommit {
@@ -222,22 +221,22 @@ async fn materialization_episode_source() -> (crate::MemStore, Node, Node) {
         .await
         .expect("append initial immutable edition");
     let initial = root.episode().unwrap();
-    let edition = materialization_episode_node("revision", "The connector was unplugged", 200)
-        .with_episode(
-            EpisodeFacet::revised(
-                initial.root(),
-                root.id(),
-                initial.revision().next().unwrap(),
-                OccurrenceSpan::Point {
-                    at: EpisodeTime::new(50).unwrap(),
-                },
-                Some(EpisodeThread::new("field-notes").unwrap()),
-                initial.recorded_at(),
-                EpisodeRevisionReason::new("The later check corrected my first account").unwrap(),
-            )
-            .unwrap(),
+    let edition = Node::new_episode(
+        materialization_episode_init("revision", "The connector was unplugged", 200),
+        EpisodeFacet::revised(
+            initial.root(),
+            root.id(),
+            initial.revision().next().unwrap(),
+            OccurrenceSpan::Point {
+                at: EpisodeTime::new(50).unwrap(),
+            },
+            Some(EpisodeThread::new("field-notes").unwrap()),
+            initial.recorded_at(),
+            EpisodeRevisionReason::new("The later check corrected my first account").unwrap(),
         )
-        .unwrap();
+        .unwrap(),
+    )
+    .unwrap();
     source
         .commit_episode(EpisodeCommit {
             node: &edition,
@@ -393,19 +392,21 @@ async fn context_upgrade_preserves_old_proofs_then_persists_contextual_revision(
         mneme_core::CaptureRequestCodec::EpisodeV2,
     )
     .unwrap();
-    let contextual = Node::try_new(
-        source.node_id(),
-        "The bridge was intact; we were in the Pi session",
-        BodyRef::new("inline://context-revision").unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        300,
-    )
-    .unwrap()
-    .with_episode(
+    let contextual = Node::new_episode(
+        mneme_core::NodeInit {
+            id: source.node_id(),
+            summary: mneme_core::NodeSummary::new(
+                "The bridge was intact; we were in the Pi session",
+            )
+            .unwrap(),
+            body: BodyRef::new("inline://context-revision").unwrap(),
+            tags: mneme_core::BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+            provenance: Provenance::External { source },
+            stability: mneme_core::Stability::new(0.5).unwrap(),
+            confidence: mneme_core::Confidence::new(0.5).unwrap(),
+            status: NodeStatus::Active,
+            created: 300,
+        },
         EpisodeFacet::revised(
             prior.root(),
             edition.id(),

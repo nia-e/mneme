@@ -5,7 +5,7 @@ pub(crate) async fn contract(store: &dyn GraphStore) {
     let mut node = crate::touchstone_tests::target(NodeId(Ulid::new()), "preserve me");
     node.record_exposure(4);
     node.record_grounded_use(5);
-    node.set_status(NodeStatus::Archived);
+    node.set_status(NodeStatus::Archived).unwrap();
     store.put_node(&node).await.unwrap();
     let peer = crate::touchstone_tests::target(NodeId(Ulid::new()), "linked peer");
     store.put_node(&peer).await.unwrap();
@@ -24,7 +24,7 @@ pub(crate) async fn contract(store: &dyn GraphStore) {
         .await
         .unwrap();
     let mut expected = node.clone();
-    expected.replace_tags(new.clone());
+    expected.replace_tags(new.clone()).unwrap();
     assert_eq!(
         serde_json::to_value(&replaced).unwrap(),
         serde_json::to_value(&expected).unwrap()

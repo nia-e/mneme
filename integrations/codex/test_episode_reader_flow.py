@@ -23,7 +23,7 @@ from reader_runtime import ReaderRuntime
 from librarian_policy import resolve
 from reader_test_support import PublicationHandoff
 from fixture_model_dates import epoch_second_display
-from test_hook_recall import FakeClient, ID1, ID2, ID3, ID4, ID5, ID6, ID7, discovery_metadata, reference_origin
+from fixture_recall_owner import FakeClient, ID1, ID2, ID3, ID4, ID5, ID6, ID7, discovery_metadata, reference_origin
 
 
 class EpisodeReaderFlowTests(unittest.TestCase):

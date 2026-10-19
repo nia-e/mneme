@@ -492,7 +492,9 @@ pub(super) fn stage_full_merge_transaction(
 
     let loser_lane_changed =
         TaggedPhysicalStatus::from(loser_node.status()) != TaggedPhysicalStatus::Archived;
-    loser_node.set_status(NodeStatus::Archived);
+    loser_node
+        .set_status(NodeStatus::Archived)
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
     let mut node_params = BTreeMap::new();
     node_params.insert("id".into(), dv_str(&loser));
     node_params.insert("data".into(), dv_str(&encode_canonical_node(&loser_node)?));
@@ -751,7 +753,9 @@ pub(super) fn stage_supersede_transaction(
 
     let loser_lane_changed =
         TaggedPhysicalStatus::from(loser_node.status()) != TaggedPhysicalStatus::Archived;
-    loser_node.set_status(NodeStatus::Archived);
+    loser_node
+        .set_status(NodeStatus::Archived)
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
     params.insert("data".into(), dv_str(&encode_canonical_node(&loser_node)?));
     params.insert("status".into(), dv_str(status_str(loser_node.status())));
     params.insert("summary".into(), dv_str(loser_node.summary()));

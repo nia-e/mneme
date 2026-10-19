@@ -16,6 +16,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 import recording_contract as contract
 import recording_jobs as jobs
+import capture_source
 import fixture_source_turn as source
 from librarian_policy import resolve
 from fixture_recording import DB_ID, OTHER_DB, PROMPT, SESSION, FakeRuntime, RecordingFixture
@@ -524,7 +525,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         import reader_worker
         import routing_contract
         import routing_memory
-        from test_hook_recall import FakeClient
+        from fixture_recall_owner import FakeClient
         from test_routing_memory import binding, PREVIOUS, WITNESS
 
         store = self.root / '.mneme' / 'codex-memory.db'
@@ -1427,7 +1428,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         self.closed()
         result = {"status": "deferred", "reason": "evidence_bytes_exceeded",
                   "work": {"bytes_read": 1000, "records_parsed": 10}}
-        with patch("recording_jobs.observe_source_turn", return_value=result):
+        with patch("capture_source.observe", return_value=result):
             _, runtime = self.step()
         self.assertEqual(runtime.calls, [])
         self.identity.assert_not_called()
@@ -1436,7 +1437,8 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
     def test_flush_retry_count_is_bounded_and_persisted(self):
         self.begin()
         jobs.close_turn(self.config, SESSION, "turn-1")
-        charge = jobs.observation_byte_ceiling(jobs._admission(self.state()["jobs"][0]["admission"]))
+        charge = capture_source.byte_ceiling(self.config,
+            capture_source.restore(self.config, self.state()["jobs"][0]["admission"]), limits=jobs.Limits())
         self.assertLessEqual(jobs.MAX_POLLS * charge, jobs.MAX_SCAN_WORK)
         for index in range(jobs.MAX_POLLS):
             self.step()
@@ -1452,7 +1454,8 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
 
     def test_scan_charge_precedes_read_and_failed_progress_cannot_buy_free_scans(self):
         self.closed()
-        charge = jobs.observation_byte_ceiling(jobs._admission(self.state()["jobs"][0]["admission"]))
+        charge = capture_source.byte_ceiling(self.config,
+            capture_source.restore(self.config, self.state()["jobs"][0]["admission"]), limits=jobs.Limits())
         original_update = jobs._update
         reads = []
         after_read = False
@@ -1468,7 +1471,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
                     "work": {"bytes_read": 10, "records_parsed": 1}}
         def update(*args, **kwargs):
             return (False, None) if after_read else original_update(*args, **kwargs)
-        with patch("recording_jobs.observe_source_turn", side_effect=observe), \
+        with patch("capture_source.observe", side_effect=observe), \
              patch("recording_jobs._update", side_effect=update):
             for _ in range(jobs.MAX_POLLS + 2):
                 after_read = False
@@ -1491,14 +1494,14 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         self.assertEqual(jobs.notice(self.config, self.event())["outcome"], "admitted")
         self.source_complete()
         jobs.close_turn(self.config, SESSION, "turn-1")
-        admission = jobs._admission(self.state()["jobs"][0]["admission"])
-        charge = jobs.observation_byte_ceiling(admission)
+        admission = capture_source.restore(self.config, self.state()["jobs"][0]["admission"])
+        charge = capture_source.byte_ceiling(self.config, admission, limits=jobs.Limits())
         self.assertGreater(admission.start_record.line_bytes, 128 * 1024)
         self.assertEqual(charge, jobs.Limits().scan_bytes + 2 * (
             admission.session_record.line_bytes + admission.start_record.line_bytes))
         # More than the ordinary anchor allowance remains, but not this poll's.
         self.mutate(lambda d: d["jobs"][0].update(reserved_bytes=jobs.MAX_SCAN_WORK - charge + 1))
-        with patch("recording_jobs.observe_source_turn") as observe:
+        with patch("capture_source.observe") as observe:
             _, runtime = self.step()
         observe.assert_not_called()
         self.assertEqual(runtime.calls, [])
@@ -1509,7 +1512,7 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
     def test_invalid_anchor_cannot_get_a_cheap_reservation_or_source_read(self):
         self.closed()
         self.mutate(lambda d: d["jobs"][0]["admission"]["start_record"].update(line_bytes=-1))
-        with patch("recording_jobs.observe_source_turn") as observe:
+        with patch("capture_source.observe") as observe:
             _, runtime = self.step()
         observe.assert_not_called()
         self.assertEqual(runtime.calls, [])
@@ -1521,14 +1524,15 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         for excess in ("bytes_read", "records_parsed"):
             with self.subTest(excess=excess):
                 self.closed()
-                charge = jobs.observation_byte_ceiling(jobs._admission(self.state()["jobs"][0]["admission"]))
+                charge = capture_source.byte_ceiling(self.config,
+                    capture_source.restore(self.config, self.state()["jobs"][0]["admission"]), limits=jobs.Limits())
                 work = {"bytes_read": 1, "records_parsed": 1}
                 work[excess] = (charge if excess == "bytes_read" else jobs.Limits().events) + 1
                 # Below the whole-job cap: specifically the one-poll contract failed.
                 self.assertLess(work["bytes_read"], jobs.MAX_SCAN_WORK)
                 self.assertLess(work["records_parsed"], jobs.MAX_EVENT_WORK)
                 result = {"status": "deferred", "reason": "source_turn_not_closed", "work": work}
-                with patch("recording_jobs.observe_source_turn", return_value=result):
+                with patch("capture_source.observe", return_value=result):
                     _, runtime = self.step()
                 self.assertEqual(runtime.calls, [])
                 self.identity.assert_not_called()
@@ -1978,7 +1982,8 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
     def test_bound_routing_targets_do_not_imply_prepared_routing_is_enabled(self):
         self.routed_closed()
         job=self.state()['jobs'][0]
-        observed=jobs.observe_source_turn(jobs._admission(job['admission']),delivery=job['delivery'])
+        observed=capture_source.observe(self.config, capture_source.restore(self.config, job['admission']),
+            limits=jobs.Limits(), delivery=job['delivery'])
         _,baseline=contract.prepare(observed,[])
         self.assertTrue(baseline.routing_enabled)
         with patch.object(contract,'MAX_AUTHORED_BYTES',baseline.authored_bytes-1):

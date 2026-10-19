@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import recording_contract as contract
-from test_turn_observer import refresh_delivery_packet
+from fixture_source_turn import refresh_delivery_packet
 
 
 def encoded(value):
@@ -49,7 +49,7 @@ def tool_result(*, ordinal=3, call_id="host-only-call-A", typ="custom_tool_call_
 
 
 def memory_marker(ordinal=2):
-    from test_turn_observer import delivery_packet
+    from fixture_source_turn import delivery_packet
     return {"kind": "memory_delivery", "ref": reference(ordinal), "content_index": 0,
             "packet": delivery_packet()}
 
@@ -402,8 +402,8 @@ class RecordingPrepareTests(unittest.TestCase):
 
     def test_episode_delivery_and_unbound_references_cannot_be_targets(self):
         marker = memory_marker()
-        from test_turn_observer import EpisodeDisplayBindingTests
-        card = EpisodeDisplayBindingTests().card()
+        from fixture_source_turn import episode_display_card
+        card = episode_display_card()
         marker["packet"]["displayed"][0].update(kind="episode", node_id=card["id"],
             displayed_view={key: value for key, value in card.items() if key != "fingerprint"})
         refresh_delivery_packet(marker["packet"])
@@ -1093,7 +1093,7 @@ def concern_delivery(*, ordinal=2, db_id="0" * 26, session="session", turn="turn
               "displayed": [{"db_id": db_id, "node_id": a, "kind": "semantic", "shown_summary": "First version.", "full_get_fingerprint": "a" * 64},
                             {"db_id": db_id, "node_id": b, "kind": "semantic", "shown_summary": "Second version.", "full_get_fingerprint": "b" * 64}],
               "concerns": [{"shown_text": shown, "displayed_endpoint_ids": [a,b], "expected_row": row if registered else None}]}
-    from test_turn_observer import refresh_delivery_packet
+    from fixture_source_turn import refresh_delivery_packet
     refresh_delivery_packet(packet)
     return {"kind": "memory_delivery", "ref": reference(ordinal), "content_index": 0, "packet": packet}
 

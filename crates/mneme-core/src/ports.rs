@@ -1305,8 +1305,9 @@ pub trait GraphStore: Send + Sync {
     /// discard unresolved contradiction and merge-candidate overlays involving
     /// the node: they can no longer be adjudicated once an endpoint is gone.
     /// Terminal overlays and durable full-merge proofs are retained as history.
-    /// The engine's `forget` also drops the node's edges and vector; bodies are
-    /// external and untouched.
+    /// Body storage is outside this port. The engine's `forget` also removes
+    /// edges and vectors, and handles managed-body deletion or ownership
+    /// transfer; borrowed bodies are left untouched.
     async fn delete_node(&self, id: NodeId) -> Result<()>;
     /// Whole-graph scan — gated on the [`ColdPath`] for community detection
     /// and explicit curation. Never on the hot path.
@@ -2559,26 +2560,25 @@ mod routing_binding_tests {
         } else {
             1700000000000
         };
-        let node = Node::try_new(
-            source.node_id(),
-            "A remote experiment was recapped in a later session.",
-            BodyRef::new(if revision {
+        let init = crate::NodeInit {
+            id: source.node_id(),
+            summary: crate::NodeSummary::new(
+                "A remote experiment was recapped in a later session.",
+            )
+            .unwrap(),
+            body: BodyRef::new(if revision {
                 "fs://00000000000000000000000003"
             } else {
                 "fs://00000000000000000000000002"
             })
             .unwrap(),
-            Vec::<&str>::new(),
-            crate::Provenance::External { source },
-            0.5,
-            0.5,
-            NodeStatus::Active,
+            tags: crate::BoundedTagSet::default(),
+            provenance: crate::Provenance::External { source },
+            stability: crate::Stability::new(0.5).unwrap(),
+            confidence: crate::Confidence::new(0.5).unwrap(),
+            status: NodeStatus::Active,
             created,
-        )
-        .unwrap()
-        .with_origin_commit(Some(
-            crate::OriginCommit::parse("0123456789abcdef0123456789abcdef01234567").unwrap(),
-        ));
+        };
         let root = crate::CaptureSource::new_with_codec(
             "scene-fixture",
             "event",
@@ -2620,7 +2620,11 @@ mod routing_binding_tests {
         if let Some(contexts) = contexts {
             facet = facet.with_occurrence_contexts(contexts);
         }
-        node.with_episode(facet).unwrap()
+        Node::new_episode(init, facet)
+            .unwrap()
+            .with_origin_commit(Some(
+                crate::OriginCommit::parse("0123456789abcdef0123456789abcdef01234567").unwrap(),
+            ))
     }
 
     fn byte_hex(bytes: &[u8]) -> String {
@@ -3044,7 +3048,9 @@ mod routing_binding_tests {
         );
         let mut telemetry = first.clone();
         telemetry.record_grounded_use(1790837999999);
-        telemetry.set_status(NodeStatus::Archived);
+        // Episode lifecycle is fixed; only valid telemetry changes are inputs
+        // to this fingerprint. Semantic lifecycle exclusion is tested below.
+        assert!(telemetry.set_status(NodeStatus::Archived).is_err());
         assert_eq!(
             routing_content_fingerprint(&first),
             routing_content_fingerprint(&telemetry)
@@ -3056,7 +3062,7 @@ mod routing_binding_tests {
         let first = node(1, "old meaning", 1);
         let mut telemetry = node(1, "old meaning", 999);
         telemetry.record_grounded_use(1000);
-        telemetry.set_status(NodeStatus::Archived);
+        telemetry.set_status(NodeStatus::Archived).unwrap();
         assert_eq!(
             routing_content_fingerprint(&first),
             routing_content_fingerprint(&telemetry)
@@ -3127,7 +3133,7 @@ mod capture_similarity_prior_tests {
         telemetry.set_confidence(crate::Confidence::new(0.7).unwrap());
         assert!(prior.matches_target(&telemetry));
         let mut archived = node.clone();
-        archived.set_status(NodeStatus::Archived);
+        archived.set_status(NodeStatus::Archived).unwrap();
         assert!(!prior.matches_target(&archived));
         assert!(
             CaptureSimilarityPrior::new(Edge::new(source, id, 0.8, EdgeKind::Transition, 1), &node)

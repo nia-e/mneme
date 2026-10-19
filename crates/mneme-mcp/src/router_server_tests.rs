@@ -21,8 +21,12 @@ fn config(databases: Vec<DatabaseConfig>, default: &str) -> RouterConfig {
 #[test]
 fn router_startup_mode_is_explicit_and_exclusive() {
     let args = crate::parse_args_from(["--router-config", "/not/a/database"]).unwrap();
-    assert!(args.dbs.is_empty());
-    assert!(args.library_config.is_none());
+    assert_eq!(
+        args.mode,
+        crate::StartupMode::Router {
+            config: PathBuf::from("/not/a/database")
+        }
+    );
     for sibling in [
         vec!["--db", "user=/tmp/owner"],
         vec!["--library-config", "library.json"],

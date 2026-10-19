@@ -25,6 +25,39 @@ The key constraint is semantic ownership: frontends must not independently
 reconstruct the same operation. A module extraction should remove a responsibility
 from its old owner, not merely hide a dependency cycle in another file.
 
+## Internal contracts and where to find them
+
+Checked values establish local facts, not permanent authority. A valid request
+does not prove that its owner is still selected, a lease is still held, or an
+observed row is still current. Keep those checks at admission and commit.
+
+| Contract | Owner |
+| --- | --- |
+| Provenance and capture replay proof | `mneme-core/src/provenance.rs` |
+| Complete semantic/episode node construction and invariant-preserving mutation | `Node` in `mneme-core/src/lib.rs`, with episode rules in `episode.rs` |
+| Snapshot wire formats and explicit predecessor codecs | `mneme-cozo/src/snapshot.rs`; backend callers retain strict-import versus repair-load policy |
+| Catalog, generation marker and tag-policy combinations | Private `SchemaTarget` in `mneme-cozo/src/cozo_store/creation.rs` |
+| Workspace evidence versus store-selection policy | `mneme-config/src/workspace.rs` and `selection.rs` |
+| Retrieval policy identity and receipt-feedback row staging | `mneme-engine/src/retrieval_policy.rs` and `feedback.rs` |
+| Context discovery and independent scene/touchstone composers | `mneme-app/src/context/`; `context.rs` owns the frozen window and orchestration |
+| Card payloads and query envelopes | `mneme-present/src/cards.rs` and `query.rs`; the packer retains aggregate checks |
+| Shared QUERY hit projection | `mneme-app/src/query.rs`; frontends still own body acquisition and budgets |
+| Live versus snapshot catalog sources | `mneme-library/src/catalog_source.rs`; catalog metadata is not remote identity proof |
+| Complete startup and admitted operation choices | MCP `startup.rs`, `capability.rs` and `main.rs`; CLI `remote_commands/request.rs` |
+
+Construct a node in its final kind. Constructors and checked setters preserve
+representational validity; adapters separately enforce immutable persisted
+editions and transactional guards. Historical tag spellings remain representable
+for explicit migration, without becoming valid new writes. Similarly, a capture
+replay proof binds the original request bytes; it is not permission to replay
+against any owner or epoch.
+
+Prefer a small private enum when fields describe mutually exclusive states. Use a
+shared generic only when actual consumers share its semantics: feedback's
+`CachedRow<T>` pairs an original node/edge snapshot with its optional replacement,
+but deliberately cannot create a missing row. There is no general typestate or
+transaction framework around these operations.
+
 ## Backends and stored generations
 
 Default native builds use the vendored **mnestic** fork of Cozo with SQLite/HNSW,
@@ -34,10 +67,13 @@ builds use a JSON-snapshot reference backend and lexical embedder; useful for
 mechanism tests, not evidence of semantic retrieval quality.
 
 Ordinary opens refuse supported predecessor generations rather than mutating or
-guessing. Current stores use `touchstones-v1` (JSON v5).
+guessing. Current stores use the `touchstones-v1` catalog with the canonical-tag
+policy marker; current JSON snapshots use `mneme.store-export.v6`.
 `single-graph-upgrade` builds detached successors through the named
 `single-graph-v1`, `concern-v1`, `episode-context-v2` and `touchstones-v1` steps;
 see the [migration contract](episodic-memory.md#existing-persistent-stores).
+The separate [tag-format migration](tag-normalization.md) advances the tag policy
+without rewriting historical submission proofs.
 Inventory configured and retained stores before retiring migration support.
 A current source format does not prove an existing store was migrated.
 
@@ -74,6 +110,11 @@ select relevant feature variants and Python integration suites for the changed
 boundary. Read the [change-gates skill](../.agents/skills/mneme-change-gates/SKILL.md)
 for CLI/MCP, capability, transport, storage or compatibility changes. Passing
 workspace tests does not qualify an installed runtime or a live migration.
+
+Workspace defaults do not enable the engine crate's own `cozo` test configuration.
+For engine/adapter changes, also run `cargo test -p mneme-engine -p mneme-cozo
+--features cozo`. Frontend changes may need both `--no-default-features` and
+`--no-default-features --features cozo,http` on `mnemed` and `mneme-mcp`.
 
 Synthetic mechanism checks and workload-quality evidence answer different
 questions. No benchmark campaign is a default refactor gate.

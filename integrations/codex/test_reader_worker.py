@@ -596,7 +596,7 @@ class ReaderStateTests(unittest.TestCase):
 
     def test_discovery_is_private_and_does_not_change_selector_payload(self):
         from hook_recall import _discovery
-        from test_hook_recall import discovery_metadata
+        from fixture_recall_owner import discovery_metadata
         metadata = discovery_metadata()
         metadata["omitted"]["expansion"]["further_tail_unknown"] = True
         discovery = _discovery(metadata, {"observed_unique_window": 2, "readbacks_attempted": 2, "work_budget_unread": 0, "graph_readback_omitted": 0, "graph_byte_omitted": 0,
@@ -622,7 +622,7 @@ class ReaderStateTests(unittest.TestCase):
 
     def test_selection_byte_pressure_sheds_discovery_before_valid_pool(self):
         from hook_recall import _discovery
-        from test_hook_recall import discovery_metadata
+        from fixture_recall_owner import discovery_metadata
         metadata = discovery_metadata()
         metadata["retrieval"].update(mode="tagged", partial=False,
             work={key: 0 for key in __import__("hook_recall")._TAGGED_WORK_FIELDS})
@@ -647,7 +647,7 @@ class ReaderStateTests(unittest.TestCase):
 
     def test_state_pressure_sheds_only_discovery_before_ready_and_usage(self):
         from hook_recall import _discovery, _unknown_discovery
-        from test_hook_recall import discovery_metadata
+        from fixture_recall_owner import discovery_metadata
         reader.notice(self.config, self.event(), True)
         base = self.state()
         ready = {**base["pending"], "cards": [CARD_A], "fence": base["fence"]}
@@ -1460,7 +1460,7 @@ class ReaderConcernTests(unittest.TestCase):
 
     def test_notice_after_durable_usage_then_once_only_bound_delivery(self):
         self.config["recording_mode"] = "automatic"
-        from test_turn_observer import concern_row
+        from fixture_source_turn import concern_row
         row = concern_row(CARD_A["id"], CARD_B["id"])
         nomination = {"kind": "disagreement", "left_id": CARD_A["id"], "right_id": CARD_B["id"],
                       "caveat": "Advice differs", "missing_fact": "Which scope?"}
@@ -1506,7 +1506,7 @@ class ReaderConcernTests(unittest.TestCase):
         self.assertEqual(result["concern_nominations"], [])
 
     def test_recording_off_surfaces_readonly_caveat_without_native_connection(self):
-        from test_turn_observer import concern_row
+        from fixture_source_turn import concern_row
         row = concern_row(CARD_A["id"], CARD_B["id"])
         nomination = {"kind": "disagreement", "left_id": CARD_A["id"], "right_id": CARD_B["id"],
                       "caveat": "Advice differs", "missing_fact": "Which scope?"}

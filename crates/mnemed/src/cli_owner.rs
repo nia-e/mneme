@@ -393,7 +393,7 @@ impl OwnerBinding {
     /// concern packet or another explicitly pinned request to a different DB.
     pub(crate) fn check_request(&self, request: &Request) -> Result<(), AnyErr> {
         if request
-            .arguments
+            .arguments()
             .get("expected_db_id")
             .is_some_and(|value| value.as_str() != Some(self.db_id.to_string().as_str()))
         {
@@ -444,18 +444,18 @@ impl OwnerBinding {
                 "configured CLI owner must be an mneme-mcp server; no operation sent".into(),
             );
         }
-        let action = match request.tool {
-            "save" => Some(request.arguments["kind"].as_str().unwrap_or("note")),
+        let action = match request.tool() {
+            "save" => Some(request.arguments()["kind"].as_str().unwrap_or("note")),
             "episode" | "concern" | "walk" | "database_control" | "graph" => {
-                request.arguments["action"].as_str()
+                request.arguments()["action"].as_str()
             }
             _ => None,
         };
-        let guarded = client.supports_expected_db_id(request.tool, action);
+        let guarded = client.supports_expected_db_id(request.tool(), action);
         if !guarded {
-            return Err(format!("configured CLI owner cannot guard {} with canonical expected_db_id; no operation sent. Update the owner's mneme-mcp runtime (updating only this CLI is insufficient), or explicitly select --remote URL for an unbound connection / --db PATH for offline work; no fallback attempted", request.tool).into());
+            return Err(format!("configured CLI owner cannot guard {} with canonical expected_db_id; no operation sent. Update the owner's mneme-mcp runtime (updating only this CLI is insufficient), or explicitly select --remote URL for an unbound connection / --db PATH for offline work; no fallback attempted", request.tool()).into());
         }
-        request.arguments["expected_db_id"] = json!(self.db_id.to_string());
+        request.guard_database(self.db_id);
         let databases = client
             .call_tool("databases", json!({}))
             .await

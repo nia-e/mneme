@@ -38,6 +38,7 @@ fn node(index: u128, summary: &str, tags: Vec<String>) -> Node {
         },
         created: index,
     })
+    .unwrap()
 }
 async fn run(mem: &Memory, args: Value) -> Value {
     PreparedGraph::parse(&args)

@@ -1151,7 +1151,7 @@ async fn query_summary_bound_catalog_raw_types_and_checkout_order_agree() {
         .unwrap_err()
         .to_string();
         assert!(!error.contains("unknown database"), "{error}");
-        assert!(classify_tool_request("query", &args, None, None).is_err());
+        assert!(admit_tool_operation("query", &args).is_err());
     }
     assert_eq!(
         PublicQueryInput::parse(&json!({"text":"q"}), true)

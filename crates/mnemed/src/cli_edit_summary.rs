@@ -74,14 +74,19 @@ mod tests {
         ])
         .unwrap();
         let request = crate::remote_commands::prepare(&cli.command, "project").unwrap();
-        assert_eq!(request.tool, "edit_summary");
+        assert_eq!(request.tool(), "edit_summary");
         assert_eq!(
-            request.access,
+            request.access(),
             crate::remote_commands::RequestAccess::Mutation
         );
-        assert_eq!(request.arguments["summary"], "replacement");
-        assert_eq!(request.arguments["expected_snapshot_sha256"], guard);
-        assert_eq!(request.arguments["db"], "project");
-        assert!(request.edit_summary.is_some());
+        assert_eq!(request.arguments()["summary"], "replacement");
+        assert_eq!(request.arguments()["expected_snapshot_sha256"], guard);
+        assert_eq!(request.arguments()["db"], "project");
+        let (_, response_check) = request.into_submission().unwrap();
+        assert!(
+            response_check
+                .verify_remote(&serde_json::json!({}), "project")
+                .is_err()
+        );
     }
 }

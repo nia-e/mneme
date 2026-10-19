@@ -372,6 +372,7 @@ mod tests {
                 status: NodeStatus::Active,
                 created: id,
             })
+            .unwrap()
         };
         let store = Arc::new(mneme_cozo::MemStore::new(DEFAULT_DIM));
         let memory = Memory::new(

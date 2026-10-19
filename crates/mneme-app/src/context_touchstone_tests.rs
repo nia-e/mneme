@@ -249,7 +249,9 @@ async fn empty_catalog_is_one_read_and_slow_catalog_is_deadline_not_absence() {
 #[tokio::test]
 async fn episode_citation_uses_exact_edition_without_loading_or_substituting_head() {
     use mneme_core::episode::{EpisodeFacet, EpisodeTime, OccurrenceSpan};
-    use mneme_core::{CaptureRequestCodec, CaptureSource};
+    use mneme_core::{
+        BoundedTagSet, CaptureRequestCodec, CaptureSource, Confidence, NodeInit, Stability,
+    };
     let source = CaptureSource::new_with_codec(
         "touchstone-test",
         "historical-edition",
@@ -261,19 +263,18 @@ async fn episode_citation_uses_exact_edition_without_loading_or_substituting_hea
     )
     .unwrap();
     let edition = source.node_id();
-    let node = Node::try_new(
-        edition,
-        "An original event account",
-        BodyRef::new("inline://never-resolve-this-body").unwrap(),
-        Vec::<&str>::new(),
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        10,
-    )
-    .unwrap()
-    .with_episode(
+    let node = Node::new_episode(
+        NodeInit {
+            id: edition,
+            summary: NodeSummary::new("An original event account").unwrap(),
+            body: BodyRef::new("inline://never-resolve-this-body").unwrap(),
+            tags: BoundedTagSet::default(),
+            provenance: Provenance::External { source },
+            stability: Stability::new(0.5).unwrap(),
+            confidence: Confidence::new(0.5).unwrap(),
+            status: NodeStatus::Active,
+            created: 10,
+        },
         EpisodeFacet::initial(
             edition,
             OccurrenceSpan::Unknown,

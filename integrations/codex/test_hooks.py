@@ -1177,7 +1177,7 @@ class ConcernPackingTests(unittest.TestCase):
                  "kind": "semantic", "status": "active", "source": "fixture"} for i in range(1, n + 1)]
 
     def case(self, a=1, b=2):
-        from test_turn_observer import concern_row
+        from fixture_source_turn import concern_row
         return {"shown_text": 'Scopes differ 🐙 "quoted".',
                 "displayed_endpoint_ids": [str(a) * 26, str(b) * 26],
                 "expected_row": concern_row(str(a) * 26, str(b) * 26)}
@@ -1221,7 +1221,7 @@ class ConcernPackingTests(unittest.TestCase):
         self.assertEqual(len(packed["concerns"]), 2)
 
     def test_private_byte_pressure_sheds_authority_before_warning_or_cards(self):
-        from test_turn_observer import concern_row
+        from fixture_source_turn import concern_row
         row = concern_row(finding={"scope": '"' * 500, "observation": '"' * 1000,
                      "evidence": [{"source_ref": '"' * 250, "digest": "c" * 64} for _ in range(3)]})
         cards = self.cards(3, '"\\' * 50)

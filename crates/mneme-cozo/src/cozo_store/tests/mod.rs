@@ -1117,7 +1117,7 @@ async fn conventional_fresh_projection_replaces_tags_moves_lifecycle_and_clears_
         ]
     );
     let mut archived = tagged_node(id, &["b", "c"]);
-    archived.set_status(NodeStatus::Archived);
+    archived.set_status(NodeStatus::Archived).unwrap();
     store.put_node(&archived).await.unwrap();
     assert_eq!(
         physical_tags(&store, id),
@@ -1956,7 +1956,7 @@ async fn batch_node_hydration_is_one_query_and_positional() {
     )
     .unwrap();
     let mut second = active_node(NodeId(Ulid::from(2u128)));
-    second.set_status(NodeStatus::Archived);
+    second.set_status(NodeStatus::Archived).unwrap();
     store.put_node(&first).await.unwrap();
     store.put_node(&second).await.unwrap();
     let missing = NodeId(Ulid::from(3u128));
@@ -2029,7 +2029,7 @@ async fn batch_node_status_lookup_is_one_query_positional_and_bounded() {
     let store = CozoStore::new(4).unwrap();
     let active = active_node(NodeId(Ulid::from(11u128)));
     let mut archived = active_node(NodeId(Ulid::from(12u128)));
-    archived.set_status(NodeStatus::Archived);
+    archived.set_status(NodeStatus::Archived).unwrap();
     store.put_node(&active).await.unwrap();
     store.put_node(&archived).await.unwrap();
     let missing = NodeId(Ulid::from(13u128));
@@ -2665,7 +2665,7 @@ fn raw_insert_projected_nodes(
             .enumerate()
             .map(|(index, id)| {
                 let mut node = active_node(*id);
-                node.set_status(status);
+                node.set_status(status).unwrap();
                 let id_name = format!("projection_id_{index}");
                 let data_name = format!("projection_data_{index}");
                 params.insert(id_name.clone(), dv_str(&id.0.to_string()));
@@ -2835,7 +2835,7 @@ async fn cozo_exact_tagged_results_match_memstore_for_active_membership() {
     let cozo = CozoStore::new(2).unwrap();
     let mem = crate::MemStore::new(2);
     let mut archived = tagged_node(NodeId(Ulid::from(51_003u128)), &["a"]);
-    archived.set_status(NodeStatus::Archived);
+    archived.set_status(NodeStatus::Archived).unwrap();
     let fixtures = [
         (
             tagged_node(NodeId(Ulid::from(51_001u128)), &["a", "b"]),
@@ -3167,7 +3167,7 @@ async fn cozo_tagged_fallback_keeps_32_tag_active_reserve_and_excludes_archived(
         .enumerate()
         .map(|(index, tag)| {
             let mut node = tagged_node(NodeId(Ulid::from(120_000u128 + index as u128)), &[tag]);
-            node.set_status(NodeStatus::Archived);
+            node.set_status(NodeStatus::Archived).unwrap();
             node
         })
         .collect();

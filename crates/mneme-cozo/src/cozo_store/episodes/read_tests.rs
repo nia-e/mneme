@@ -1,6 +1,6 @@
 use super::*;
 use mneme_core::ports::{IncidentEdgeLeg, IncidentEdgesRequest};
-use mneme_core::{BodyRef, BodySpan};
+use mneme_core::{BodyRef, BodySpan, BoundedTagSet, Confidence, NodeInit, NodeSummary, Stability};
 
 const VECTOR: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 
@@ -10,7 +10,12 @@ fn time(value: u128) -> EpisodeTime {
 fn limit(value: usize) -> EpisodePageLimit {
     EpisodePageLimit::new(value).unwrap()
 }
-fn base(key: &str, summary: &str, at: u128, codec: mneme_core::CaptureRequestCodec) -> Node {
+fn base_init(
+    key: &str,
+    summary: &str,
+    at: u128,
+    codec: mneme_core::CaptureRequestCodec,
+) -> NodeInit {
     let source = CaptureSource::new_with_codec(
         "episode-read-test",
         key,
@@ -21,18 +26,20 @@ fn base(key: &str, summary: &str, at: u128, codec: mneme_core::CaptureRequestCod
         codec,
     )
     .unwrap();
-    Node::try_new(
-        source.node_id(),
-        summary,
-        BodyRef::new("inline://episode-read").unwrap(),
-        ["episode-test"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        at,
-    )
-    .unwrap()
+    NodeInit {
+        id: source.node_id(),
+        summary: NodeSummary::new(summary).unwrap(),
+        body: BodyRef::new("inline://episode-read").unwrap(),
+        tags: BoundedTagSet::try_from_iter(["episode-test"]).unwrap(),
+        provenance: Provenance::External { source },
+        stability: Stability::new(0.5).unwrap(),
+        confidence: Confidence::new(0.5).unwrap(),
+        status: NodeStatus::Active,
+        created: at,
+    }
+}
+fn base(key: &str, summary: &str, at: u128, codec: mneme_core::CaptureRequestCodec) -> Node {
+    Node::new(base_init(key, summary, at, codec)).unwrap()
 }
 fn initial(
     key: &str,
@@ -41,15 +48,15 @@ fn initial(
     occurred: OccurrenceSpan,
     thread: Option<&str>,
 ) -> Node {
-    let node = base(key, summary, at, mneme_core::CaptureRequestCodec::EpisodeV1);
+    let init = base_init(key, summary, at, mneme_core::CaptureRequestCodec::EpisodeV1);
     let facet = EpisodeFacet::initial(
-        node.id(),
+        init.id,
         occurred,
         thread.map(|s| EpisodeThread::new(s).unwrap()),
         time(at),
     )
     .unwrap();
-    node.with_episode(facet).unwrap()
+    Node::new_episode(init, facet).unwrap()
 }
 fn revision(
     key: &str,
@@ -70,9 +77,11 @@ fn revision(
         EpisodeRevisionReason::new("Corrected the account").unwrap(),
     )
     .unwrap();
-    base(key, summary, at, mneme_core::CaptureRequestCodec::EpisodeV1)
-        .with_episode(facet)
-        .unwrap()
+    Node::new_episode(
+        base_init(key, summary, at, mneme_core::CaptureRequestCodec::EpisodeV1),
+        facet,
+    )
+    .unwrap()
 }
 async fn append(store: &CozoStore, node: &Node) {
     let expectation = node.episode().unwrap().revises().map_or(
@@ -547,19 +556,20 @@ fn linked_recorded_in(node: Node, session: &str) -> Node {
         source.request_codec(),
     )
     .unwrap();
-    Node::try_new(
-        node.id(),
-        node.summary(),
-        node.body().clone(),
-        node.tags(),
-        Provenance::External { source },
-        node.stability(),
-        node.confidence(),
-        node.status(),
-        node.created(),
+    Node::new_episode(
+        NodeInit {
+            id: node.id(),
+            summary: NodeSummary::new(node.summary()).unwrap(),
+            body: node.body().clone(),
+            tags: BoundedTagSet::try_from_iter(node.tags()).unwrap(),
+            provenance: Provenance::External { source },
+            stability: Stability::new(node.stability()).unwrap(),
+            confidence: Confidence::new(node.confidence()).unwrap(),
+            status: node.status(),
+            created: node.created(),
+        },
+        node.episode().unwrap().clone(),
     )
-    .unwrap()
-    .with_episode(node.episode().unwrap().clone())
     .unwrap()
 }
 

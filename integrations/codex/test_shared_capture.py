@@ -152,6 +152,23 @@ class SharedLifecycleTests(unittest.TestCase):
                        "source_host": "claude_code", "assessor": "claude_code",
                        "reader_model": "claude-sonnet-4-6", "recall_mode": "off"}
 
+    def test_shared_observation_preserves_each_host_contract(self):
+        admission, delivery, observed = object(), object(), object()
+        limits = jobs.Limits(scan_bytes=256 * 1024, events=512)
+        common = {"limits": limits, "delivery": delivery}
+        snapshot_options = {"stop_receipt": object(), "boundary_receipt": object(),
+                            "snapshot": object(), "allow_partial": True}
+        for config, module, expected in (
+            (self.codex, "turn_observer", common),
+            (self.claude, "claude_observer", {**common, **snapshot_options}),
+        ):
+            with self.subTest(host=module), patch(
+                    module + ".observe_source_turn", autospec=True, return_value=observed) as observe:
+                result = capture_source.observe(config, admission, **common, **snapshot_options)
+                self.assertIs(result, observed)
+                observe.assert_called_once_with(admission, **expected)
+                self.assertIs(observe.call_args.kwargs["limits"], limits)
+
     def test_host_state_schema_and_namespace_never_alias_codex(self):
         self.assertNotEqual(jobs._path(self.codex, "same"), jobs._path(self.claude, "same"))
         self.assertNotEqual(reader._paths(self.codex, "same"), reader._paths(self.claude, "same"))

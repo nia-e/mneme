@@ -371,51 +371,26 @@ pub(crate) async fn run_command(
     let database = store.owner.db.clone();
     let expected = store.id.parse::<ulid::Ulid>()?;
     let mut request = remote_commands::prepare(command, &database)?;
-    selected.require_operation(match request.access {
+    selected.require_operation(match request.access() {
         remote_commands::RequestAccess::ReadOnly => Operation::ExplicitRead,
         remote_commands::RequestAccess::Mutation => Operation::ExplicitWrite,
     })?;
     if request
-        .arguments
+        .arguments()
         .get("expected_db_id")
         .is_some_and(|id| id.as_str() != Some(store.id.as_str()))
     {
         return Err("request database identity disagrees with selected store".into());
     }
-    request.arguments["expected_db_id"] = json!(store.id);
-    request.arguments["db"] = json!(name);
+    request.guard_database(expected);
+    request.route_to(&name);
     let client = ConfiguredClient::for_explicit(snapshot, &name).map_err(|e| e.to_string())?;
-    let outcome = client.call(&name, request.tool, request.arguments).await;
+    let tool = request.tool();
+    let (arguments, response_check) = request.into_submission()?;
+    let outcome = client.call(&name, tool, arguments).await;
     client.close().await;
     let result = outcome.map_err(|e| e.to_string())?;
-    if let Some(save) = &request.save {
-        save.verify_write_receipt_json(&result)
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(prepared) = &request.concern {
-        prepared
-            .request
-            .validate_routed_response_json(&result, &database, Some(expected))
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(prepared) = &request.retag {
-        prepared
-            .request
-            .validate_routed_response_json(&result, &database, Some(expected))
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(prepared) = &request.edit_body {
-        prepared
-            .request
-            .validate_routed_response_json(&result, &database, Some(expected))
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(prepared) = &request.edit_summary {
-        prepared
-            .request
-            .validate_routed_response_json(&result, &database, Some(expected))
-            .map_err(|e| e.to_string())?;
-    }
+    response_check.verify_configured(&result, &database, expected)?;
     remote_commands::render(command, &result, json_output)
 }
 

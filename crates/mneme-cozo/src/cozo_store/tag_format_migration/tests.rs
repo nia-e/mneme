@@ -1,8 +1,8 @@
 use super::*;
 use mneme_core::ports::EpisodeStore;
 use mneme_core::{
-    BoundedTagSet, CaptureRequestCodec, CaptureSource, EpisodeCommit, EpisodeFacet, EpisodeTime,
-    EpisodeWriteExpectation, OccurrenceSpan,
+    BoundedTagSet, CaptureRequestCodec, CaptureSource, Confidence, EpisodeCommit, EpisodeFacet,
+    EpisodeTime, EpisodeWriteExpectation, NodeInit, NodeSummary, OccurrenceSpan, Stability,
 };
 use std::process::Command;
 
@@ -25,7 +25,7 @@ async fn fixture() -> Fixture {
     let path = dir.join("memory.db");
     let store = CozoStore::open(path.to_str().unwrap(), 4).unwrap();
     let mut target = crate::touchstone_tests::target(NodeId(Ulid::new()), "historical target");
-    target.set_status(NodeStatus::Archived);
+    target.set_status(NodeStatus::Archived).unwrap();
     store.put_node(&target).await.unwrap();
     store
         .upsert(target.id(), &[1.0, 0.0, 0.0, 0.0])
@@ -46,26 +46,28 @@ async fn fixture() -> Fixture {
         CaptureRequestCodec::EpisodeV1,
     )
     .unwrap();
-    let episode = Node::try_new(
-        source.node_id(),
-        "immutable edition",
-        mneme_core::BodyRef::new("inline://edition").unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        1,
-    )
-    .unwrap();
     let facet = EpisodeFacet::initial(
-        episode.id(),
+        source.node_id(),
         OccurrenceSpan::Unknown,
         None,
-        EpisodeTime::new(episode.created()).unwrap(),
+        EpisodeTime::new(1).unwrap(),
     )
     .unwrap();
-    let episode = episode.with_episode(facet).unwrap();
+    let episode = Node::new_episode(
+        NodeInit {
+            id: source.node_id(),
+            summary: NodeSummary::new("immutable edition").unwrap(),
+            body: mneme_core::BodyRef::new("inline://edition").unwrap(),
+            tags: BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+            provenance: Provenance::External { source },
+            stability: Stability::new(0.5).unwrap(),
+            confidence: Confidence::new(0.5).unwrap(),
+            status: NodeStatus::Active,
+            created: 1,
+        },
+        facet,
+    )
+    .unwrap();
     store
         .commit_episode(EpisodeCommit {
             node: &episode,
@@ -83,7 +85,9 @@ async fn fixture() -> Fixture {
         (&episode, vec!["C++", "Core"]),
     ] {
         let mut predecessor = node.clone();
-        predecessor.replace_tags(BoundedTagSet::try_from_iter(tags).unwrap());
+        predecessor
+            .replace_tags(BoundedTagSet::try_from_iter(tags).unwrap())
+            .unwrap();
         let tx = store.db.multi_transaction(true);
         tx_run(
             &tx,
@@ -207,7 +211,7 @@ async fn tag_format_migration_preserves_witnesses_and_indexes_only_semantics() {
             .iter()
             .find(|old| old.id() == node.id())
             .unwrap();
-        node.replace_tags(original.tag_set().clone());
+        node.replace_tags(original.tag_set().clone()).unwrap();
     }
     assert_eq!(restored.canonical_value().unwrap(), before);
     let after = actual.canonical_value().unwrap();
@@ -351,7 +355,9 @@ async fn tag_format_migration_fences_zero_rename_store_and_raw_writes() {
     let path = dir.canonicalize().unwrap().join("memory.db");
     let store = CozoStore::open(path.to_str().unwrap(), 4).unwrap();
     let mut invalid = crate::touchstone_tests::target(NodeId(Ulid::new()), "raw caller");
-    invalid.replace_tags(BoundedTagSet::try_from_iter(["Uppercase"]).unwrap());
+    invalid
+        .replace_tags(BoundedTagSet::try_from_iter(["Uppercase"]).unwrap())
+        .unwrap();
     assert!(store.put_node(&invalid).await.is_err());
     store
         .put_meta(

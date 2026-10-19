@@ -112,6 +112,25 @@ def delivered(packet, *, identifier="memory", tag="hooks.additional_context", tu
                META: {"turn_id": turn, "content_item_kinds": [tag]}})
 
 
+def concern_row(a="1" * 26, b="2" * 26, *, kind="disagreement", finding=None):
+    return {"notice": {"binding": {"key": {"lo": a, "hi": b, "kind": kind},
+                    "endpoints": [{"id": a, "meaning": "a" * 64}, {"id": b, "meaning": "b" * 64}]},
+            "concern": "The advice differs", "missing_fact": "Which scope applies?"}, "finding": finding}
+
+
+def episode_display_card():
+    return {"id": "1" * 26, "kind": "episode", "summary": "Earlier repair attempt",
+            "status": "active", "source": "codex:later-recap", "fingerprint": "a" * 64,
+            "episode_id": "0" * 26, "edition_id": "1" * 26, "revision": 1,
+            "current_edition_id": "2" * 26, "occurred": {"kind": "unknown"},
+            "recorded_at": 15, "edition_recorded_at": 20, "thread": None,
+            "recording_session": "opaque recorder/session",
+            "occurrence_contexts": [{"namespace": "session", "key": "pi", "label": "Earlier work"}],
+            "origins": [{"kind": "reference", "anchor": {"kind": "semantic", "node_id": "3" * 26},
+                         "from": "3" * 26, "to": "1" * 26,
+                         "edge_kind": "Associative", "body_anchor": None}]}
+
+
 def encoded(rows):
     return b"".join(json.dumps(value, ensure_ascii=False).encode("utf-8") + b"\n"
                     for value in rows)

@@ -17,7 +17,7 @@
 //! store and deterministic lexical embedder; `migrate` converts a current v6
 //! normalized-tag JSON snapshot to normalized TouchstonesV1 SQLite.
 
-use mneme_app::query::SummaryMaxBytes;
+use mneme_app::query::{SummaryMaxBytes, present_query_hit};
 use std::io::Write;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ use mneme_engine::{
 };
 use mneme_present::{
     BodyBudget, LaneBudgets, LaneLimit, PackPlan, PresentationBudget, QueryBody, QueryEnvelope,
-    QueryHit, QueryNodeStatus, RankEvidence, RetrievalLane, RetrievalMetadata,
+    QueryHit, RetrievalLane, RetrievalMetadata,
 };
 
 // MemStore (the JSON snapshot backend) is always available, so even a cozo
@@ -1044,118 +1044,22 @@ async fn main() -> Result<(), AnyErr> {
                 return Err(error);
             }
         }
-        if let Some(save) = &request.save {
-            let kind = save.kind().as_str();
-            let has_links = request
-                .arguments
-                .get("links")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|links| !links.is_empty());
-            if !client.supports_save_kind(kind) || (has_links && !client.supports_save_links(kind))
-            {
-                client.close().await;
-                return Err("remote save is unavailable: the server does not advertise the requested canonical SAVE contract; use a SAVE-capable server (no capture/ingest fallback was attempted)".into());
-            }
-        }
-        if request.edit_body.is_some() && !client.supports_edit_body() {
+        if let Err(error) = request.check_catalog(&client) {
             client.close().await;
-            return Err("remote edit-body requires a server advertising the checked edit_body contract; no fallback attempted".into());
+            return Err(error);
         }
-        if request.edit_summary.is_some() && !client.supports_edit_summary() {
-            client.close().await;
-            return Err("remote edit-summary requires a server advertising the checked edit_summary contract; no fallback attempted".into());
-        }
-        if let Some(retag) = &request.retag {
-            if !client.supports_retag() {
-                client.close().await;
-                return Err("remote retag requires a server advertising the complete checked retag contract; no fallback attempted".into());
-            }
-            if retag.request.requires_content_guards() && !client.supports_retag_content_guards() {
-                client.close().await;
-                return Err("remote retag content guards are unavailable on this owner; update the owner build. No unguarded fallback was attempted".into());
-            }
-        }
-        if let Some(concern) = &request.concern {
-            if !client.supports_concern_action(concern.request.action()) {
-                client.close().await;
-                return Err("remote concern requires a server advertising the checked concern contract; no fallback attempted".into());
-            }
-        }
-        if request.tool == "query"
-            && request.arguments.get("summary_max_bytes").is_some()
-            && !SummaryMaxBytes::advertised(client.tool_catalog())
-        {
-            client.close().await;
-            return Err("remote query summary_max_bytes is unavailable: update the owner build to advertise the summary bound, or omit --summary-max-bytes; no fallback attempted".into());
-        }
-        if request.requires_capture_links && !client.supports_capture_links() {
-            client.close().await;
-            return Err("remote capture links are unavailable: the server does not advertise a compatible `links` schema; use a server that supports atomic capture links, or omit links".into());
-        }
-        if (request.arguments.get("touchstone").is_some()
-            || (request.tool == "list" && request.arguments["kind"] == "touchstones"))
-            && !remote_touchstone::advertised(client.tool_catalog(), request.tool)
-        {
-            client.close().await;
-            return Err("remote touchstones are unavailable: the server does not advertise the native touchstone schema; no fallback or write attempted".into());
-        }
-        if request.tool == "list"
-            && request.arguments["kind"] == "nodes"
-            && !remote_touchstone::inventory_advertised(client.tool_catalog())
-        {
-            client.close().await;
-            return Err("this MCP owner does not support node inventory yet; update the owner build, not just mnemed. No local database fallback was attempted".into());
-        }
-        if request.tool == "list"
-            && request.arguments["kind"] == "tags"
-            && !client.supports_list_tags()
-        {
-            client.close().await;
-            return Err("this MCP owner does not support tag vocabulary; update the owner build. No local database fallback was attempted".into());
-        }
-        let guarded_edit_expected_db_id = request
-            .arguments
-            .get("expected_db_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::parse::<Ulid>)
-            .transpose()?;
+        let tool = request.tool();
+        let (arguments, response_check) = request.into_submission()?;
         let result = tokio::select! {
-            result = client.call_tool(request.tool, request.arguments) => result,
+            result = client.call_tool(tool, arguments) => result,
             _ = tokio::signal::ctrl_c() => Err("remote operation interrupted; a submitted write may have completed; do not blindly retry".into()),
         };
         client.close().await;
         let result = result.map_err(|error| error.to_string())?;
         if let Some(owner) = &selected.owner {
-            owner.check_result(request.access, &result, &remote.database)?;
+            owner.check_result(response_check.access(), &result, &remote.database)?;
         }
-        if let Some(save) = &request.save {
-            save.verify_write_receipt_json(&result).map_err(|error| -> AnyErr {
-                format!("remote SAVE receipt could not be verified; submitted write outcome is unknown: {error}; do not blindly retry").into()
-            })?;
-            if result["db"].as_str() != Some(remote.database.as_str())
-                || result["db_id"]
-                    .as_str()
-                    .is_none_or(|id| id.parse::<Ulid>().is_err())
-            {
-                return Err("remote SAVE receipt database mismatch; the submitted write outcome is unknown; do not blindly retry".into());
-            }
-        }
-        if let Some(concern) = &request.concern {
-            concern.request.validate_routed_response_json(&result, &remote.database, concern.expected_db_id)
-                .map_err(|error| -> AnyErr { format!("remote concern acknowledgement invalid: {error}; a submitted write may have completed; do not blindly retry").into() })?;
-        }
-        if let Some(retag) = &request.retag {
-            retag.request.validate_routed_response_json(&result, &remote.database, guarded_edit_expected_db_id)
-                .map_err(|error| -> AnyErr { format!("remote retag acknowledgement invalid: {error}; submitted write outcome is unknown; do not blindly retry").into() })?;
-        }
-        if let Some(edit) = &request.edit_body {
-            edit.request.validate_routed_response_json(&result, &remote.database, guarded_edit_expected_db_id)
-                .map_err(|error| -> AnyErr { format!("remote edit-body acknowledgement invalid: {error}; submitted outcome is unknown; inspect before a new intent").into() })?;
-        }
-        if let Some(edit) = &request.edit_summary {
-            edit.request.validate_routed_response_json(&result, &remote.database, guarded_edit_expected_db_id)
-                .map_err(|error| -> AnyErr { format!("remote edit-summary acknowledgement invalid: {error}; submitted outcome is unknown; inspect before a new intent").into() })?;
-        }
+        response_check.verify_remote(&result, &remote.database)?;
         return remote_commands::render(&cli.command, &result, json);
     }
 
@@ -2884,22 +2788,6 @@ async fn cli_query_envelope(
     Ok(QueryEnvelope::new(retrieval, primary)?)
 }
 
-fn query_rank_evidence(evidence: RetrievalEvidence) -> RankEvidence {
-    RankEvidence::new(
-        evidence.dense_rank,
-        evidence.sparse_rank,
-        evidence.graph_rank,
-        evidence.rerank_rank,
-    )
-}
-
-fn query_node_status(status: NodeStatus) -> QueryNodeStatus {
-    match status {
-        NodeStatus::Active => QueryNodeStatus::Active,
-        NodeStatus::Archived => QueryNodeStatus::Archived,
-    }
-}
-
 async fn cli_query_hit(
     mem: &Memory,
     hit: RetrievalHit,
@@ -2924,17 +2812,7 @@ async fn cli_query_hit(
             body.next_offset,
         )?
     };
-    let (summary, summary_truncated) = summary_limit.prefix(hit.node.summary());
-    Ok(QueryHit::new(
-        hit.node.id(),
-        hit.node.created(),
-        hit.lane_rank,
-        query_rank_evidence(hit.evidence),
-        query_node_status(hit.node.status()),
-        summary,
-        summary_truncated,
-        body,
-    ))
+    Ok(present_query_hit(&hit, summary_limit, body))
 }
 
 fn partial_seed_warning(
@@ -3772,7 +3650,7 @@ mod telemetry_render_tests {
         assert_eq!(current["grounded_use_count"], 1);
         assert!(current.get("candidate_use_count").is_none());
 
-        node.set_status(NodeStatus::Active);
+        node.set_status(NodeStatus::Active).unwrap();
         let active = node_json(&node);
         assert!(active.get("candidate_use_count").is_none());
         assert_eq!(active["grounded_use_count"], 1);
@@ -4404,8 +4282,9 @@ mod embedding_identity_tests {
     async fn all_node_rebuild_includes_archived_semantics_and_historical_episode_editions() {
         use mneme_core::ports::EpisodeStore;
         use mneme_core::{
-            CaptureRequestCodec, CaptureSource, EpisodeCommit, EpisodeFacet, EpisodeRevisionReason,
-            EpisodeTime, EpisodeWriteExpectation, OccurrenceSpan,
+            BoundedTagSet, CaptureRequestCodec, CaptureSource, Confidence, EpisodeCommit,
+            EpisodeFacet, EpisodeRevisionReason, EpisodeTime, EpisodeWriteExpectation, NodeInit,
+            NodeSummary, OccurrenceSpan, Stability,
         };
         let source = MemStore::new(8);
         let mut archived = Node::try_new(
@@ -4420,9 +4299,9 @@ mod embedding_identity_tests {
             1,
         )
         .unwrap();
-        archived.set_status(NodeStatus::Archived);
+        archived.set_status(NodeStatus::Archived).unwrap();
         source.put_node(&archived).await.unwrap();
-        let episode = |key: &str, summary: &str, now: u128| {
+        let episode_init = |key: &str, summary: &str, now: u128| {
             let proof = CaptureSource::new_with_codec(
                 "reembed-test",
                 key,
@@ -4433,32 +4312,31 @@ mod embedding_identity_tests {
                 CaptureRequestCodec::EpisodeV1,
             )
             .unwrap();
-            Node::try_new(
-                proof.node_id(),
-                summary,
-                BodyRef::new(format!("fs://{key}")).unwrap(),
-                ["history"],
-                Provenance::External { source: proof },
-                0.5,
-                0.5,
-                NodeStatus::Active,
-                now,
-            )
-            .unwrap()
+            NodeInit {
+                id: proof.node_id(),
+                summary: NodeSummary::new(summary).unwrap(),
+                body: BodyRef::new(format!("fs://{key}")).unwrap(),
+                tags: BoundedTagSet::try_from_iter(["history"]).unwrap(),
+                provenance: Provenance::External { source: proof },
+                stability: Stability::new(0.5).unwrap(),
+                confidence: Confidence::new(0.5).unwrap(),
+                status: NodeStatus::Active,
+                created: now,
+            }
         };
-        let initial = episode("initial", "first episode edition", 2);
-        let initial_id = initial.id();
-        let initial = initial
-            .with_episode(
-                EpisodeFacet::initial(
-                    initial_id,
-                    OccurrenceSpan::Unknown,
-                    None,
-                    EpisodeTime::new(2).unwrap(),
-                )
-                .unwrap(),
+        let initial_init = episode_init("initial", "first episode edition", 2);
+        let initial_id = initial_init.id;
+        let initial = Node::new_episode(
+            initial_init,
+            EpisodeFacet::initial(
+                initial_id,
+                OccurrenceSpan::Unknown,
+                None,
+                EpisodeTime::new(2).unwrap(),
             )
-            .unwrap();
+            .unwrap(),
+        )
+        .unwrap();
         source
             .commit_episode(EpisodeCommit {
                 node: &initial,
@@ -4468,21 +4346,20 @@ mod embedding_identity_tests {
             })
             .await
             .unwrap();
-        let revised = episode("revised", "corrected episode edition", 3);
-        let revised = revised
-            .with_episode(
-                EpisodeFacet::revised(
-                    initial_id.into(),
-                    initial_id,
-                    initial.episode().unwrap().revision().next().unwrap(),
-                    OccurrenceSpan::Unknown,
-                    None,
-                    initial.episode().unwrap().recorded_at(),
-                    EpisodeRevisionReason::new("Correction after a second look").unwrap(),
-                )
-                .unwrap(),
+        let revised = Node::new_episode(
+            episode_init("revised", "corrected episode edition", 3),
+            EpisodeFacet::revised(
+                initial_id.into(),
+                initial_id,
+                initial.episode().unwrap().revision().next().unwrap(),
+                OccurrenceSpan::Unknown,
+                None,
+                initial.episode().unwrap().recorded_at(),
+                EpisodeRevisionReason::new("Correction after a second look").unwrap(),
             )
-            .unwrap();
+            .unwrap(),
+        )
+        .unwrap();
         source
             .commit_episode(EpisodeCommit {
                 node: &revised,
@@ -4603,7 +4480,7 @@ mod embedding_identity_tests {
             )
             .unwrap();
             if index + 1 == count {
-                node.set_status(NodeStatus::Archived);
+                node.set_status(NodeStatus::Archived).unwrap();
             }
             store.put_node(&node).await.unwrap();
             let mut vector = vec![0.0; dim];

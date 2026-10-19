@@ -40,7 +40,7 @@ impl CozoStore {
     pub async fn export_single_graph_predecessor(
         path: &Path,
         lease: &StoreLease,
-    ) -> Result<crate::StoreExport> {
+    ) -> Result<crate::snapshot::StoreExport> {
         lease.require_guards(path).map_err(backend)?;
         let original = source_digest(path)?;
         let result = export_copy(path, lease, UpgradeTarget::SingleGraphV1).await;
@@ -65,7 +65,7 @@ impl CozoStore {
     pub async fn export_concern_predecessor(
         path: &Path,
         lease: &StoreLease,
-    ) -> Result<crate::StoreExport> {
+    ) -> Result<crate::snapshot::StoreExport> {
         lease.require_guards(path).map_err(backend)?;
         let original = source_digest(path)?;
         let result = export_copy(path, lease, UpgradeTarget::ConcernV1).await;
@@ -90,7 +90,7 @@ impl CozoStore {
     pub async fn export_episode_context_predecessor(
         path: &Path,
         lease: &StoreLease,
-    ) -> Result<crate::StoreExport> {
+    ) -> Result<crate::snapshot::StoreExport> {
         lease.require_guards(path).map_err(backend)?;
         let original = source_digest(path)?;
         let result = export_copy(path, lease, UpgradeTarget::EpisodeContextV2).await;
@@ -115,7 +115,7 @@ impl CozoStore {
     pub async fn export_touchstones_predecessor(
         path: &Path,
         lease: &StoreLease,
-    ) -> Result<crate::StoreExport> {
+    ) -> Result<crate::snapshot::StoreExport> {
         lease.require_guards(path).map_err(backend)?;
         let original = source_digest(path)?;
         let result = export_copy(path, lease, UpgradeTarget::TouchstonesV1).await;
@@ -205,7 +205,7 @@ async fn export_copy(
     path: &Path,
     lease: &StoreLease,
     target: UpgradeTarget,
-) -> Result<crate::StoreExport> {
+) -> Result<crate::snapshot::StoreExport> {
     let (original_permit, policy) = admit(path, target)?;
     let episodic = policy == ManagedSnapshotPolicy::EpisodeV1;
     let single_graph = policy == ManagedSnapshotPolicy::SingleGraphV1;
@@ -313,14 +313,14 @@ async fn export_copy(
                     let raw: serde_json::Value = serde_json::from_str(data)
                         .map_err(|error| Error::InvalidInput(error.to_string()))?;
                     if !context {
-                        crate::validate_pre_context_node_value(&raw)?;
+                        crate::snapshot::validate_pre_context_node_value(&raw)?;
                     }
                     let (node, old_status) = if single_graph || concern || context {
                         let node = decode_canonical_node_row(row)?;
                         let status = status_str(node.status());
                         (node, status)
                     } else {
-                        crate::decode_legacy_node_v1(data)?
+                        crate::snapshot::decode_legacy_node_v1(data)?
                     };
                     if node.id().0.to_string() != id || want_str(&row[2])? != old_status {
                         return Err(Error::InvalidInput(
@@ -447,30 +447,28 @@ mod tests {
         let mut node = semantic(source(CaptureRequestCodec::CaptureV1));
         if episodic {
             let capture = source(CaptureRequestCodec::EpisodeV1);
-            node = Node::try_new(
-                capture.node_id(),
-                "A historical episode",
-                BodyRef::new("inline://source-body").unwrap(),
-                ["old"],
-                Provenance::External { source: capture },
-                0.5,
-                0.5,
-                NodeStatus::Active,
-                42,
+            let episode_id = capture.node_id();
+            node = Node::new_episode(
+                mneme_core::NodeInit {
+                    id: episode_id,
+                    summary: mneme_core::NodeSummary::new("A historical episode").unwrap(),
+                    body: BodyRef::new("inline://source-body").unwrap(),
+                    tags: mneme_core::BoundedTagSet::try_from_iter(["old"]).unwrap(),
+                    provenance: Provenance::External { source: capture },
+                    stability: mneme_core::Stability::new(0.5).unwrap(),
+                    confidence: mneme_core::Confidence::new(0.5).unwrap(),
+                    status: NodeStatus::Active,
+                    created: 42,
+                },
+                EpisodeFacet::initial(
+                    episode_id,
+                    OccurrenceSpan::Unknown,
+                    None,
+                    EpisodeTime::new(42).unwrap(),
+                )
+                .unwrap(),
             )
             .unwrap();
-            let episode_id = node.id();
-            node = node
-                .with_episode(
-                    EpisodeFacet::initial(
-                        episode_id,
-                        OccurrenceSpan::Unknown,
-                        None,
-                        EpisodeTime::new(42).unwrap(),
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
         }
         let mut json = serde_json::to_value(&node).unwrap();
         json["provenance"]["External"]["source"]
@@ -846,30 +844,31 @@ mod retained_fixture_qualification {
             mneme_core::CaptureRequestCodec::EpisodeV1,
         )
         .unwrap();
-        let node = Node::try_new(
-            capture.node_id(),
-            "An old account with unknown original context",
-            BodyRef::new("inline://old-edition").unwrap(),
-            ["scene"],
-            Provenance::External { source: capture },
-            0.5,
-            0.5,
-            NodeStatus::Active,
-            10,
-        )
-        .unwrap();
-        let episode_id = node.id();
-        let node = node
-            .with_episode(
-                EpisodeFacet::initial(
-                    episode_id,
-                    OccurrenceSpan::Unknown,
-                    None,
-                    EpisodeTime::new(10).unwrap(),
+        let episode_id = capture.node_id();
+        let node = Node::new_episode(
+            mneme_core::NodeInit {
+                id: episode_id,
+                summary: mneme_core::NodeSummary::new(
+                    "An old account with unknown original context",
                 )
                 .unwrap(),
+                body: BodyRef::new("inline://old-edition").unwrap(),
+                tags: mneme_core::BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+                provenance: Provenance::External { source: capture },
+                stability: mneme_core::Stability::new(0.5).unwrap(),
+                confidence: mneme_core::Confidence::new(0.5).unwrap(),
+                status: NodeStatus::Active,
+                created: 10,
+            },
+            EpisodeFacet::initial(
+                episode_id,
+                OccurrenceSpan::Unknown,
+                None,
+                EpisodeTime::new(10).unwrap(),
             )
-            .unwrap();
+            .unwrap(),
+        )
+        .unwrap();
         source
             .commit_episode(EpisodeCommit {
                 node: &node,

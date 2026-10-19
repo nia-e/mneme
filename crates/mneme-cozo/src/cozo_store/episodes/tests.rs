@@ -1,11 +1,13 @@
 use super::*;
-use mneme_core::{BodyRef, CaptureSource};
+use mneme_core::{
+    BodyRef, BoundedTagSet, CaptureSource, Confidence, NodeInit, NodeSummary, Stability,
+};
 
 pub(super) fn episode_kernel_store() -> CozoStore {
     CozoStore::new(4).unwrap()
 }
 
-pub(super) fn episode_node(key: &str, summary: &str, at: Timestamp) -> Node {
+fn episode_init(key: &str, summary: &str, at: Timestamp) -> NodeInit {
     let source = CaptureSource::new_with_codec(
         "episode-test",
         key,
@@ -16,26 +18,29 @@ pub(super) fn episode_node(key: &str, summary: &str, at: Timestamp) -> Node {
         mneme_core::CaptureRequestCodec::EpisodeV1,
     )
     .unwrap();
-    let node = Node::try_new(
-        source.node_id(),
-        summary,
-        BodyRef::new("inline://synthetic").unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        at,
-    )
-    .unwrap();
+    NodeInit {
+        id: source.node_id(),
+        summary: NodeSummary::new(summary).unwrap(),
+        body: BodyRef::new("inline://synthetic").unwrap(),
+        tags: BoundedTagSet::try_from_iter(["scene"]).unwrap(),
+        provenance: Provenance::External { source },
+        stability: Stability::new(0.5).unwrap(),
+        confidence: Confidence::new(0.5).unwrap(),
+        status: NodeStatus::Active,
+        created: at,
+    }
+}
+
+pub(super) fn episode_node(key: &str, summary: &str, at: Timestamp) -> Node {
+    let init = episode_init(key, summary, at);
     let facet = EpisodeFacet::initial(
-        node.id(),
+        init.id,
         OccurrenceSpan::Unknown,
         None,
         EpisodeTime::new(at).unwrap(),
     )
     .unwrap();
-    node.with_episode(facet).unwrap()
+    Node::new_episode(init, facet).unwrap()
 }
 
 const EMBEDDING: [f32; 4] = [1., 0., 0., 0.];
@@ -51,7 +56,6 @@ async fn append(store: &CozoStore, node: &Node) -> Result<EpisodeCommitOutcome> 
 }
 fn revision(prior: &Node, key: &str, summary: &str) -> Node {
     let root = prior.episode().unwrap();
-    let mut node = episode_node(key, summary, prior.created() + 1);
     let facet = EpisodeFacet::revised(
         root.root(),
         prior.id(),
@@ -62,21 +66,7 @@ fn revision(prior: &Node, key: &str, summary: &str) -> Node {
         EpisodeRevisionReason::new("Correction after checking the actual experiment").unwrap(),
     )
     .unwrap();
-    // Rebuild from semantic initialization because with_episode rejects replacing a facet.
-    let source = episode_source(&node).unwrap().clone();
-    node = Node::try_new(
-        source.node_id(),
-        summary,
-        BodyRef::new("inline://synthetic").unwrap(),
-        ["scene"],
-        Provenance::External { source },
-        0.5,
-        0.5,
-        NodeStatus::Active,
-        prior.created() + 1,
-    )
-    .unwrap();
-    node.with_episode(facet).unwrap()
+    Node::new_episode(episode_init(key, summary, prior.created() + 1), facet).unwrap()
 }
 
 #[tokio::test]

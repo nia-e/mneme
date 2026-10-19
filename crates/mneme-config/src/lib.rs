@@ -3,8 +3,15 @@
 
 mod declarative_file;
 mod legacy_workspace;
+mod privacy;
 mod selection;
+mod workspace;
 pub use selection::*;
+pub use workspace::{
+    SelectionRequest, SelectionRequestMode, default_user_path, discover_workspace, select_workspace,
+};
+
+use privacy::PrivacyProfile;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -456,13 +463,8 @@ impl Config {
                 return Err(error("project overlay duplicates a user library name"));
             }
         }
-        if overlay.workspace.profile.as_ref().is_some_and(|p| {
-            self.workspace.profile.as_ref().is_none_or(|old| {
-                crate::selection::profile_rank(p) > crate::selection::profile_rank(old)
-            })
-        }) {
-            self.workspace.profile = overlay.workspace.profile;
-        }
+        self.workspace.profile =
+            privacy::narrow_unvalidated_profiles(self.workspace.profile, overlay.workspace.profile);
         fn narrow(old: Option<Vec<String>>, new: Option<Vec<String>>) -> Option<Vec<String>> {
             match (old, new) {
                 (Some(old), Some(new)) => {
@@ -768,10 +770,7 @@ fn validate_path_lists(lists: &[&[PathBuf]]) -> Result<()> {
     Ok(())
 }
 pub(crate) fn validate_profile(profile: &str) -> Result<()> {
-    if !matches!(profile, "default" | "private" | "isolated") {
-        return Err(error("profile must be default, private or isolated"));
-    }
-    Ok(())
+    PrivacyProfile::parse(profile).map(|_| ())
 }
 fn validate_profiles(values: &[String]) -> Result<()> {
     unique_names(values)?;

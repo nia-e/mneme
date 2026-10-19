@@ -13,7 +13,8 @@ import turn_observer as observer
 from fixture_model_dates import epoch_second_display
 from fixture_source_turn import (
     META, PROMPT, SESSION, TURN, SourceTurnFixture, assistant, call, complete_turn,
-    context, delivered, delivery_packet, encoded, event, header, opening, output,
+    concern_row, context, delivered, delivery_packet, encoded, episode_display_card,
+    event, header, opening, output,
     refresh_delivery_packet, row, sha, start, user,
 )
 
@@ -1114,12 +1115,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def concern_row(a="1" * 26, b="2" * 26, *, kind="disagreement", finding=None):
-    return {"notice": {"binding": {"key": {"lo": a, "hi": b, "kind": kind},
-                    "endpoints": [{"id": a, "meaning": "a" * 64}, {"id": b, "meaning": "b" * 64}]},
-            "concern": "The advice differs", "missing_fact": "Which scope applies?"}, "finding": finding}
-
-
 class ConcernDeliveryTests(unittest.TestCase):
     def packet(self):
         packet = delivery_packet('Memory cards. Exact caveat 🐙 "escaped".')
@@ -1160,27 +1155,15 @@ class ConcernDeliveryTests(unittest.TestCase):
 
 
 class EpisodeDisplayBindingTests(unittest.TestCase):
-    def card(self):
-        return {"id": "1" * 26, "kind": "episode", "summary": "Earlier repair attempt",
-                "status": "active", "source": "codex:later-recap", "fingerprint": "a" * 64,
-                "episode_id": "0" * 26, "edition_id": "1" * 26, "revision": 1,
-                "current_edition_id": "2" * 26, "occurred": {"kind": "unknown"},
-                "recorded_at": 15, "edition_recorded_at": 20, "thread": None,
-                "recording_session": "opaque recorder/session",
-                "occurrence_contexts": [{"namespace": "session", "key": "pi", "label": "Earlier work"}],
-                "origins": [{"kind": "reference", "anchor": {"kind": "semantic", "node_id": "3" * 26},
-                             "from": "3" * 26, "to": "1" * 26,
-                             "edge_kind": "Associative", "body_anchor": None}]}
-
     def packet(self, card=None):
         import hooks
-        packed = hooks._pack_async_delivery([self.card() if card is None else card], SESSION, TURN, "0" * 26)
+        packed = hooks._pack_async_delivery([episode_display_card() if card is None else card], SESSION, TURN, "0" * 26)
         return {"schema": observer.DELIVERY_SCHEMA, "session_id": SESSION, "turn_id": TURN,
                 "rendered_text": packed["context"], "rendered_sha256": sha(packed["context"].encode()),
                 "displayed": packed["displayed"], "concerns": []}
 
     def test_exact_historical_view_and_stable_account_are_distinct(self):
-        card = self.card()
+        card = episode_display_card()
         packet = self.packet(card)
         copied = observer.validate_delivery_packet(packet)
         shown = copied["displayed"][0]

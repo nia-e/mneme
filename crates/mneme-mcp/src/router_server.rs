@@ -370,11 +370,10 @@ impl Route {
                     .into(),
             );
         }
-        if prepared
-            .prepared_retag
-            .as_ref()
-            .is_some_and(|request| request.inner.requires_content_guards())
-            && !self.request_support.retag_content_guards
+        if matches!(
+            &prepared.operation,
+            crate::AdmittedOperation::Retag(request) if request.inner.requires_content_guards()
+        ) && !self.request_support.retag_content_guards
         {
             return Err(
                 "retag content guards are not advertised for this database; no operation was sent"
@@ -431,18 +430,18 @@ impl Route {
                 );
             }
         }
-        let checked_retag = prepared
-            .prepared_retag
-            .as_ref()
-            .map(|request| request.inner.clone());
-        let checked_body_edit = prepared
-            .prepared_body_edit
-            .as_ref()
-            .map(|request| request.inner.clone());
-        let checked_summary_edit = prepared
-            .prepared_summary_edit
-            .as_ref()
-            .map(|request| request.inner.clone());
+        let checked_retag = match &prepared.operation {
+            crate::AdmittedOperation::Retag(request) => Some(request.inner.clone()),
+            _ => None,
+        };
+        let checked_body_edit = match &prepared.operation {
+            crate::AdmittedOperation::EditBody(request) => Some(request.inner.clone()),
+            _ => None,
+        };
+        let checked_summary_edit = match &prepared.operation {
+            crate::AdmittedOperation::EditSummary(request) => Some(request.inner.clone()),
+            _ => None,
+        };
         let capture = replica.as_ref().map(snapshot_metadata);
         let outcome: Result<Value, AnyErr> = async {
         args["db"] = json!(self.native_db(replica.as_ref()));

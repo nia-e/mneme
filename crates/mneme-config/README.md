@@ -5,6 +5,12 @@ opens, ranking or capture inference. CLI, MCP and hooks consume the same typed
 selection. A configured-but-unavailable owner stays configured; it never becomes
 miscellaneous work.
 
+Internally, `selection` owns admission, activation and operation eligibility;
+`workspace` owns bounded filesystem collection, discovery and frozen-request
+revalidation. The private privacy ordering and store-disposition types keep those
+policy decisions coherent without changing the public configuration/snapshot DTOs.
+A digest witnesses metadata continuity; it does not mint owner-side authority.
+
 The normal user file is `$XDG_CONFIG_HOME/mneme/memory.toml`, or
 `~/.config/mneme/memory.toml` on Unix. Windows falls back to
 `%APPDATA%/mneme/memory.toml`, then `%USERPROFILE%/AppData/Roaming/mneme/memory.toml`.

@@ -50,7 +50,7 @@ fn node_json_names_exposure_and_grounded_use_explicitly() {
     assert_eq!(current["grounded_use_count"], 1);
     assert!(current.get("candidate_use_count").is_none());
 
-    node.set_status(mneme_core::NodeStatus::Active);
+    node.set_status(mneme_core::NodeStatus::Active).unwrap();
     let active = node_json(&node);
     assert!(active.get("candidate_use_count").is_none());
     assert_eq!(active["grounded_use_count"], 1);

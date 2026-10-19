@@ -90,14 +90,19 @@ mod tests {
         ])
         .unwrap();
         let request = crate::remote_commands::prepare(&cli.command, "project").unwrap();
-        assert_eq!(request.tool, "edit_body");
+        assert_eq!(request.tool(), "edit_body");
         assert_eq!(
-            request.access,
+            request.access(),
             crate::remote_commands::RequestAccess::Mutation
         );
-        assert_eq!(request.arguments["body"], "replacement");
-        assert_eq!(request.arguments["db"], "project");
-        assert!(request.edit_body.is_some());
+        assert_eq!(request.arguments()["body"], "replacement");
+        assert_eq!(request.arguments()["db"], "project");
+        let (_, response_check) = request.into_submission().unwrap();
+        assert!(
+            response_check
+                .verify_remote(&serde_json::json!({}), "project")
+                .is_err()
+        );
         std::fs::write(&path, [255]).unwrap();
         assert!(crate::remote_commands::prepare(&cli.command, "project").is_err());
         std::fs::write(&path, vec![b'x'; mneme_engine::MAX_CAPTURE_BODY_BYTES + 1]).unwrap();

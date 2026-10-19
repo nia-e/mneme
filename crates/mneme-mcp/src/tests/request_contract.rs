@@ -959,3 +959,98 @@ fn remote_edge_page_limits_fail_closed() {
         MAX_REMOTE_EDGE_PAGE_SIZE
     );
 }
+
+#[tokio::test]
+async fn admission_errors_precede_authority_cold_work_and_checkout() {
+    let registry = Registry {
+        activity: activity::ActivityRing::default(),
+        dbs: BTreeMap::new(),
+    };
+    let sessions = std::sync::Arc::new(Mutex::new(SessionState::default()));
+    let gate = ColdWorkGate::new(Duration::ZERO);
+    let held = gate.admit("held lane").unwrap();
+    let read_only = CapabilityPolicy::new(CapabilityProfile::ReadOnly, false);
+    let id = ulid::Ulid::from(1).to_string();
+    let expected_db_id = ulid::Ulid::from(2).to_string();
+
+    // A later invalid field, denied authority, occupied cold lane, and missing
+    // owner must not mask the first applicable admission failure.
+    for (arguments, expected) in [
+        (
+            json!({"id":"invalid","unexpected":true,"expected_db_id":"invalid"}),
+            "unknown argument `unexpected`",
+        ),
+        (
+            json!({"id":"invalid","expected_db_id":"invalid"}),
+            "missing required argument `db`",
+        ),
+        (
+            json!({"db":"missing","id":"invalid","expected_db_id":"invalid"}),
+            "invalid node id",
+        ),
+        (
+            json!({"db":"missing","id":id,"expected_db_id":"invalid"}),
+            "argument `expected_db_id` must be a canonical 26-byte uppercase ULID",
+        ),
+        (
+            json!({"db":"missing","id":id,"expected_db_id":expected_db_id}),
+            "capability profile",
+        ),
+    ] {
+        let error =
+            call_tool_authorized(&registry, &sessions, &gate, read_only, "forget", &arguments)
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains(expected),
+            "expected {expected:?}, got {error:?}"
+        );
+    }
+
+    let admitted = json!({"db":"missing","id":id,"expected_db_id":expected_db_id});
+    let error = call_tool(&registry, &sessions, &gate, "forget", &admitted)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cold work is busy"), "{error}");
+    drop(held);
+    let error = call_tool(&registry, &sessions, &gate, "forget", &admitted)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown database"), "{error}");
+}
+
+#[cfg(all(not(feature = "fastembed"), not(feature = "cozo")))]
+#[tokio::test]
+async fn retained_episode_admission_still_checks_a_defaulted_owner_name() {
+    let root = std::env::temp_dir().join(format!("mneme-mcp-episode-scope-{}", ulid::Ulid::new()));
+    std::fs::create_dir(&root).unwrap();
+    for (index, name) in [
+        String::new(),
+        " untrimmed ".into(),
+        "control\n".into(),
+        "x".repeat(257),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut state = SessionState::default();
+        let registry =
+            build_registry(vec![(name, root.join(format!("{index}.json")))], &mut state).unwrap();
+        let sessions = std::sync::Arc::new(Mutex::new(state));
+        let gate = ColdWorkGate::new(Duration::ZERO);
+        let arguments = json!({"action":"list","expected_db_id":ulid::Ulid::from(1).to_string()});
+        assert!(ValidatedToolArguments::parse("episode", &arguments).is_ok());
+        let error = call_tool(&registry, &sessions, &gate, "episode", &arguments)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "episode field `db` must be 1..=256 UTF-8 bytes, trimmed, without controls",
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -519,7 +519,7 @@ class ReaderRuntimeTest(unittest.TestCase):
     def test_routed_assessment_changes_only_the_existing_close_call_contract(self):
         from test_recording_contract import observation, statement, memory_marker
         from test_routing_memory import binding, DB, TARGET
-        from test_turn_observer import refresh_delivery_packet
+        from fixture_source_turn import refresh_delivery_packet
         marker = memory_marker()
         marker['packet']['displayed'][0].update(db_id=DB, node_id=TARGET, routing_binding=binding())
         refresh_delivery_packet(marker['packet'])

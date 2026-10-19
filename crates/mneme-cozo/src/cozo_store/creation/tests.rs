@@ -55,11 +55,30 @@ fn assert_no_relations(database: &DbInstance) {
 
 #[test]
 fn request_validation_precedes_every_transaction_mutation() {
-    assert!(validate_request(1, Ulid::from(1_u128)).is_ok());
-    assert!(validate_request(MAX_TAGGED_VECTOR_DIMENSION, Ulid::from(1_u128)).is_ok());
-    assert!(validate_request(0, Ulid::from(1_u128)).is_err());
-    assert!(validate_request(MAX_TAGGED_VECTOR_DIMENSION + 1, Ulid::from(1_u128)).is_err());
-    assert!(validate_request(4, Ulid::nil()).is_err());
+    assert!(validate_request(1, Ulid::from(1_u128), SchemaTarget::StructMap).is_ok());
+    assert!(
+        validate_request(
+            MAX_TAGGED_VECTOR_DIMENSION,
+            Ulid::from(1_u128),
+            SchemaTarget::StructMap
+        )
+        .is_ok()
+    );
+    assert!(validate_request(0, Ulid::from(1_u128), SchemaTarget::StructMap).is_err());
+    assert!(
+        validate_request(
+            MAX_TAGGED_VECTOR_DIMENSION + 1,
+            Ulid::from(1_u128),
+            SchemaTarget::StructMap
+        )
+        .is_err()
+    );
+    assert!(validate_request(4, Ulid::nil(), SchemaTarget::StructMap).is_err());
+    let error = validate_request(0, Ulid::nil(), SchemaTarget::StructMap).unwrap_err();
+    assert!(
+        error.to_string().contains("vector dimension must be"),
+        "{error}"
+    );
 
     let (path, database) = fresh_sqlite("invalid-request");
     assert!(stage_current_schema(&database, 0, database_id()).is_err());
@@ -70,6 +89,131 @@ fn request_validation_precedes_every_transaction_mutation() {
     assert_no_relations(&database);
     drop(database);
     remove_fixture(&path);
+}
+
+#[test]
+fn schema_targets_bind_exact_catalog_generation_and_tag_policy() {
+    use crate::canonical_node_contract::{
+        EPISODE_CONTEXT_META_KEY, EPISODE_CONTEXT_META_VALUE, SINGLE_GRAPH_META_KEY,
+        SINGLE_GRAPH_META_VALUE,
+    };
+
+    let predecessor_node = (CANONICAL_NODE_META_KEY, CANONICAL_NODE_META_VALUE);
+    let single_graph_node = (SINGLE_GRAPH_META_KEY, SINGLE_GRAPH_META_VALUE);
+    let episode_context_node = (EPISODE_CONTEXT_META_KEY, EPISODE_CONTEXT_META_VALUE);
+    let legacy_tags = "canonical_node_tag_membership_v2_f7";
+    let current_tags = "canonical_node_tag_membership_v2_ascii_slug_v1";
+    for (target, catalog, generation, tag_policy, (node_key, node_value)) in [
+        (
+            SchemaTarget::StructMap,
+            CatalogContract::Predecessor,
+            STRUCT_MAP_CATALOG_GENERATION_MARKER,
+            legacy_tags,
+            predecessor_node,
+        ),
+        (
+            SchemaTarget::Capture,
+            CatalogContract::Predecessor,
+            CAPTURE_V1_CATALOG_GENERATION_MARKER,
+            legacy_tags,
+            predecessor_node,
+        ),
+        (
+            SchemaTarget::Episode,
+            CatalogContract::EpisodeV1,
+            EPISODE_V1_CATALOG_GENERATION_MARKER,
+            legacy_tags,
+            predecessor_node,
+        ),
+        (
+            SchemaTarget::SingleGraph,
+            CatalogContract::SingleGraphV1,
+            SINGLE_GRAPH_V1_CATALOG_GENERATION_MARKER,
+            legacy_tags,
+            single_graph_node,
+        ),
+        (
+            SchemaTarget::Concern,
+            CatalogContract::ConcernV1,
+            CONCERN_V1_CATALOG_GENERATION_MARKER,
+            legacy_tags,
+            single_graph_node,
+        ),
+        (
+            SchemaTarget::EpisodeContext,
+            CatalogContract::EpisodeContextV2,
+            EPISODE_CONTEXT_V2_CATALOG_GENERATION_MARKER,
+            legacy_tags,
+            episode_context_node,
+        ),
+        (
+            SchemaTarget::LegacyTouchstones,
+            CatalogContract::TouchstonesV1,
+            TOUCHSTONES_V1_CATALOG_GENERATION_MARKER,
+            legacy_tags,
+            episode_context_node,
+        ),
+        (
+            SchemaTarget::Touchstones,
+            CatalogContract::TouchstonesV1,
+            TOUCHSTONES_V1_CATALOG_GENERATION_MARKER,
+            current_tags,
+            episode_context_node,
+        ),
+    ] {
+        assert_eq!(target.catalog(), catalog, "{target:?}");
+        assert_eq!(target.generation_marker(), generation, "{target:?}");
+        assert_eq!(target.tag_policy(), tag_policy, "{target:?}");
+
+        // Exercise each entry point as well as the closed mapping. In particular,
+        // legacy and normalized touchstones must not become interchangeable.
+        let stage: fn(&DbInstance, usize, DatabaseId) -> Result<()> = match target {
+            SchemaTarget::StructMap => stage_current_schema,
+            SchemaTarget::Capture => stage_capture_schema,
+            SchemaTarget::Episode => stage_episode_schema,
+            SchemaTarget::SingleGraph => stage_single_graph_schema,
+            SchemaTarget::Concern => stage_concern_schema,
+            SchemaTarget::EpisodeContext => stage_episode_context_schema,
+            SchemaTarget::LegacyTouchstones => stage_legacy_touchstones_schema,
+            SchemaTarget::Touchstones => stage_touchstones_schema,
+        };
+        let (path, database) = fresh_sqlite(&format!("target-{target:?}"));
+        stage(&database, 4, database_id()).unwrap();
+        let metadata = database
+            .run_default("?[k, v] := *meta{k, v} :order k")
+            .unwrap();
+        let expected = BTreeMap::from([
+            ("db_id".to_owned(), database_id().to_string()),
+            ("dim".to_owned(), "4".to_owned()),
+            ("max_incident_edges_v1".to_owned(), "1024".to_owned()),
+            (
+                "max_remote_edges_per_source_v1".to_owned(),
+                "256".to_owned(),
+            ),
+            ("lexical_projection_v1".to_owned(), "complete".to_owned()),
+            (node_key.to_owned(), node_value.to_owned()),
+            ("tag_projection_v2".to_owned(), tag_policy.to_owned()),
+            ("vector_projection_v2".to_owned(), generation.to_owned()),
+        ]);
+        assert_eq!(
+            exact_string_map(&metadata, "target metadata").unwrap(),
+            expected,
+            "{target:?}"
+        );
+        let relations = database.run_default("::relations").unwrap();
+        let actual_names = relations
+            .rows
+            .iter()
+            .map(|row| data_as_str(&row[0]).unwrap())
+            .collect::<BTreeSet<_>>();
+        let expected_names = catalog
+            .relations()
+            .map(|relation| relation.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_names, expected_names, "{target:?}");
+        drop(database);
+        remove_fixture(&path);
+    }
 }
 
 #[test]
@@ -465,12 +609,10 @@ fn episode_recognition_refuses_predecessors_and_torn_successors() {
 
 #[test]
 fn episode_schema_rolls_back_each_transaction_boundary_and_retries() {
-    let mut request = validate_request(4, database_id().get()).unwrap();
-    request.catalog = CatalogContract::EpisodeV1;
-    request.generation_marker = EPISODE_V1_CATALOG_GENERATION_MARKER;
+    let request = validate_request(4, database_id().get(), SchemaTarget::Episode).unwrap();
     // Empty preflight, each schema statement, metadata, canonicalization,
     // final marker and three bounded verification reads.
-    let steps = 1 + schema_statements_for(4, request.catalog).len() + 2 + 1 + 3;
+    let steps = 1 + schema_statements_for(4, request.target.catalog()).len() + 2 + 1 + 3;
     for boundary in 1..=steps {
         let (path, database) = fresh_sqlite(&format!("episode-rollback-{boundary}"));
         let error = stage_validated_current_schema(
@@ -615,12 +757,10 @@ fn concern_closed_catalog_refuses_extra_relation_and_missing_incoming_index() {
 
 #[test]
 fn concern_schema_rolls_back_each_transaction_boundary_and_retries() {
-    let mut request = validate_request(4, database_id().get()).unwrap();
-    request.catalog = CatalogContract::ConcernV1;
-    request.generation_marker = CONCERN_V1_CATALOG_GENERATION_MARKER;
+    let request = validate_request(4, database_id().get(), SchemaTarget::Concern).unwrap();
     // Empty preflight, each schema statement, metadata, canonicalization,
     // final marker and three bounded verification reads.
-    let steps = 1 + schema_statements_for(4, request.catalog).len() + 2 + 1 + 3;
+    let steps = 1 + schema_statements_for(4, request.target.catalog()).len() + 2 + 1 + 3;
     for boundary in 1..=steps {
         let (path, database) = fresh_sqlite(&format!("concern-rollback-{boundary}"));
         let error = stage_validated_current_schema(

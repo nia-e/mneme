@@ -10,9 +10,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 import recording_contract as contract
 import recording_jobs as jobs
+import capture_source
 from fixture_recording import DB_ID, OTHER_DB, SESSION, RecordingFixture
 from target_policy import GLOBAL_PREFERENCE_NAMESPACE, GLOBAL_PREFERENCE_TAG
-from turn_observer import observe_source_turn
 
 
 class PreferenceRuntime:
@@ -59,7 +59,8 @@ class GlobalPreferenceRecordingTests(unittest.TestCase, RecordingFixture):
             self.append([source.delivered(delivery, turn="turn-1")])
             self.source_complete()
             jobs.close_turn(self.config, SESSION, "turn-1")
-        return observe_source_turn(jobs._admission(job["admission"]), delivery=delivery)
+        return capture_source.observe(self.config, capture_source.restore(self.config, job["admission"]),
+                                      limits=jobs.Limits(), delivery=delivery)
 
     def answer(self, context, **changes):
         evidence = next(item for item in context.bindings if item.kind == "user_statement")
@@ -71,7 +72,7 @@ class GlobalPreferenceRecordingTests(unittest.TestCase, RecordingFixture):
 
     def test_direct_notice_refuses_child_before_source_or_local_state_work(self):
         for field in ("agent_id", "agent_type"):
-            with self.subTest(field=field), patch("recording_jobs.admit_source_turn") as admission, \
+            with self.subTest(field=field), patch("capture_source.admit") as admission, \
                     patch("recording_jobs._cancel_marker") as marker, patch("recording_jobs._transaction") as transaction:
                 result = jobs.notice(self.config, {**self.event(), field: "child"})
                 self.assertEqual(result, {"outcome": "skipped"})
@@ -107,7 +108,8 @@ class GlobalPreferenceRecordingTests(unittest.TestCase, RecordingFixture):
         self.source_complete()
         jobs.close_turn(self.config, SESSION, "turn-1")
         before = self.path().read_bytes()
-        observed = observe_source_turn(jobs._admission(job["admission"]))
+        observed = capture_source.observe(self.config, capture_source.restore(self.config, job["admission"]),
+                                          limits=jobs.Limits())
         self.assertEqual(observed["status"], "complete", observed)
         self.assertEqual(observed["coverage"]["omissions"]["collaboration_input"], 1)
         prompt, context = contract.prepare(observed, global_preferences_enabled=True)
