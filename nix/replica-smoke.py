@@ -94,7 +94,7 @@ def isolated_env(root):
            "HTTP_PROXY": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1",
            "ALL_PROXY": "http://127.0.0.1:1", "NO_PROXY": "127.0.0.1,localhost"}
     for name in ("home", "config", "data", "cache", "models"):
-        (root / name).mkdir()
+        (root / name).mkdir(mode=0o700)
     return env
 
 
@@ -297,11 +297,17 @@ def command_for(mcp, db, profile="read-only"):
 
 
 def migrate_fixture(cli, directory, env, *, fingerprint=BGE):
-    directory.mkdir()
+    directory.mkdir(mode=0o700)
     db = directory / "memory.db"
     db.write_text(json.dumps(fixture(fingerprint)))
-    db.with_suffix(".bodies").mkdir()
-    (db.with_suffix(".bodies") / "smoke.txt").write_text(BODY)
+    db.chmod(0o600)
+    # FsStore admits an existing body root only with exact private mode 0700;
+    # pathlib's default 0777 filtered by the builder's 0022 umask is not enough.
+    bodies = db.with_suffix(".bodies")
+    bodies.mkdir(mode=0o700)
+    body = bodies / "smoke.txt"
+    body.write_text(BODY)
+    body.chmod(0o600)
     run([str(cli), "--db", str(db), "migrate"], env, directory)
     with db.open("rb") as stream:
         require(stream.read(16) == b"SQLite format 3\0", "fixture did not become SQLite")
@@ -328,9 +334,10 @@ def snapshot_replica(mcp, source, root, env, version, *, db_id=DB,
         require(path.stat().st_size == entry["size"] and digest(path) == entry["sha256"],
                 f"snapshot file mismatch: {entry['path']}")
     replica = root / "replica"
-    replica.mkdir()
+    replica.mkdir(mode=0o700)
     db = replica / "memory.db"
-    shutil.copyfile(bundle / "database.db", db)
+    # Preserve the native snapshot's private database/body payload modes.
+    shutil.copy2(bundle / "database.db", db)
     shutil.copytree(bundle / "bodies", db.with_suffix(".bodies"))
     return db, result["generation"]
 
@@ -386,7 +393,9 @@ def copy_model_cache(source, target):
     revision = (repository / "refs/main").read_text().strip()
     require(re.fullmatch(r"[0-9a-f]{40}", revision), "model cache has no pinned 40-hex main revision")
     (target / name / "refs").mkdir(parents=True)
-    (target / name / "refs/main").write_text(revision + "\n")
+    # hf-hub treats these exact bytes as the snapshot directory name, without
+    # trimming. Its native create_ref likewise writes no trailing newline.
+    (target / name / "refs/main").write_text(revision)
     hashes = {}
     for relative in ("onnx/model.onnx", "tokenizer.json", "config.json",
                      "special_tokens_map.json", "tokenizer_config.json"):
@@ -405,9 +414,9 @@ def copy_model_cache(source, target):
 def semantic_smoke(mcp, cli, cache, root, env, version):
     model = copy_model_cache(cache, root / "models")
     semantic = root / "semantic"
-    semantic.mkdir()
+    semantic.mkdir(mode=0o700)
     source = semantic / "source"
-    source.mkdir()
+    source.mkdir(mode=0o700)
     db = source / "memory.db"
     run([str(cli), "--json", "--db", str(db), "capture", "init"], env, semantic)
     inspected = json.loads(run([str(cli), "--json", "--db", str(db), "capture", "inspect"],
@@ -418,6 +427,7 @@ def semantic_smoke(mcp, cli, cache, root, env, version):
     packet.write_text(json.dumps({"source": {"namespace": "nix-smoke", "key": "kettle",
                                              "reference": "fixture://nix-replica-smoke/kettle"},
                                   "summary": summary, "body": summary, "tags": ["nix-smoke"]}))
+    packet.chmod(0o600)
     captured = json.loads(run([str(cli), "--json", "--db", str(db), "capture", "add",
                                "--input", str(packet)], env, semantic,
                               timeout=INFERENCE_TIMEOUT).stdout)
@@ -479,9 +489,10 @@ def smoke(prefix, cli, client_prefix, root, model_cache=None):
     require("embedding fingerprint mismatch" in refused.stderr and "reembed" in refused.stderr,
             "incompatible fingerprint was not clearly refused")
     broken_dir = root / "broken"
-    broken_dir.mkdir()
+    broken_dir.mkdir(mode=0o700)
     broken = broken_dir / "memory.db"
     broken.write_bytes(b"deliberately not a database\n")
+    broken.chmod(0o600)
     before = digest(broken)
     run(command_for(mcp, broken), env, root, success=False)
     require(digest(broken) == before, "broken database was replaced or changed")
@@ -491,7 +502,7 @@ def smoke(prefix, cli, client_prefix, root, model_cache=None):
                       env, root, success=False)
         require("cozo-enabled" in refused.stderr, "client did not explain its absent persistent backend")
         client_db = root / "client-http" / "memory.json"
-        client_db.parent.mkdir()
+        client_db.parent.mkdir(mode=0o700)
         refused = run(command_for(client_prefix / "bin/mneme-mcp", client_db) + ["--http", "127.0.0.1:0"],
                       env, root, success=False)
         require("--http needs the `http` feature" in refused.stderr, "client HTTP feature refusal missing")
