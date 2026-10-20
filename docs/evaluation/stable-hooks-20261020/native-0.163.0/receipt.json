@@ -1,0 +1,690 @@
+{
+  "schema": "mneme.native-stable-hook-proof.v1",
+  "passed": true,
+  "at": "2026-10-20T12:44:06.367425+00:00",
+  "codex": "/Users/nia/.codex/packages/app-server-daemon/releases/0.163.0-aarch64-apple-darwin/bin/codex",
+  "codex_sha256": "8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31",
+  "helper": "/Users/nia/work/mneme/integrations/codex/stable_hooks.py",
+  "helper_sha256": "d1f1a5dd742a8aa913d18c55e6820541b5682a18d5fb3d4ba473979d3c8fff31",
+  "probe_sha256": "f1d6ed9d61780c38fa667a76b165d0491d2d5cfc7e0b8c003d7b876b281d1e6d",
+  "selector_kind": "symlink",
+  "phases": [
+    {
+      "name": "baseline",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+        "trustStatus": "trusted"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-a/invoke",
+        "sha256": "1d1ac6bbfac4d7349514282ea3a7568aff086835dfa7a56325cba862b482b17f"
+      },
+      "runtime_config_sha256": "13265132597f431b182a923d5a881d754f3d349c7343d646f29a381062245208",
+      "runtime_sha256": {
+        "a": "b6e66c135363ff825449f0fff06dbb4c994f524a5962a14df416c936a1a4f2f1",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      },
+      "dispatch": {
+        "thread_id": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+        "turn_id": "01a15957-280c-7fb1-b153-d95c4e61eb59",
+        "blocked_hooks": 1
+      },
+      "event": {
+        "runtime": "a1",
+        "config": "config-a",
+        "event": "UserPromptSubmit",
+        "turn_id": "01a15957-280c-7fb1-b153-d95c4e61eb59"
+      }
+    },
+    {
+      "name": "runtime_bytes_changed",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+        "trustStatus": "trusted"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-a/invoke",
+        "sha256": "1d1ac6bbfac4d7349514282ea3a7568aff086835dfa7a56325cba862b482b17f"
+      },
+      "runtime_config_sha256": "13265132597f431b182a923d5a881d754f3d349c7343d646f29a381062245208",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      },
+      "dispatch": {
+        "thread_id": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+        "turn_id": "01a15957-2a71-7b02-a23a-ab58a5922864",
+        "blocked_hooks": 1
+      },
+      "event": {
+        "runtime": "a2",
+        "config": "config-a",
+        "event": "UserPromptSubmit",
+        "turn_id": "01a15957-2a71-7b02-a23a-ab58a5922864"
+      }
+    },
+    {
+      "name": "selector_target_changed",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+        "trustStatus": "trusted"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-b/invoke",
+        "sha256": "e14e205d92155cf08188ac473f80dcac9a0084b319944317ce83ab542393a5e3"
+      },
+      "runtime_config_sha256": "13265132597f431b182a923d5a881d754f3d349c7343d646f29a381062245208",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      },
+      "dispatch": {
+        "thread_id": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+        "turn_id": "01a15957-2a9a-7162-86c2-89d8033b73a0",
+        "blocked_hooks": 1
+      },
+      "event": {
+        "runtime": "b1",
+        "config": "config-a",
+        "event": "UserPromptSubmit",
+        "turn_id": "01a15957-2a9a-7162-86c2-89d8033b73a0"
+      }
+    },
+    {
+      "name": "runtime_config_changed",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+        "trustStatus": "trusted"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-b/invoke",
+        "sha256": "e14e205d92155cf08188ac473f80dcac9a0084b319944317ce83ab542393a5e3"
+      },
+      "runtime_config_sha256": "729e3f9797c470fe3d8692a48fbf3f6b9ce32914e137fae961db7e95b6292c56",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      },
+      "dispatch": {
+        "thread_id": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+        "turn_id": "01a15957-2c11-78e3-beb6-b70f723b7cdd",
+        "blocked_hooks": 1
+      },
+      "event": {
+        "runtime": "b1",
+        "config": "config-b",
+        "event": "UserPromptSubmit",
+        "turn_id": "01a15957-2c11-78e3-beb6-b70f723b7cdd"
+      }
+    },
+    {
+      "name": "fresh_server",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+        "trustStatus": "trusted"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-b/invoke",
+        "sha256": "e14e205d92155cf08188ac473f80dcac9a0084b319944317ce83ab542393a5e3"
+      },
+      "runtime_config_sha256": "729e3f9797c470fe3d8692a48fbf3f6b9ce32914e137fae961db7e95b6292c56",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      },
+      "dispatch": {
+        "thread_id": "01a15957-2c5e-7353-93fa-6a6f4b06647c",
+        "turn_id": "01a15957-2c65-71b2-a781-6d879413849a",
+        "blocked_hooks": 1
+      },
+      "event": {
+        "runtime": "b1",
+        "config": "config-b",
+        "event": "UserPromptSubmit",
+        "turn_id": "01a15957-2c65-71b2-a781-6d879413849a"
+      }
+    },
+    {
+      "name": "control_shim_bytes",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+        "trustStatus": "trusted"
+      },
+      "shim_sha256": "f33aefc77b51e6d3d76031ff1c2b86c9db9c06d5b859a0f533745f359a891a46",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-b/invoke",
+        "sha256": "e14e205d92155cf08188ac473f80dcac9a0084b319944317ce83ab542393a5e3"
+      },
+      "runtime_config_sha256": "729e3f9797c470fe3d8692a48fbf3f6b9ce32914e137fae961db7e95b6292c56",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      }
+    },
+    {
+      "name": "control_command_argument",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook --control",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:ba560c08694b9f8dac89be46d89923890796aad060fb857c675290c61cd82377",
+        "trustStatus": "modified"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-b/invoke",
+        "sha256": "e14e205d92155cf08188ac473f80dcac9a0084b319944317ce83ab542393a5e3"
+      },
+      "runtime_config_sha256": "729e3f9797c470fe3d8692a48fbf3f6b9ce32914e137fae961db7e95b6292c56",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      }
+    },
+    {
+      "name": "control_timeout_definition",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 6,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:42ac2ccede4765704ee7d5ea97bd8cd0077d671d249f57b2da7866d19934cbbe",
+        "trustStatus": "modified"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-b/invoke",
+        "sha256": "e14e205d92155cf08188ac473f80dcac9a0084b319944317ce83ab542393a5e3"
+      },
+      "runtime_config_sha256": "729e3f9797c470fe3d8692a48fbf3f6b9ce32914e137fae961db7e95b6292c56",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      }
+    },
+    {
+      "name": "restored_definition",
+      "catalog": {
+        "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": "/bin/sh <fixture>/stable-hook",
+        "async": false,
+        "matcher": null,
+        "timeoutSec": 5,
+        "statusMessage": null,
+        "additionalContextLimit": null,
+        "sourcePath": "<fixture>/codex-home/config.toml",
+        "source": "user",
+        "pluginId": null,
+        "displayOrder": 0,
+        "enabled": true,
+        "isManaged": false,
+        "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+        "trustStatus": "trusted"
+      },
+      "shim_sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+      "selector": {
+        "kind": "symlink",
+        "target": "<fixture>/runtime-b/invoke",
+        "sha256": "e14e205d92155cf08188ac473f80dcac9a0084b319944317ce83ab542393a5e3"
+      },
+      "runtime_config_sha256": "729e3f9797c470fe3d8692a48fbf3f6b9ce32914e137fae961db7e95b6292c56",
+      "runtime_sha256": {
+        "a": "df166163461cb85a2d3b5d6d149532bd3a9a4383162cbff8010d8cc4c8609c67",
+        "b": "9879217bd5142699d58aa75ddbde2bc685ef91f42564536cb7f23cb846d301ed"
+      }
+    }
+  ],
+  "processes": [
+    {
+      "index": 0,
+      "pid": 41869,
+      "effective_isolation_verified": true,
+      "calls": [
+        "initialize",
+        "config/read",
+        "hooks/list",
+        "config/batchWrite",
+        "hooks/list",
+        "thread/start",
+        "hooks/list",
+        "turn/start",
+        "hooks/list",
+        "turn/start",
+        "hooks/list",
+        "turn/start",
+        "hooks/list",
+        "turn/start"
+      ],
+      "received_frames": 44,
+      "received_bytes": 30620,
+      "hook_completed": [
+        {
+          "threadId": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+          "turnId": "01a15957-280c-7fb1-b153-d95c4e61eb59",
+          "run": {
+            "id": "user-prompt-submit:0:<fixture>/codex-home/config.toml",
+            "eventName": "userPromptSubmit",
+            "handlerType": "command",
+            "executionMode": "sync",
+            "scope": "turn",
+            "sourcePath": "<fixture>/codex-home/config.toml",
+            "source": "user",
+            "displayOrder": 0,
+            "status": "blocked",
+            "statusMessage": null,
+            "startedAt": 1792500246,
+            "completedAt": 1792500247,
+            "durationMs": 608,
+            "entries": [
+              {
+                "kind": "feedback",
+                "text": "Stable-hook no-provider fixture"
+              }
+            ]
+          }
+        },
+        {
+          "threadId": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+          "turnId": "01a15957-2a71-7b02-a23a-ab58a5922864",
+          "run": {
+            "id": "user-prompt-submit:0:<fixture>/codex-home/config.toml",
+            "eventName": "userPromptSubmit",
+            "handlerType": "command",
+            "executionMode": "sync",
+            "scope": "turn",
+            "sourcePath": "<fixture>/codex-home/config.toml",
+            "source": "user",
+            "displayOrder": 0,
+            "status": "blocked",
+            "statusMessage": null,
+            "startedAt": 1792500247,
+            "completedAt": 1792500247,
+            "durationMs": 37,
+            "entries": [
+              {
+                "kind": "feedback",
+                "text": "Stable-hook no-provider fixture"
+              }
+            ]
+          }
+        },
+        {
+          "threadId": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+          "turnId": "01a15957-2a9a-7162-86c2-89d8033b73a0",
+          "run": {
+            "id": "user-prompt-submit:0:<fixture>/codex-home/config.toml",
+            "eventName": "userPromptSubmit",
+            "handlerType": "command",
+            "executionMode": "sync",
+            "scope": "turn",
+            "sourcePath": "<fixture>/codex-home/config.toml",
+            "source": "user",
+            "displayOrder": 0,
+            "status": "blocked",
+            "statusMessage": null,
+            "startedAt": 1792500247,
+            "completedAt": 1792500247,
+            "durationMs": 371,
+            "entries": [
+              {
+                "kind": "feedback",
+                "text": "Stable-hook no-provider fixture"
+              }
+            ]
+          }
+        },
+        {
+          "threadId": "01a15957-2805-78e1-aeee-8fdcfd3e9346",
+          "turnId": "01a15957-2c11-78e3-beb6-b70f723b7cdd",
+          "run": {
+            "id": "user-prompt-submit:0:<fixture>/codex-home/config.toml",
+            "eventName": "userPromptSubmit",
+            "handlerType": "command",
+            "executionMode": "sync",
+            "scope": "turn",
+            "sourcePath": "<fixture>/codex-home/config.toml",
+            "source": "user",
+            "displayOrder": 0,
+            "status": "blocked",
+            "statusMessage": null,
+            "startedAt": 1792500247,
+            "completedAt": 1792500247,
+            "durationMs": 36,
+            "entries": [
+              {
+                "kind": "feedback",
+                "text": "Stable-hook no-provider fixture"
+              }
+            ]
+          }
+        }
+      ],
+      "stderr_discarded": true,
+      "process_group_retired": true
+    },
+    {
+      "index": 1,
+      "pid": 41925,
+      "effective_isolation_verified": true,
+      "calls": [
+        "initialize",
+        "config/read",
+        "thread/start",
+        "hooks/list",
+        "turn/start"
+      ],
+      "received_frames": 14,
+      "received_bytes": 17834,
+      "hook_completed": [
+        {
+          "threadId": "01a15957-2c5e-7353-93fa-6a6f4b06647c",
+          "turnId": "01a15957-2c65-71b2-a781-6d879413849a",
+          "run": {
+            "id": "user-prompt-submit:0:<fixture>/codex-home/config.toml",
+            "eventName": "userPromptSubmit",
+            "handlerType": "command",
+            "executionMode": "sync",
+            "scope": "turn",
+            "sourcePath": "<fixture>/codex-home/config.toml",
+            "source": "user",
+            "displayOrder": 0,
+            "status": "blocked",
+            "statusMessage": null,
+            "startedAt": 1792500247,
+            "completedAt": 1792500247,
+            "durationMs": 36,
+            "entries": [
+              {
+                "kind": "feedback",
+                "text": "Stable-hook no-provider fixture"
+              }
+            ]
+          }
+        }
+      ],
+      "stderr_discarded": true,
+      "process_group_retired": true
+    },
+    {
+      "index": 2,
+      "pid": 41944,
+      "effective_isolation_verified": true,
+      "calls": [
+        "initialize",
+        "config/read",
+        "hooks/list"
+      ],
+      "received_frames": 4,
+      "received_bytes": 12143,
+      "hook_completed": [],
+      "stderr_discarded": true,
+      "process_group_retired": true
+    },
+    {
+      "index": 3,
+      "pid": 41945,
+      "effective_isolation_verified": true,
+      "calls": [
+        "initialize",
+        "config/read",
+        "hooks/list"
+      ],
+      "received_frames": 4,
+      "received_bytes": 12174,
+      "hook_completed": [],
+      "stderr_discarded": true,
+      "process_group_retired": true
+    },
+    {
+      "index": 4,
+      "pid": 41946,
+      "effective_isolation_verified": true,
+      "calls": [
+        "initialize",
+        "config/read",
+        "hooks/list"
+      ],
+      "received_frames": 4,
+      "received_bytes": 12144,
+      "hook_completed": [],
+      "stderr_discarded": true,
+      "process_group_retired": true
+    },
+    {
+      "index": 5,
+      "pid": 41947,
+      "effective_isolation_verified": true,
+      "calls": [
+        "initialize",
+        "config/read",
+        "hooks/list"
+      ],
+      "received_frames": 4,
+      "received_bytes": 12143,
+      "hook_completed": [],
+      "stderr_discarded": true,
+      "process_group_retired": true
+    }
+  ],
+  "environment_keys": [
+    "CODEX_HOME",
+    "GIT_CEILING_DIRECTORIES",
+    "HOME",
+    "LANG",
+    "PATH",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_STATE_HOME"
+  ],
+  "version": "codex-cli 0.163.0",
+  "recipe": {
+    "event": "UserPromptSubmit",
+    "command": "/bin/sh <fixture>/stable-hook",
+    "timeout": 5,
+    "async": false
+  },
+  "entrypoint": {
+    "sha256": "20f7ca96c5df5a031e500436111e9a4c1ce110e77ec6046c25bf37d6adc7abef",
+    "text": "#!/bin/sh\n# mneme.stable-hook-entrypoint.v1\nrefuse() { printf '%s\\n' 'Automatic memory temporarily disabled: stable runtime unavailable.' >&2; exit 1; }\nselector=<fixture>/current\n[ -L \"$selector\" ] && [ -f \"$selector\" ] && [ -x \"$selector\" ] || refuse\nexec \"$selector\" \"$@\"\n"
+  },
+  "before_trust": {
+    "key": "<fixture>/codex-home/config.toml:user_prompt_submit:0:0",
+    "eventName": "userPromptSubmit",
+    "handlerType": "command",
+    "command": "/bin/sh <fixture>/stable-hook",
+    "async": false,
+    "matcher": null,
+    "timeoutSec": 5,
+    "statusMessage": null,
+    "additionalContextLimit": null,
+    "sourcePath": "<fixture>/codex-home/config.toml",
+    "source": "user",
+    "pluginId": null,
+    "displayOrder": 0,
+    "enabled": true,
+    "isManaged": false,
+    "currentHash": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+    "trustStatus": "untrusted"
+  },
+  "native_config_writes": [
+    {
+      "method": "config/batchWrite",
+      "params": {
+        "edits": [
+          {
+            "keyPath": "hooks.state.\"<fixture>/codex-home/config.toml:user_prompt_submit:0:0\".trusted_hash",
+            "value": "sha256:49920b7b19ca758cc0bc75c7a5f050a35917616b7a059587626260e1953bdc14",
+            "mergeStrategy": "replace"
+          }
+        ],
+        "filePath": "<fixture>/codex-home/config.toml",
+        "reloadUserConfig": true
+      }
+    }
+  ],
+  "events": [
+    {
+      "runtime": "a1",
+      "config": "config-a",
+      "event": "UserPromptSubmit",
+      "turn_id": "01a15957-280c-7fb1-b153-d95c4e61eb59"
+    },
+    {
+      "runtime": "a2",
+      "config": "config-a",
+      "event": "UserPromptSubmit",
+      "turn_id": "01a15957-2a71-7b02-a23a-ab58a5922864"
+    },
+    {
+      "runtime": "b1",
+      "config": "config-a",
+      "event": "UserPromptSubmit",
+      "turn_id": "01a15957-2a9a-7162-86c2-89d8033b73a0"
+    },
+    {
+      "runtime": "b1",
+      "config": "config-b",
+      "event": "UserPromptSubmit",
+      "turn_id": "01a15957-2c11-78e3-beb6-b70f723b7cdd"
+    },
+    {
+      "runtime": "b1",
+      "config": "config-b",
+      "event": "UserPromptSubmit",
+      "turn_id": "01a15957-2c65-71b2-a781-6d879413849a"
+    }
+  ],
+  "provider_requests": 0,
+  "provider_connections": 0
+}

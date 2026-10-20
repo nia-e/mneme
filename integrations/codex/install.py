@@ -22,14 +22,14 @@ except ImportError:
 
 SCHEMA = "mneme.codex-install.v1"
 HOST_PLATFORM = "windows" if os.name == "nt" else "posix"
-CONFIG_REVISION = 32
-EXISTING_SERVICE_REVISION = 33
-EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, EXISTING_SERVICE_REVISION)
-SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
+CONFIG_REVISION = 34
+EXISTING_SERVICE_REVISION = 35
+EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, EXISTING_SERVICE_REVISION)
+SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
 END = "# END mneme-codex-v1"
-PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py", "host_files.py", "host_process.py", "host_platform.py", "store_registry.py", "registry_config.py", "registry_runtime.py", "registry_reader.py", "registry_recording.py", "core_hook.py", "guidance.py", "touchstone_handoff.py", "assessment.py", "capture_source.py", "claude_observer.py", "claude_runtime.py", "claude_config.py", "claude_hooks.py", "review_contract.py")
+PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py", "host_files.py", "host_process.py", "host_platform.py", "store_registry.py", "registry_config.py", "registry_runtime.py", "registry_reader.py", "registry_recording.py", "core_hook.py", "guidance.py", "touchstone_handoff.py", "assessment.py", "capture_source.py", "claude_observer.py", "claude_runtime.py", "claude_config.py", "claude_hooks.py", "review_contract.py", "stable_hooks.py")
 LEGACY_TOOLS = ["recall_context", "get", "capture", "supersede", "status"]
 EPISODE_TOOLS = [*LEGACY_TOOLS, "episode"]
 SAVE_TOOLS = [*EPISODE_TOOLS, "save"]
@@ -59,7 +59,8 @@ V24_DESTINATIONS = (*V22_DESTINATIONS, *(("lib/" + name, False) for name in PROG
 V26_DESTINATIONS = (*V24_DESTINATIONS, ("lib/guidance.py", False))
 V28_DESTINATIONS = (*V26_DESTINATIONS, ("lib/touchstone_handoff.py", False))
 V30_DESTINATIONS = (*V28_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[39:45]))
-DESTINATIONS = (*V30_DESTINATIONS, ("lib/review_contract.py", False))
+V32_DESTINATIONS = (*V30_DESTINATIONS, ("lib/review_contract.py", False))
+DESTINATIONS = (*V32_DESTINATIONS, ("lib/stable_hooks.py", False))
 RECALL_MODES = ("reminder", "automatic", "shadow", "async")
 RECORDING_MODES = ("off", "automatic")
 SHADOW_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra")
@@ -395,7 +396,9 @@ def validate_plan(plan):
     validate_tag_config(plan)
     if revision >= 24 and plan.get("host_platform") not in ("windows", "posix"):
         raise ValueError("invalid planned host platform")
-    expected_destinations = (current_destinations(plan_platform(plan)) if revision >= 32 else
+    expected_destinations = (current_destinations(plan_platform(plan)) if revision >= 34 else
+                             tuple((name + ".exe" if executable and plan_platform(plan) == "windows" else name, executable)
+                                   for name, executable in V32_DESTINATIONS) if revision >= 32 else
                              tuple((name + ".exe" if executable and plan_platform(plan) == "windows" else name, executable)
                                    for name, executable in V30_DESTINATIONS) if revision >= 30 else
                              tuple((name + ".exe" if executable and plan_platform(plan) == "windows" else name, executable)

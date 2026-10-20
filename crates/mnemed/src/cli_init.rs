@@ -523,6 +523,8 @@ mod tests {
             "claude_runtime.py",
             "claude_config.py",
             "claude_hooks.py",
+            "review_contract.py",
+            "stable_hooks.py",
         ] {
             assert!(
                 inventory.contains(&format!("codex/{helper}")),
@@ -563,6 +565,47 @@ mod tests {
         assert_eq!(std::fs::read(root.join(BUNDLE[0].0)).unwrap(), BUNDLE[0].1);
         drop(bundle);
         assert!(!root.exists(), "temporary bundle cleanup");
+    }
+
+    #[tokio::test]
+    async fn extracted_stable_hook_helper_imports_and_help_without_source_checkout() {
+        let Some(python) = discover_python(None).await else {
+            eprintln!("Python 3.11+ unavailable; stable hook import smoke not exercised");
+            return;
+        };
+        let bundle = unicode_bundle();
+        let codex = bundle.path.join("codex");
+        let script = "import pathlib, sys; root = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(root)); import stable_hooks, registry_config; assert pathlib.Path(stable_hooks.__file__) == root / 'stable_hooks.py'; assert pathlib.Path(registry_config.__file__) == root / 'registry_config.py'; print('stable-hook-import-ok')";
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_python_command(
+                &python,
+                &["-I", "-S", "-B", "-c", script, codex.to_str().unwrap()],
+            ),
+        )
+        .await
+        .unwrap()
+        .expect("embedded stable hook helper dependencies");
+        assert_eq!(
+            std::str::from_utf8(&result).unwrap().trim_end(),
+            "stable-hook-import-ok"
+        );
+        let helper = codex.join("stable_hooks.py");
+        let help = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_python_command(
+                &python,
+                &["-E", "-S", "-B", helper.to_str().unwrap(), "--help"],
+            ),
+        )
+        .await
+        .unwrap()
+        .expect("embedded stable hook helper CLI");
+        assert!(
+            std::str::from_utf8(&help)
+                .unwrap()
+                .contains("{prepare,install,select}")
+        );
     }
 
     #[tokio::test]

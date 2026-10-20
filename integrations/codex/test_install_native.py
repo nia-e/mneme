@@ -1,6 +1,8 @@
 """Offline native-config adapter preparation and fenced disposable installation."""
 import copy
 import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -320,6 +322,81 @@ class NativeInstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "select only"):
             registry_config.prepare_native(**args)
 
+    def device_prepare_args(self):
+        return dict(memory_config=self.memory, native_cli=self.fixture.native("mnemed"),
+                    cwd=self.fixture.project, state_dir=self.fixture.base / "device-state",
+                    reader_codex=self.fixture.native("codex"), hooks_program=Path(hook_launcher.__file__),
+                    hook_config_path=self.fixture.base / "device-hooks.json")
+
+    @unittest.skipUnless(os.name == "posix", "stable hook bootstrap is explicitly POSIX-only")
+    def test_stable_native_recipe_is_independent_of_runtime_and_configuration_paths(self):
+        args = self.device_prepare_args()
+        root = self.fixture.base / "stable café's hooks"
+        first = registry_config.prepare_native(**args, stable_root=root)
+        release = self.fixture.base / "new release"
+        release.mkdir()
+        dispatcher = release / "hook_launcher.py"
+        dispatcher.write_bytes(Path(hook_launcher.__file__).read_bytes())
+        interpreter = self.fixture.native("python3-new")
+        interpreter.write_text("#!/bin/sh\nexit 0\n")
+        interpreter.chmod(0o700)
+        second = registry_config.prepare_native(
+            **{**args, "python": interpreter, "hooks_program": dispatcher,
+               "hook_config_path": self.fixture.base / "other-config.json"},
+            stable_root=root)
+        self.assertEqual(first["global_hooks"], second["global_hooks"])
+        self.assertNotEqual(first["stable_runtime"], second["stable_runtime"])
+        self.assertEqual(second["stable_runtime"], {
+            "stable_root": str(root), "python": str(interpreter),
+            "hooks_program": str(dispatcher), "hook_config_path": str(self.fixture.base / "other-config.json")})
+        for groups in first["global_hooks"]["hooks"].values():
+            for group in groups:
+                for handler in group["hooks"]:
+                    argv = shlex.split(handler["command"])
+                    self.assertEqual(argv[:2], ["/bin/sh", str(root / "launch")])
+                    self.assertIn(argv[2:], ([], ["--core"], ["--reader-background"]))
+        self.assertFalse(root.exists())
+        self.assertFalse(args["hook_config_path"].exists())
+        self.assertFalse(args["state_dir"].exists())
+        # Opt-in changes only launch indirection, not selected memory authority.
+        direct = registry_config.prepare_native(**args)
+        self.assertEqual(direct["hook_config"], first["hook_config"])
+        self.assertEqual(direct["selection"], first["selection"])
+        self.assertNotIn("stable_runtime", direct)
+        self.assertNotIn("trust_policy", direct)
+
+    @unittest.skipUnless(os.name == "posix", "stable hook bootstrap is explicitly POSIX-only")
+    def test_stable_native_definition_contract_does_not_follow_package_revisions(self):
+        root = self.fixture.base / "stable"
+        prepared = registry_config.prepare_native(**self.device_prepare_args(), stable_root=root)
+        command = shlex.join(["/bin/sh", str(root / "launch")])
+        def group(extra="", **fields):
+            return {"hooks": [{"type": "command", "command": command + extra, **fields}]}
+        # This is the once-trusted native ABI, not a snapshot to regenerate when
+        # installer revisions or ordinary runtime behaviour change.
+        self.assertEqual(prepared["global_hooks"], {"hooks": {
+            "SessionStart": [
+                group(" --core", timeout=15, additionalContextLimit=0),
+                group(timeout=5, additionalContextLimit=1600)],
+            "UserPromptSubmit": [
+                group(timeout=5, additionalContextLimit=0),
+                group(" --reader-background", timeout=5, **{"async": True})],
+            "Stop": [group(timeout=5), group(" --reader-background", timeout=5, **{"async": True})],
+            "PostToolUse": [group(timeout=5, additionalContextLimit=0)],
+            "Interrupt": [group(timeout=3)],
+            "SessionEnd": [group(timeout=3)],
+        }})
+
+    def test_invalid_stable_root_refuses_before_native_selection(self):
+        args = self.device_prepare_args()
+        linked = self.fixture.base / "linked-stable"
+        linked.symlink_to(self.fixture.base, target_is_directory=True)
+        for root in (Path("relative"), linked, self.fixture.base / "line\nbreak"):
+            with self.subTest(root=root), patch("store_registry.native_select") as select:
+                with self.assertRaises(ValueError):
+                    registry_config.prepare_native(**args, stable_root=root)
+                select.assert_not_called()
+
     def test_copied_native_adapter_uses_its_bundle_without_source_tree(self):
         logical = self.fixture.base / "managed-memory.toml"
         logical.symlink_to(self.memory)
@@ -353,7 +430,7 @@ print(json.dumps({"schema": config["schema"], "selected": 0}))
 
     def test_native_prepare_help_and_dispatch_agree(self):
         for path, command, fields in ((install.__file__, "prepare", ("--memory-config",)),
-                                     (registry_config.__file__, "prepare-native", ("--memory-config", "--native-cli", "--workspace-adapters"))):
+                                     (registry_config.__file__, "prepare-native", ("--memory-config", "--native-cli", "--workspace-adapters", "--stable-root"))):
             process = subprocess.run([sys.executable, path, command, "--help"],
                 capture_output=True, text=True, timeout=10, check=True)
             for field in fields:

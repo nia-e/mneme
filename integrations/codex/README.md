@@ -492,9 +492,9 @@ Ordinary background recording, advisory findings and protected-tag-preserving
 upkeep remain separate; `background.core_cleanup = false` keeps existing core
 cleanup in the foreground without disabling non-core maintenance.
 
-The effect contract is shared by both capture frontends. Current source bundles
-include `review_contract.py`; installer revisions 32/33 distinguish this inventory
-from retained 30/31 bundles. Pending old touchstone envelopes remain readable
+The effect contract is shared by both capture frontends. Installer revisions
+32/33 added `review_contract.py`; current revisions 34/35 also ship the stable-hook
+helper. Retained plans keep their original inventories. Pending old touchstone envelopes remain readable
 without changing their original coverage or digests. A prior writer encountering
 a pending unknown review envelope refuses the outbox rather than discarding it;
 do not mix runtime versions or reset pending state to bypass that refusal.
@@ -575,7 +575,72 @@ Admission excludes enrolled/configured projects, private/isolated profiles,
 malformed settings and excluded roots. Keep exclusions aligned with the
 [CLI misc owner record](../../docs/remote-cli.md#default-project-and-user-owners).
 
-### Updating an advanced runtime
+### Stable native device hooks (POSIX)
+
+Trust the installed Mneme integration once, rather than a new native hook
+definition for each runtime release. Opt in when preparing the native device
+actor:
+
+```sh
+python3 /absolute/runtime/registry_config.py prepare-native \
+  --memory-config /absolute/config/memory.toml \
+  --native-cli /absolute/bin/mnemed --cwd /absolute/workspace \
+  --state-dir /absolute/private/hook-state --reader-codex /absolute/bin/codex \
+  --hooks-program /absolute/runtime/hook_launcher.py \
+  --hook-config-path /absolute/private/device-hooks.json \
+  --stable-root /absolute/private/mneme-hooks \
+  > /absolute/private/device-plan.json
+```
+
+Review the proposal and save its `hook_config` at the named hook-config path.
+The `stable_runtime` fields identify the inputs for staging. Preparation creates
+no launcher, config or trust grant; native selection may read discovery metadata.
+
+```sh
+python3 /absolute/runtime/stable_hooks.py prepare \
+  --stable-root /absolute/private/mneme-hooks \
+  --runtime /absolute/private/runtime-v1/hook-entrypoint \
+  --python /absolute/bin/python3 \
+  --hooks-program /absolute/runtime/hook_launcher.py \
+  --hook-config-path /absolute/private/device-hooks.json \
+  > /absolute/private/runtime-v1-plan.json
+
+python3 /absolute/runtime/stable_hooks.py install --plan /absolute/private/runtime-v1-plan.json
+python3 /absolute/runtime/stable_hooks.py select --plan /absolute/private/runtime-v1-plan.json
+```
+
+`install` stages a new real wrapper and creates or reuses the identical stable
+launcher; it does **not** activate it. `select` verifies those artifacts and
+atomically switches `current`. Keep the plan and immutable runtime bundle.
+Existing/mismatched wrappers are not overwritten; inspect a failed stage and
+choose a fresh wrapper path.
+Use one operator at a time. A `selection_uncertain` result means the selector was
+replaced but its durability could not be confirmed; inspect `current` before
+retrying. It does not mean the previous runtime was restored.
+
+For the initial cutover, replace—not add to—the old device/project recipes with
+the proposal's `global_hooks`, then review/trust them through Codex. Refresh
+already-loaded recipes or start fresh sessions. This helper does not edit Codex
+configuration, grant trust, manage services, or rewrite lifecycle/accounting state.
+
+After cutover, an update only stages a new wrapper and selects its plan. The
+native command remains `/bin/sh /absolute/private/mneme-hooks/launch`; the real
+launcher executes the selected wrapper, which binds one interpreter, dispatcher
+and config pathname. Nix store paths belong in that wrapper, not the native
+recipe. Roll back by selecting the retained old plan. Running workers keep their
+existing runtime; retain old bundles until they drain.
+
+This deliberately trusts updated installed code. It does not bypass trust for
+other hooks or silently approve new native definitions. Adding an event or changing
+the recipe still needs review. Changing config paths, owner selections or paid-job
+inputs can still trip the existing lifecycle fences; stable native trust does not
+migrate those bindings or authorize clearing them. Windows and existing direct
+hooks retain their current route. `programs.mneme.enable` still installs no hooks.
+
+The [native fixture](../../docs/evaluation/stable-hooks-20261020/REPORT.md) records
+the tested Codex version, same-thread dispatch, fresh-catalog trust and controls.
+
+### Updating a legacy version-specific runtime
 
 Use immutable prepared destination bundles. Pause hook and reader activity before
 switching configuration; retain the sessions, usage ledgers and unsettled paid work.

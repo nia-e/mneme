@@ -109,7 +109,7 @@ def prepare(*, store_registry, state_dir, reader_codex, hooks_program, hook_conf
 
 def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
                    hooks_program, hook_config_path, python=sys.executable,
-                   reader_auth=None, workspace_adapters=None):
+                   reader_auth=None, workspace_adapters=None, stable_root=None):
     """Preview one device actor; native selection may freeze discovery metadata.
 
     Workspace adapters choose only retained ledger locations and reader binaries.
@@ -125,6 +125,21 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
     program = canonical_path(Path(hooks_program).resolve(strict=True))
     interpreter = canonical_path(Path(python).resolve(strict=True))
     destination = canonical_path(hook_config_path)
+    stable_runtime = None
+    if stable_root is not None:
+        from stable_hooks import entrypoint_argv
+        root = canonical_path(stable_root)
+        argv = entrypoint_argv(root / "launch")
+        stable_runtime = {"stable_root": str(root), "python": str(interpreter),
+                          "hooks_program": str(program), "hook_config_path": str(destination)}
+    else:
+        argv = [str(interpreter), str(program), "--config", str(destination)]
+    # Validate the complete shell-facing request before native selection can
+    # acquire discovery metadata. Stable preparation is still only a proposal:
+    # the root, launcher and generated hook config need not exist yet.
+    command = hook_command(argv)
+    background_command = hook_command([*argv, "--reader-background"])
+    core_command = hook_command([*argv, "--core"])
     if not all(is_executable(executable) for executable in (native, reader, interpreter)) or not program.is_file():
         raise ValueError("native preparation requires existing native CLI, reader, dispatcher and Python")
     if program.name != "hook_launcher.py":
@@ -154,15 +169,18 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
     if len(json.dumps(config, ensure_ascii=False, indent=2).encode()) > MAX_CONFIG:
         raise ValueError("native hook adapter exceeds byte limit")
     from install import PROGRAMS, hook_handlers
-    argv = [str(interpreter), str(program), "--config", str(destination)]
     # Always install lifecycle/wakeup recipes: per-operation native flags decide
     # work after selection. Core is independent of background enabled/recording.
-    handlers = hook_handlers(hook_command(argv), async_mode=True, recording=True,
-        background_command=hook_command([*argv, "--reader-background"]))
+    # Freeze the existing recipe revision for the stable entrypoint. Runtime
+    # package revisions must not become native hook definition changes. The
+    # complete stable recipe is also covered by an explicit contract test.
+    handler_options = {"revision": 32} if stable_runtime is not None else {}
+    handlers = hook_handlers(command, async_mode=True, recording=True,
+        background_command=background_command, **handler_options)
     handlers["SessionStart"].insert(0, {"hooks": [{"type": "command",
-        "command": hook_command([*argv, "--core"]), "timeout": 15, "additionalContextLimit": 0}]})
+        "command": core_command, "timeout": 15, "additionalContextLimit": 0}]})
     sources = Path(__file__).parent
-    return {"schema": "mneme.codex-native-prepare.v1", "hook_config": config,
+    result = {"schema": "mneme.codex-native-prepare.v1", "hook_config": config,
         "hook_config_path": str(destination), "selection": selected.snapshot,
         "native_cli_sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
         "global_hooks": {"hooks": handlers},
@@ -171,6 +189,12 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
         "installation": "not performed", "services": "not contacted",
         "session_policy": "disable old hooks; close old sessions; quiesce all retained ledgers; start fresh sessions",
         "dispatch_policy": "one device actor for all workspaces; no additive project hook actors"}
+    if stable_runtime is not None:
+        result["stable_runtime"] = stable_runtime
+        result["trust_policy"] = (
+            "trust the installed Mneme integration; selecting an updated runtime does not change "
+            "the native hook definition; initial trust and native recipe changes remain explicit")
+    return result
 
 
 def quiescence(state_dir):
@@ -281,6 +305,8 @@ def main(argv=None):
     native.add_argument("--reader-auth")
     native.add_argument("--workspace-adapters", type=Path,
                         help="reviewed JSON list of root/state_dir/reader_codex machinery bindings, not policy")
+    native.add_argument("--stable-root", type=Path,
+                        help="opt into a fixed POSIX hook entrypoint; stage/select its runtime with stable_hooks.py")
     args = vars(parser.parse_args(argv))
     operation = args.pop("operation")
     if operation == "quiescence":

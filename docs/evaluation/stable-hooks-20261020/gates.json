@@ -1,0 +1,173 @@
+{
+  "declared_classes": [
+    "public-interface",
+    "capability",
+    "transport-package"
+  ],
+  "downstream_routing": [],
+  "errors": [],
+  "omissions": [],
+  "path_attestations": [
+    {
+      "path": "docs/evaluation/stable-hooks-20261020/REPORT.md",
+      "rationale": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference."
+    },
+    {
+      "path": "docs/evaluation/stable-hooks-20261020/gates.json",
+      "rationale": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference."
+    },
+    {
+      "path": "docs/evaluation/stable-hooks-20261020/native-0.163.0/receipt.json",
+      "rationale": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference."
+    },
+    {
+      "path": "docs/evaluation/stable-hooks-20261020/probe_native_stable_hooks.py",
+      "rationale": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference."
+    }
+  ],
+  "path_validation": [
+    {
+      "attestation": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference.",
+      "attestation_required": true,
+      "path": "docs/evaluation/stable-hooks-20261020/REPORT.md",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference.",
+      "attestation_required": true,
+      "path": "docs/evaluation/stable-hooks-20261020/gates.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference.",
+      "attestation_required": true,
+      "path": "docs/evaluation/stable-hooks-20261020/native-0.163.0/receipt.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable isolated native hook trust/dispatch evidence only; no production hooks, stores, services or paid inference.",
+      "attestation_required": true,
+      "path": "docs/evaluation/stable-hooks-20261020/probe_native_stable_hooks.py",
+      "requirements": []
+    }
+  ],
+  "pending_attestations": [],
+  "required_evidence_floor": "installed_artifact",
+  "required_gates": [
+    {
+      "id": "API-01",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-02",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-03",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-04",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-05",
+      "pack": "public-interface"
+    },
+    {
+      "id": "CAP-01",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-02",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-03",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-04",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-05",
+      "pack": "capability"
+    },
+    {
+      "id": "DIST-01",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-02",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-03",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-04",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-05",
+      "pack": "transport-package"
+    }
+  ],
+  "schema": "mneme.change-gates.v1",
+  "selected_packs": [
+    {
+      "downstream_routing": [],
+      "operation_class": "public-interface",
+      "reference": ".agents/skills/mneme-change-gates/references/public-interface.md",
+      "required_evidence_floor": "component_test",
+      "required_gates": [
+        "API-01",
+        "API-02",
+        "API-03",
+        "API-04",
+        "API-05"
+      ]
+    },
+    {
+      "downstream_routing": [],
+      "operation_class": "capability",
+      "reference": ".agents/skills/mneme-change-gates/references/capability.md",
+      "required_evidence_floor": "component_test",
+      "required_gates": [
+        "CAP-01",
+        "CAP-02",
+        "CAP-03",
+        "CAP-04",
+        "CAP-05"
+      ]
+    },
+    {
+      "downstream_routing": [],
+      "operation_class": "transport-package",
+      "reference": ".agents/skills/mneme-change-gates/references/transport-package.md",
+      "required_evidence_floor": "installed_artifact",
+      "required_gates": [
+        "DIST-01",
+        "DIST-02",
+        "DIST-03",
+        "DIST-04",
+        "DIST-05"
+      ]
+    }
+  ],
+  "status": "selected",
+  "touched_paths": [
+    "docs/evaluation/stable-hooks-20261020/REPORT.md",
+    "docs/evaluation/stable-hooks-20261020/gates.json",
+    "docs/evaluation/stable-hooks-20261020/native-0.163.0/receipt.json",
+    "docs/evaluation/stable-hooks-20261020/probe_native_stable_hooks.py"
+  ],
+  "unclassified_paths": [
+    "docs/evaluation/stable-hooks-20261020/REPORT.md",
+    "docs/evaluation/stable-hooks-20261020/gates.json",
+    "docs/evaluation/stable-hooks-20261020/native-0.163.0/receipt.json",
+    "docs/evaluation/stable-hooks-20261020/probe_native_stable_hooks.py"
+  ]
+}
