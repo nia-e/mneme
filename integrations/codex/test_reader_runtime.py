@@ -181,6 +181,24 @@ class ReaderRuntimeTest(unittest.TestCase):
         self.assertNotEqual(starts[0]["pid"], starts[1]["pid"])
         self.assertFalse(list((self.root / "scratch").iterdir()))
 
+    @unittest.skipIf(os.name == "nt", "POSIX symlink fixture")
+    def test_unpinned_absolute_symlink_changes_next_process_not_current_worker(self):
+        other = self.root / "new-codex"
+        other.write_text(self.codex.read_text().replace('else ["c1"]', 'else ["c2"]'))
+        other.chmod(0o700)
+        selector = self.root / "current-codex"
+        selector.symlink_to(self.codex)
+        config = {**self.path_config(), "reader_codex": str(selector)}
+        with ReaderRuntime(config, self.root / "scratch") as runtime:
+            self.assertEqual(runtime.select(self.dialogue, self.cards)["selected_ids"], ["c1"])
+            selector.unlink()
+            selector.symlink_to(other)
+            self.assertEqual(runtime.select(self.dialogue, self.cards)["selected_ids"], ["c1"])
+        with ReaderRuntime(config, self.root / "scratch") as runtime:
+            self.assertEqual(runtime.select(self.dialogue, self.cards)["selected_ids"], ["c2"])
+        self.assertEqual(config["reader_codex"], str(selector))
+        self.assertNotIn("reader_codex_sha256", config)
+
     def test_path_reordering_changes_next_process_and_assessor_can_start_it(self):
         other = self.root / "other"
         other.mkdir()

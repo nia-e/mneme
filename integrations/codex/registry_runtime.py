@@ -10,7 +10,7 @@ from pathlib import Path
 import hashlib
 
 from librarian_policy import resolve as resolve_budget
-from host_platform import validate_reader_codex
+from host_platform import validate_reader_codex, validate_command
 from misc_binding import canonical_path, validate_binding
 from profile import MAX_PATH_BYTES
 from store_registry import (Selection, project_store, resolve, admit_project_workspace)
@@ -37,8 +37,7 @@ def validate_static(value):
     validate_reader_codex(value)
     if not isinstance(value["reader_codex"], str):
         raise ValueError("reader_codex must be a string")
-    if value["reader_codex"] != "codex":
-        canonical_path(value["reader_codex"])
+    validate_command(value["reader_codex"], default="codex")
     for field in ("state_dir", "store_registry", "reader_auth", "project_root", "service_config"):
         if field in value:
             if not isinstance(value[field], str):
@@ -92,7 +91,7 @@ def load(value, path, raw, *, workspace_binding=None, cwd=None, expected_selecti
             raise ValueError("project root must exist")
         current = Path(cwd or config["project_root"])
     if config["reader_codex"] != "codex":
-        config["reader_codex"] = Path(config["reader_codex"]).resolve()
+        config["reader_codex"] = Path(config["reader_codex"])
     for field in ("state_dir", "store_registry", "reader_auth", "service_config"):
         if field in config:
             config[field] = Path(config[field]).resolve()
@@ -210,9 +209,9 @@ def validate_native_static(value):
     validate_reader_codex(value)
     if not isinstance(value["reader_codex"], str):
         raise ValueError("reader_codex must be a string")
-    if value["reader_codex"] != "codex":
-        canonical_path(value["reader_codex"])
-    for key in ("state_dir", "native_cli", "reader_auth"):
+    validate_command(value["reader_codex"], default="codex")
+    validate_command(value["native_cli"], default="mnemed")
+    for key in ("state_dir", "reader_auth"):
         if key in value: canonical_path(value[key])
     adapters = value.get("workspace_adapters", [])
     if not isinstance(adapters, list) or len(adapters) > 64:
@@ -226,8 +225,7 @@ def validate_native_static(value):
         validate_reader_codex(adapter)
         if not isinstance(adapter["reader_codex"], str):
             raise ValueError("reader_codex must be a string")
-        if adapter["reader_codex"] != "codex":
-            canonical_path(adapter["reader_codex"])
+        validate_command(adapter["reader_codex"], default="codex")
         for key in ("root", "state_dir"): canonical_path(adapter[key])
         root_path = Path(adapter["root"]).resolve(strict=True)
         if not root_path.is_dir():
@@ -321,8 +319,8 @@ def _native_capture_selection(config, path, raw, *, cwd, capture_only, expected_
     resolve_budget(config)
     config["memory_config"] = native_memory_config_path(config["memory_config"])
     if "reader_codex" in config and config["reader_codex"] != "codex":
-        config["reader_codex"] = Path(config["reader_codex"]).resolve()
-    for key in ("state_dir", "native_cli", "reader_auth", "reader_claude", "transcripts_root"):
+        config["reader_codex"] = Path(config["reader_codex"])
+    for key in ("state_dir", "reader_auth", "transcripts_root"):
         if key in config: config[key] = Path(config[key]).resolve()
     check = read_regular(Path(path), 8192)
     if len(check) > 8192 or check != raw:

@@ -36,6 +36,17 @@ class NativeInstallTests(unittest.TestCase):
     def plan(self, **options):
         return self.fixture.prepare(memory_config=self.memory, reader_codex=self.fixture.native("codex"), **options)
 
+    def test_explicit_native_tool_selectors_survive_native_hook_and_mcp_authoring(self):
+        native = str(self.fixture.base / 'selected-mnemed')
+        mcp = str(self.fixture.base / 'selected-mcp')
+        plan = self.plan(native_command=native, mcp_command=mcp)
+        self.assertEqual(install.runtime_configs(plan)[1]['native_cli'], native)
+        self.assertEqual(install.runtime_configs(plan)[0]['binary'], mcp)
+        outputs = install.config_outputs(plan, {'config.toml': None, 'hooks.json': None})
+        import tomllib
+        self.assertEqual(tomllib.loads(outputs['config.toml'].decode())['mcp_servers'][install.SERVER]['command'], mcp)
+        install.validate_plan(plan)
+
     def discovery_plan(self):
         self.snapshot["discovery"] = {
             "binding": {"path": str(self.fixture.base / "discovery-receipt.json"), "sha256": "b" * 64},
@@ -147,12 +158,19 @@ class NativeInstallTests(unittest.TestCase):
             install.validate_plan(plan)
             service, hook = install.runtime_configs(plan)
             self.assertEqual(hook["schema"], "mneme.codex-hooks.config.v13")
-            self.assertEqual(set(hook), {"schema", "memory_config", "native_cli", "state_dir", "reader_codex", "reader_codex_sha256"})
+            self.assertEqual(set(hook), {"schema", "memory_config", "native_cli", "state_dir", "reader_codex"})
             self.assertEqual(install.planned_hook_handlers(plan), {})
             outputs = install.config_outputs(plan, {"config.toml": None, "hooks.json": None})
             import tomllib
             server = tomllib.loads(outputs["config.toml"].decode())["mcp_servers"][install.SERVER]
-            self.assertEqual(server["command"], str(self.fixture.prefix / install.binary_destination(plan, "mneme-mcp")))
+            self.assertEqual(server["command"], "mneme-mcp")
+            self.assertEqual(hook["native_cli"], "mnemed")
+            old = {**plan, "config_revision": 38, "python": sys.executable}
+            self.assertEqual(install.runtime_configs(old)[1]["native_cli"],
+                             str(self.fixture.prefix / install.binary_destination(old, "mnemed")))
+            prior = install.config_outputs(old, {"config.toml": None, "hooks.json": None})
+            self.assertEqual(tomllib.loads(prior["config.toml"].decode())["mcp_servers"][install.SERVER]["command"],
+                             str(self.fixture.prefix / install.binary_destination(old, "mneme-mcp")))
             self.assertEqual(server["args"], ["--memory-config", str(self.memory), "--cwd", str(self.fixture.project)])
             self.assertEqual(json.loads(outputs["hooks.json"])["hooks"], {})
             self.assertNotIn("permissions", hook)
@@ -280,11 +298,30 @@ class NativeInstallTests(unittest.TestCase):
         plan = self.plan(existing_service_config=path)
         install.validate_plan(plan)
         self.assertEqual(install.runtime_configs(plan)[0], service)
-        self.assertEqual(plan["existing_owner_binary"]["source"], str(owner))
+        self.assertNotIn("existing_owner_binary", plan)
+        legacy = {**plan, "config_revision": 39, "python": sys.executable,
+                  "existing_owner_binary": {"source": str(owner), "sha256": install.digest(owner.read_bytes())}}
+        legacy["plan_sha256"] = install.plan_hash(legacy)
+        install.validate_plan(legacy)
         owner.write_text("drifted owner")
         with self.assertRaisesRegex(ValueError, "existing service binary changed"):
-            install.apply(plan)
+            install.apply(legacy)
         self.assertFalse(self.fixture.prefix.exists())
+        install.apply(plan)  # The new explicit selector is not an edition pin.
+        self.assertEqual(json.loads((self.fixture.prefix / "config/service.json").read_text()), service)
+
+    def test_native_dynamic_retained_service_has_no_owner_binary_pin(self):
+        initial = self.plan()
+        service, _ = install.runtime_configs(initial)
+        self.assertEqual(service['binary'], 'mneme-mcp')
+        path = self.fixture.base / 'dynamic-owner.json'
+        path.write_bytes(install.json_bytes(service))
+        with patch('host_platform.shutil.which', side_effect=AssertionError('owner selector resolved')):
+            retained = self.plan(existing_service_config=path)
+            self.assertEqual(retained['config_revision'], 41)
+            self.assertNotIn('existing_owner_binary', retained)
+            install.apply(retained)
+        self.assertEqual(json.loads((self.fixture.prefix / 'config/service.json').read_text()), service)
 
     def test_old_revision_cannot_smuggle_native_policy_or_new_helper_inventory(self):
         plan = self.plan()
@@ -295,6 +332,7 @@ class NativeInstallTests(unittest.TestCase):
             install.validate_plan(plan)
         legacy = self.fixture.async_plan()
         legacy["config_revision"] = 24
+        legacy["python"] = sys.executable
         legacy["files"] = legacy["files"][:len(install.V24_DESTINATIONS)]
         legacy["plan_sha256"] = install.plan_hash(legacy)
         install.validate_plan(legacy)
@@ -343,7 +381,7 @@ class NativeInstallTests(unittest.TestCase):
         self.assertEqual(symbolic['reader_codex'], 'codex')
         self.assertNotIn('reader_codex_sha256', symbolic)
         self.assertEqual(pinned['reader_codex'], str(self.fixture.native('codex')))
-        self.assertEqual(pinned['reader_codex_sha256'], install.digest(self.fixture.native('codex').read_bytes()))
+        self.assertNotIn('reader_codex_sha256', pinned)
         self.assertNotIn('recording_mode', config)
         self.assertFalse(Path(args['state_dir']).exists())
         self.assertFalse(Path(args['hook_config_path']).exists())

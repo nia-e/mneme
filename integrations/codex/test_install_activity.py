@@ -47,6 +47,17 @@ class ActivityInstallTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, "explicit --activity-root"):
                 self.fixture.prepare(**options)
 
+    def test_explicit_activity_mcp_retains_mutable_lexical_selector(self):
+        selector = self.fixture.base / "current-activity-mcp"
+        selector.symlink_to(self.fixture.native("mneme-mcp"))
+        prepared = registry_config.prepare_activity(cwd=self.fixture.project,
+            activity_root=self.root, activity_config=self.config, activity_mcp=selector)
+        self.assertEqual(prepared["mcp"]["command"], str(selector))
+        registry_config.validate_activity_preparation(prepared, cwd=self.fixture.project,
+                                                     activity_mcp=selector)
+        self.assertFalse(self.root.exists())
+        self.assertFalse(self.config.exists())
+
     def test_default_manifest_matches_fixed_platform_path_not_hook_env_override(self):
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.fixture.base / "xdg"),
                                     "MNEME_ACTIVITY_CONFIG": str(self.fixture.base / "ignored.json")}):
@@ -66,7 +77,7 @@ class ActivityInstallTests(unittest.TestCase):
         servers = tomllib.loads((self.fixture.project / ".codex/config.toml").read_text())["mcp_servers"]
         self.assertEqual(set(servers), {"mneme_project", "mneme_session_activity"})
         activity = servers["mneme_session_activity"]
-        self.assertEqual(activity["command"], str(self.fixture.prefix / "bin/mneme-mcp"))
+        self.assertEqual(activity["command"], "mneme-mcp")
         self.assertEqual(activity["args"], ["--activity-config", str(self.config), "--cwd", str(self.fixture.project)])
         self.assertEqual(activity["enabled_tools"], ["session_activity"])
         self.assertNotIn("session_activity", servers["mneme_project"]["enabled_tools"])
@@ -294,6 +305,7 @@ print('copied-activity-ok')
             with self.subTest(revision=revision):
                 old = self.fixture.prepare(**options)
                 old["config_revision"] = revision
+                old["python"] = sys.executable
                 old["files"] = old["files"][:len(install.V34_DESTINATIONS)]
                 old["plan_sha256"] = install.plan_hash(old)
                 install.validate_plan(old)

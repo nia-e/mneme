@@ -49,6 +49,52 @@ class HeartbeatTests(HeartbeatHarness, unittest.TestCase):
         self.assertIn("interactive", state)
         self.assertEqual(state["previous"]["summary"], self.result()["summary"])
 
+    def test_selector_is_one_edition_per_cycle_and_refreshed_between_cycles(self):
+        heartbeat = self.heartbeat_module()
+        selector = self.base / "current"
+        selector.symlink_to(self.fake)
+        other = self.base / "other-codex"
+        other.write_bytes(self.fake.read_bytes())
+        other.chmod(0o700)
+        args = SimpleNamespace(root=self.root, codex=selector, command="run", timeout=6,
+                               max_log_bytes=1024, max_starts=4)
+        actual_invoke = heartbeat.invoke
+        selected = []
+        def invoke(cycle_args, *positional, **keywords):
+            selected.append(cycle_args.codex)
+            selector.unlink()
+            selector.symlink_to(other)
+            return actual_invoke(cycle_args, *positional, **keywords)
+        with patch.dict(os.environ, self.environment()), patch.object(heartbeat, "invoke", side_effect=invoke):
+            result, code = heartbeat.execute(args)
+            self.assertEqual(code, 0, result)
+            self.assertEqual(selected, [self.fake, self.fake])
+            self.assertEqual(args.codex, selector)
+            args.root = self.make_root("next-cycle")
+            result, code = heartbeat.execute(args)
+            self.assertEqual(code, 0, result)
+        self.assertEqual(selected, [self.fake, self.fake, other, other])
+
+    def test_package_selection_runs_once_for_both_stages(self):
+        heartbeat = self.heartbeat_module()
+        args = SimpleNamespace(root=self.root, codex=None, codex_packages=self.base,
+                               command="run", timeout=6, max_log_bytes=1024, max_starts=4)
+        with patch.dict(os.environ, self.environment()), \
+                patch.object(heartbeat.codex_guard.raw_codex, "select_package", return_value=self.fake) as select:
+            payload, code = heartbeat.execute(args)
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(len(self.invocations()), 2)
+        select.assert_called_once_with(self.base)
+        self.assertIsNone(args.codex)
+        self.assertEqual(args.codex_packages, self.base)
+
+    def test_missing_selector_returns_refused_without_traceback(self):
+        self.fake.unlink()
+        process, payload = self.call()
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(payload["status"], "refused")
+        self.assertNotIn("Traceback", process.stderr)
+
     def test_execution_policy_default_is_workspace_in_both_stages(self):
         process, payload = self.call()
         self.assertEqual(process.returncode, 0, payload)
@@ -910,6 +956,18 @@ class HeartbeatTests(HeartbeatHarness, unittest.TestCase):
                          {"background_today": 2,
                           "interactive_today": 1,
                           "interactive_last_hour": 1})
+
+    def test_blocked_interactive_retains_unfinished_event_and_next_step(self):
+        options = self.signal_options()
+        background, payload = self.call(options=options)
+        self.assertEqual(background.returncode, 0, payload)
+        self.signal("blocked-chat")
+        process, payload = self.call(options=options, result=self.result(status="blocked"))
+        self.assertEqual(process.returncode, 0, payload)
+        self.assertEqual(payload["cycle_class"], "interactive")
+        record = self.queue_records()[0]
+        self.assertEqual(record["status"], "unfinished")
+        self.assertIn("do not blindly repeat side effects", json.dumps(record))
 
     def test_failed_interactive_cooldown_ignores_old_batch_but_new_burst_wakes(self):
         options = self.signal_options()

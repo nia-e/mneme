@@ -75,12 +75,13 @@ def _binary():
         if host_process.IS_WINDOWS and Path(override).suffix.lower() != ".exe":
             raise McpTransportError("native Windows mnemed client requires an .exe, not a shell wrapper")
         return override
-    sibling = Path(__file__).resolve().parent.parent / "bin" / executable_name("mnemed")
-    if sibling.is_file():
-        return str(sibling)  # A broken packaged binary must not select a stale PATH fallback.
+    # Resolve for each new child, not once at import or against a retained bundle.
     found = find_executable("mnemed")
     if found:
         return found
+    sibling = Path(__file__).resolve().parent.parent / "bin" / executable_name("mnemed")
+    if sibling.is_file():
+        return str(sibling)  # A failed chosen executable is never retried elsewhere.
     raise McpTransportError("mnemed client binary unavailable")
 
 

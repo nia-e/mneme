@@ -223,11 +223,14 @@ def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_
         raise HookError("frozen selection replay requires native hook configuration")
     if data.get("schema") in (CONFIG_SCHEMA_V12, CONFIG_SCHEMA_V13):
         from registry_runtime import load, load_native
+        from store_registry import NativeCommandError
         load = load_native if data["schema"] == CONFIG_SCHEMA_V13 else load
         try:
             replay = ({"expected_selection_digest": expected_selection_digest}
                       if expected_selection_digest is not None else {})
             return load(data, path, parsed_raw, workspace_binding=workspace_binding, cwd=cwd, **replay)
+        except NativeCommandError as error:
+            raise HookError(f"native command unavailable or failed: {str(error)[:768]}; inspect the current executable and retry") from error
         except (ValueError, OSError, TypeError, KeyError) as error:
             raise HookError("invalid or changed named-store configuration; reprepare and use a fresh session") from error
     if data.get("schema") == CONFIG_SCHEMA_V11:
@@ -252,17 +255,21 @@ def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_
             raise HookError("invalid recall_mode")
     elif data.get("schema") == CONFIG_SCHEMA_V3:
         expected = {"schema", "project_root", "state_dir", "service_config",
-                    "memory_mode", "shadow_model", "shadow_codex", "shadow_codex_sha256"}
+                    "memory_mode", "shadow_model", "shadow_codex"}
+        if "shadow_codex_sha256" in data:
+            expected.add("shadow_codex_sha256")
         if data.get("memory_mode") != "shadow":
             raise HookError("invalid memory_mode")
         if data.get("shadow_model") not in ("gpt-5.6-sol", "gpt-5.6-terra"):
             raise HookError("invalid shadow_model")
-        codex = data.get("shadow_codex")
-        if not isinstance(codex, str) or not Path(codex).is_absolute():
-            raise HookError("shadow_codex must be an absolute path")
-        digest = data.get("shadow_codex_sha256")
-        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-            raise HookError("invalid shadow_codex_sha256")
+        from host_platform import validate_reader_codex
+        selector = {"reader_codex": data.get("shadow_codex")}
+        if "shadow_codex_sha256" in data:
+            selector["reader_codex_sha256"] = data["shadow_codex_sha256"]
+        try:
+            validate_reader_codex(selector)
+        except ValueError as error:
+            raise HookError(str(error).replace("reader_", "shadow_")) from error
         mode = "automatic"
     elif data.get("schema") in (CONFIG_SCHEMA_V4, CONFIG_SCHEMA_V5, CONFIG_SCHEMA_V6, CONFIG_SCHEMA_V7):
         raise HookError("legacy async reader configuration requires repreparation for schema v8; quiesce old workers and start a fresh session before switching hooks")
@@ -334,10 +341,11 @@ def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_
             raise HookError("service_config must be an absolute path")
         data["service_config"] = Path(service_config).resolve()
     if data["schema"] == CONFIG_SCHEMA_V3:
-        data["shadow_codex"] = Path(data["shadow_codex"]).resolve()
+        if data["shadow_codex"] != "codex":
+            data["shadow_codex"] = Path(data["shadow_codex"])
     if data["schema"] in (CONFIG_SCHEMA_V8, CONFIG_SCHEMA_V9, CONFIG_SCHEMA_V10, CONFIG_SCHEMA_V11):
         if data["reader_codex"] != "codex":
-            data["reader_codex"] = Path(data["reader_codex"]).resolve()
+            data["reader_codex"] = Path(data["reader_codex"])
         if "reader_auth" in data:
             data["reader_auth"] = Path(data["reader_auth"]).resolve()
     data["recall_mode"] = mode
@@ -999,7 +1007,7 @@ def _shadow_launch(config: dict[str, Any], session_id: str, turn_id: str,
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.launch(config["state_dir"], session_id, turn_id, cue, answer,
-                         cards, config["shadow_codex"], config["shadow_codex_sha256"],
+                         cards, config["shadow_codex"], config.get("shadow_codex_sha256"),
                          config["shadow_model"])
 
 

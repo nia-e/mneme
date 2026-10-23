@@ -89,7 +89,7 @@ class HookTrustTests(unittest.TestCase):
     def writes(self):
         return [params for method, params in self.client.calls if method == "config/batchWrite"]
 
-    def install_existing_owner(self):
+    def install_existing_owner(self, revision=None):
         owner_path = self.base / "old-service.json"
         owner_path.write_bytes(install.json_bytes({
             "binary": str(self.binaries / executable_name("mneme-mcp")),
@@ -101,12 +101,58 @@ class HookTrustTests(unittest.TestCase):
         plan = install.prepare(self.root, self.prefix, self.binaries / executable_name("mnemed"), self.binaries / executable_name("mneme-mcp"), 19871,
             recall_mode="async", reader_model=install.READER_MODELS[0], reader_codex=self.binaries / executable_name("codex"),
             recording_mode="automatic", existing_service_config=owner_path)
+        if revision is not None:
+            plan["config_revision"] = revision
+            plan["python"] = sys.executable
+            plan["plan_sha256"] = install.plan_hash(plan)
         install.apply(plan)
         self.service = self.prefix / "config/service.json"
         reviewed = trust.reviewed_definitions(self.root, self.service)
         for hook, signature in zip(self.client.hooks, reviewed.signatures):
             hook["command"] = signature[1]
         return owner_path
+
+    def test_dynamic_interpreter_receipt_survives_runtime_path_change(self):
+        receipt = json.loads((self.prefix / "receipt.json").read_text())
+        self.assertEqual(receipt["plan"]["config_revision"], 40)
+        self.assertEqual(receipt["plan"]["python"], "python3")
+        with patch.object(sys, "executable", str(self.base / "replaced-python")):
+            self.assertEqual(trust.reviewed_definitions(self.root, self.service), self.reviewed)
+        self.install_existing_owner()
+        owner_receipt = json.loads((self.prefix / "receipt.json").read_text())
+        self.assertEqual(owner_receipt["plan"]["config_revision"], 41)
+        self.assertEqual(owner_receipt["plan"]["python"], "python3")
+        with patch.object(sys, "executable", str(self.base / "another-python")):
+            trust.reviewed_definitions(self.root, self.service)
+
+    def test_revision38_receipt_retains_interpreter_scope_check(self):
+        root = self.base / "legacy-project"
+        root.mkdir()
+        prefix = root / ".mneme/runtime"
+        plan = install.prepare(root, prefix, self.binaries / executable_name("mnemed"),
+            self.binaries / executable_name("mneme-mcp"), 19872)
+        plan.update(config_revision=38, python=sys.executable)
+        plan["plan_sha256"] = install.plan_hash(plan)
+        install.apply(plan)
+        service = prefix / "config/service.json"
+        reviewed = trust.reviewed_definitions(root, service)
+        self.assertIn(sys.executable, reviewed.signatures[0][1])
+        with patch.object(sys, "executable", str(self.base / "another-python")), \
+             self.assertRaisesRegex(trust.TrustError, "receipt_scope_or_interpreter_changed"):
+            trust.reviewed_definitions(root, service)
+
+    def test_revision39_owner_receipt_preserves_absolute_interpreter_and_commands(self):
+        self.install_existing_owner(revision=39)
+        receipt = json.loads((self.prefix / "receipt.json").read_text())
+        plan = receipt["plan"]
+        self.assertEqual(plan["python"], sys.executable)
+        argv = [sys.executable, str(self.prefix / "lib/hooks.py"), "--config", str(self.prefix / "config/hooks.json")]
+        expected = host_platform.hook_command(argv, windows=install.plan_platform(plan) == "windows")
+        self.assertEqual(install.planned_hook_handlers(plan)["SessionStart"][0]["hooks"][0]["command"], expected)
+        trust.reviewed_definitions(self.root, self.service)
+        with patch.object(sys, "executable", str(self.base / "another-python")), \
+             self.assertRaisesRegex(trust.TrustError, "receipt_scope_or_interpreter_changed"):
+            trust.reviewed_definitions(self.root, self.service)
 
     def test_windows_encoded_background_is_installed_and_trusted_as_exact_full_argv(self):
         # Exercise the Windows renderer on every host, while retaining real
@@ -122,6 +168,8 @@ class HookTrustTests(unittest.TestCase):
                 self.binaries / executable_name("mnemed"), self.binaries / executable_name("mneme-mcp"), 19872,
                 recall_mode="async", reader_model=install.READER_MODELS[0],
                 reader_codex=self.binaries / executable_name("codex"), recording_mode="automatic")
+            plan["python"] = str(interpreter)
+            plan["plan_sha256"] = install.plan_hash(plan)
             install.apply(plan)
             argv = [str(interpreter), str(prefix / "lib/hooks.py"), "--config", str(prefix / "config/hooks.json")]
             front = host_platform.hook_command(argv, windows=True)
@@ -178,8 +226,8 @@ class HookTrustTests(unittest.TestCase):
             spawn.assert_not_called()
         self.assertEqual(len(self.writes()[0]["edits"]), 8)
 
-    def test_existing_owner_config_and_binary_drift_denied_before_native_contact(self):
-        owner = self.install_existing_owner()
+    def test_legacy_owner_config_and_binary_drift_denied_before_native_contact(self):
+        owner = self.install_existing_owner(revision=39)
         original = owner.read_bytes()
         for target in (owner, self.binaries / executable_name("mneme-mcp")):
             with self.subTest(target=target):
@@ -190,6 +238,16 @@ class HookTrustTests(unittest.TestCase):
                 self.assertFalse(self.client.calls)
                 self.assertFalse(self.writes())
                 owner.write_bytes(original)
+
+    def test_dynamic_owner_edition_change_does_not_create_an_implicit_trust_pin(self):
+        owner = self.install_existing_owner()
+        original = owner.read_bytes()
+        (self.binaries / executable_name("mneme-mcp")).write_bytes(b"updated external tool\n")
+        with patch("service._probe") as probe, patch("service.subprocess.Popen") as spawn:
+            self.assertEqual(self.run_trust()["status"], "trusted")
+            probe.assert_not_called()
+            spawn.assert_not_called()
+        self.assertEqual(owner.read_bytes(), original)
 
     def test_existing_owner_drift_during_native_review_denies_trust_write(self):
         owner = self.install_existing_owner()

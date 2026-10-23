@@ -27,21 +27,34 @@ class HostPlatformTests(unittest.TestCase):
         for fields in ({}, {"reader_codex": "codex", "reader_codex_sha256": None},
                        {"reader_codex": "codex", "reader_codex_sha256": "a" * 64},
                        {"reader_codex": "other"}, {"reader_codex": "./codex"},
-                       {"reader_codex": pinned["reader_codex"]},
                        {**pinned, "reader_codex_sha256": "A" * 64}):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 host_platform.validate_reader_codex(fields)
 
-    def test_explicit_reader_preparation_retains_legacy_executable_pin(self):
+    def test_explicit_reader_preparation_keeps_unpinned_lexical_symlink(self):
         path = Path(sys.executable).resolve()
         fields = host_platform.prepare_reader_codex(path)
-        self.assertEqual(fields, {"reader_codex": str(path),
-            "reader_codex_sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        self.assertEqual(fields, {"reader_codex": str(path)})
+        with tempfile.TemporaryDirectory() as temp:
+            link = Path(temp) / "codex"
+            link.symlink_to(path)
+            self.assertEqual(host_platform.prepare_reader_codex(link), {"reader_codex": str(link)})
         for value in ("other", "./codex", "bin/codex", None, 1):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 host_platform.prepare_reader_codex(value)
         with tempfile.TemporaryDirectory() as temp, self.assertRaises(ValueError):
             host_platform.prepare_reader_codex(Path(temp).resolve())
+
+    def test_windows_default_python_is_authored_once_not_substituted_during_replay(self):
+        with patch.object(host_platform.sys, "executable", "/setup/python.exe"):
+            selected = host_platform.prepare_python_selector(windows=True)
+        self.assertEqual(selected, "/setup/python.exe")
+        with patch.object(host_platform.sys, "executable", "/later/python.exe"):
+            self.assertEqual(host_platform.python_hook_argv(selected, ["hooks.py"], windows=True),
+                             ["/setup/python.exe", "hooks.py"])
+        self.assertEqual(host_platform.prepare_python_selector("/stable/python.exe", windows=True),
+                         "/stable/python.exe")
+        self.assertEqual(host_platform.prepare_python_selector(windows=False), "python3")
 
     def test_native_executable_name(self):
         self.assertEqual(host_platform.executable_name("mnemed", windows=True), "mnemed.exe")

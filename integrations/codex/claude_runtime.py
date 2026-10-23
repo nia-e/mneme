@@ -25,32 +25,13 @@ import uuid
 from assessment import AssessmentMixin, AssessmentResponse, TransportError
 import host_files
 import host_process
-from host_platform import is_executable
+from host_platform import resolve_command
 from librarian_policy import resolve
 from rollout_primitives import decode_json
 
 MAX_FRAME_BYTES = 512 * 1024
 MAX_EVENTS_BYTES = 1_000_000
 MAX_FRAMES = 1024
-MAX_PROBE_BYTES = 64 * 1024
-PROBE_SECONDS = 5
-# Compatibility policy: documented Claude Code v2 CLI, at least the documented
-# --permission-prompts floor (2.1.259). Unknown majors are not assumed compatible.
-MINIMUM_CLI_VERSION = (2, 1, 259)
-# Help is positive compatibility metadata, NOT proof that a parser honors flags:
-# Claude's --help/--version paths even ignore unknown switches. Official v2 docs
-# explicitly say help is nonexhaustive; --max-turns is documented yet absent in
-# the official 2.1.302 artifact's help. Exempt ONLY that known hidden flag here;
-# retain --max-turns=1 below. Never retry with weaker flags or provider work.
-# https://code.claude.com/docs/en/cli-reference (CLI flags + --max-turns)
-# https://code.claude.com/docs/en/cli-reference (--permission-prompts version)
-REQUIRED_FLAGS = (
-    "--safe-mode", "--setting-sources", "--settings", "--tools", "--disallowedTools",
-    "--strict-mcp-config", "--mcp-config", "--disable-slash-commands", "--no-chrome",
-    "--no-session-persistence", "--permission-mode", "--permission-prompts",
-    "--output-format", "--verbose", "--input-format", "--model",
-    "--effort", "--session-id", "--system-prompt",
-)
 
 
 def subscription_environment(budget):
@@ -119,7 +100,6 @@ class ClaudeRuntime(AssessmentMixin):
         self._lock = threading.Lock()
         self._closed = self._halted = self._assessment_attempt = False
         self._current_usage = None
-        self._verified = None
 
     def __enter__(self):
         return self
@@ -131,63 +111,25 @@ class ClaudeRuntime(AssessmentMixin):
         return self.config.get(key, default) if isinstance(self.config, dict) else getattr(self.config, key, default)
 
     def _check_binary(self):
-        path, digest = self._config("reader_claude"), self._config("reader_claude_sha256")
-        if (self.budget is None or not isinstance(path, (str, Path)) or not Path(path).is_absolute()
-                or type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        command = self._config("reader_claude", "claude")
+        digest = self._config("reader_claude_sha256")
+        if (self.budget is None or not isinstance(command, (str, Path))
+                or not str(command) or (digest is not None and
+                    (type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None))):
             raise TransportError("invalid_config")
-        path = Path(path)
-        if not is_executable(path):
-            raise TransportError("unavailable")
-        hasher = hashlib.sha256()
-        with path.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
-                hasher.update(block)
-        if hasher.hexdigest() != digest:
-            raise TransportError("binary_changed")
-        return path, digest
-
-    def _probe(self, executable, switch, deadline, env):
-        """Offline capability metadata only; the same finite tree/pipe ownership."""
-        process, pipe = None, None
+        # Resolve in the caller's PATH/cwd, not the neutral assessment directory.
         try:
-            process = host_process.spawn([str(executable), switch], tree=True, cwd=self._own_cwd,
-                env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-            pipe = host_process.BoundedPipe(process)
-            process.stdin.close()
-            output = bytearray()
-            while True:
-                data = pipe.read(min(8192, MAX_PROBE_BYTES + 1 - len(output)), deadline)
-                if not data:
-                    break
-                output.extend(data)
-                if len(output) > MAX_PROBE_BYTES:
-                    raise TransportError("unsupported_runtime")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TransportError("timeout")
-            if process.wait(timeout=remaining) != 0:
-                raise TransportError("unsupported_runtime")
-            return output.decode("utf-8", errors="strict")
-        finally:
-            if process is not None:
-                host_process.terminate_tree(process, timeout=0.1)
-            if pipe is not None:
-                pipe.close()
-
-    def _preflight(self, executable, digest, request, env):
-        if self._verified == (str(executable), digest):
-            return
-        deadline = min(request.deadline, time.monotonic() + PROBE_SECONDS)
-        version = self._probe(executable, "--version", deadline, env)
-        help_text = self._probe(executable, "--help", deadline, env)
-        match = re.fullmatch(r"(\d{1,4})\.(\d{1,4})\.(\d{1,6}) \(Claude Code\)\s*", version)
-        cli_version = tuple(map(int, match.groups())) if match else None
-        advertised = lambda flag: re.search(r"(?<![\w-])" + re.escape(flag) + r"(?=[\s,=<]|$)", help_text) is not None
-        if (cli_version is None or cli_version[0] != 2 or cli_version < MINIMUM_CLI_VERSION
-                or not all(advertised(flag) for flag in REQUIRED_FLAGS)
-                or not (advertised("--print") or advertised("-p"))):
-            raise TransportError("unsupported_runtime")
-        self._verified = (str(executable), digest)
+            path = Path(resolve_command(str(command), default="claude"))
+        except ValueError:
+            raise TransportError("unavailable") from None
+        if digest is not None:
+            hasher = hashlib.sha256()
+            with path.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    hasher.update(block)
+            if hasher.hexdigest() != digest:
+                raise TransportError("binary_changed")
+        return path, digest
 
     def _begin_assessment(self, _frame_bytes):
         self._assessment_attempt = False
@@ -206,11 +148,6 @@ class ClaudeRuntime(AssessmentMixin):
         # Schema is plain prompt data: --json-schema can run hidden repair turns.
         # Host strict validation is terminal; no output repair/retry lives here.
         prompt = request.prompt_with_schema().encode("utf-8")
-        try:
-            self._preflight(executable, digest, request, env)
-        except (TimeoutError, subprocess.TimeoutExpired):
-            raise TransportError("timeout") from None
-        self._check_binary()  # Refuse changed executable before any provider attempt.
         session = str(uuid.uuid4())
         command = [str(executable), "-p", "--safe-mode", "--setting-sources=",
             '--settings={"disableAllHooks":true,"autoMemoryEnabled":false,"disableClaudeAiConnectors":true}',

@@ -25,7 +25,7 @@ import time
 
 sys.dont_write_bytecode = True
 REQUIRED = ("signal_store.py", "signal_bridge.py", "signal_tools.py", "signal_jsonrpc.py",
-            "wake.py", "heartbeat.py", "inbox_hook.py")
+            "wake.py", "heartbeat.py", "codex_guard.py", "raw_codex.py", "inbox_hook.py")
 PRIOR = {"signal_store_v2.py": "0825937e341e8585038f00a91939b7ba0afa1fa07b801419b744446116e74268",
          "wake_v3.py": "df38ecd86e624499955bcdfdd6921f2fc98d1c3d1351794052e5960a153e825b"}
 OWNER = "22222222-2222-4222-8222-222222222222"

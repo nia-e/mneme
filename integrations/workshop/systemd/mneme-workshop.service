@@ -14,9 +14,10 @@ WorkingDirectory=/home/user/workshop
 Environment=HOME=/home/user
 Environment=PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStartPre=/usr/bin/python3 -B /home/user/.local/share/mneme/workshop/current/wake.py --root /home/user/workshop maintain
-# Pin the real executable here, not the guarded ~/.local/bin/codex launcher:
-# heartbeat.py itself holds the same activity lock through both model stages.
-ExecStart=/usr/bin/python3 -B /home/user/.local/share/mneme/workshop/current/heartbeat.py --root /home/user/workshop --codex /home/user/.local/share/codex/current/bin/codex --timeout 600 --hourly-background --max-log-bytes 262144 run
+# Select complete installed raw packages here, not the guarded ~/.local/bin/codex launcher.
+# heartbeat.py resolves one edition per cycle and holds the same activity lock
+# through both model stages; new complete installs affect only subsequent cycles.
+ExecStart=/usr/bin/python3 -B /home/user/.local/share/mneme/workshop/current/heartbeat.py --root /home/user/workshop --codex-packages /home/user/.local/share/codex --timeout 600 --hourly-background --max-log-bytes 262144 run
 # Interactive inbox routing stays disabled in this template. A reviewed override
 # may add --signal-source signal-owner after its owner bridge is configured, and/or
 # --mailbox-inbox for authenticated SSH delegations, before run. Both share default

@@ -46,6 +46,22 @@ class ShadowTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 shadow._validate({**self.payload, "model": bad})
 
+    def test_unpinned_path_command_resolves_for_each_spawn(self):
+        command = self.root / ("codex.exe" if os.name == "nt" else "codex")
+        command.write_bytes(b"fake executable")
+        command.chmod(0o700)
+        payload = {key: value for key, value in self.payload.items()
+                   if key not in ("codex", "codex_sha256")}
+        with patch.dict(os.environ, {"PATH": str(self.root)}):
+            for contents in (b"first", b"replacement"):
+                command.write_bytes(contents)
+                with patch.object(shadow.host_process, "spawn", side_effect=OSError("ordinary failure")) as spawn:
+                    result = shadow._run(shadow._validate(payload))
+                self.assertEqual(spawn.call_args.args[0][0], str(command))
+                self.assertEqual(result["status"], "model_unavailable")
+        with patch.dict(os.environ, {"PATH": str(self.root / "missing")}):
+            self.assertEqual(shadow._run(shadow._validate(payload))["status"], "model_unavailable")
+
     def test_command_is_ephemeral_and_disables_recursive_hooks_and_tools(self):
         command = shadow._command(str(self.codex), "gpt-5.6-sol", self.root / "schema",
                                   self.root / "out", self.root)

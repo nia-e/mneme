@@ -52,8 +52,7 @@ class ReaderPathConfigTests(unittest.TestCase):
                 self.assertEqual(validate(value), value)
                 self.assertEqual(validate({**value, **self.pinned}), {**value, **self.pinned})
                 for change in ({"reader_codex_sha256": None}, {"reader_codex_sha256": "b" * 64},
-                               {"reader_codex": "./codex"}, {"reader_codex": "other"},
-                               {"reader_codex": self.pinned["reader_codex"]}):
+                               {"reader_codex": "./codex"}, {"reader_codex": "other"}):
                     with self.subTest(change=change), self.assertRaises(ValueError):
                         validate({**value, **change})
 
@@ -76,9 +75,22 @@ class ReaderPathConfigTests(unittest.TestCase):
             spawn.assert_not_called()
         self.assertFalse((self.root / "state").exists())
 
+    def test_absolute_unpinned_selector_is_lexical_and_does_not_require_executable(self):
+        selector = str(self.root / 'symlink-codex')
+        target = self.root / 'version-one'
+        target.write_text('first')
+        Path(selector).symlink_to(target)
+        value = {**self.native, 'reader_codex': selector}
+        loaded = self.load_native(value)
+        self.assertEqual(str(loaded['reader_codex']), selector)
+        self.assertNotIn('reader_codex_sha256', loaded)
+        target.unlink()
+        self.assertEqual(str(self.load_native(value)['reader_codex']), selector)
+
     def test_workspace_override_replaces_reader_mode_without_inherited_hash(self):
         for parent, child in ((self.pinned, {"reader_codex": "codex"}),
-                              ({"reader_codex": "codex"}, self.pinned)):
+                              ({"reader_codex": "codex"}, self.pinned),
+                              (self.pinned, {"reader_codex": self.pinned["reader_codex"]})):
             with self.subTest(parent=parent, child=child):
                 value = {**self.native, **parent, "workspace_adapters": [
                     {"root": str(self.root), "state_dir": str(self.root / "workspace-state"), **child}]}
@@ -92,10 +104,10 @@ class ReaderPathConfigTests(unittest.TestCase):
                     self.assertEqual(loaded["reader_codex_sha256"], child["reader_codex_sha256"])
                 self.assertEqual(value, original)
 
-    def test_workspace_path_mode_rejects_ambiguous_hash_and_missing_legacy_hash(self):
+    def test_workspace_path_mode_rejects_ambiguous_hash_and_relative_commands(self):
         base = {"root": str(self.root), "state_dir": str(self.root / "workspace-state"), "reader_codex": "codex"}
         for change in ({"reader_codex_sha256": None}, {"reader_codex_sha256": "b" * 64},
-                       {"reader_codex": self.pinned["reader_codex"]}, {"reader_codex": "elsewhere"}):
+                       {"reader_codex": "elsewhere"}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 registry_runtime.validate_native_static({**self.native, "workspace_adapters": [{**base, **change}]})
 

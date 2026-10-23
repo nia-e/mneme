@@ -15,6 +15,85 @@ from install_test_support import InstallFixture
 
 
 class InstallTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform != "win32", "POSIX interpreter symlink fixture")
+    def test_explicit_runtime_python_symlink_retargets_next_installed_hook(self):
+        import os
+        import shlex
+        program = self.sources / 'hooks.py'
+        program.write_text('import os; print(os.environ["MNEME_PYTHON_EDITION"])\n')
+        selector = self.sources / 'current-python'
+        first = self.sources / 'python-first'
+        second = self.sources / 'python-second'
+        for target, edition in ((first, 'first'), (second, 'second')):
+            target.write_text('#!/bin/sh\nexport MNEME_PYTHON_EDITION=' + edition + '\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
+            target.chmod(0o700)
+        selector.symlink_to(first)
+        plan = install.prepare(self.project, self.prefix, self.sources / "mnemed",
+            self.sources / "mneme-mcp", 18765, program_root=self.sources, python=str(selector))
+        install.apply(plan)
+        command = install.planned_hook_handlers(plan)['SessionStart'][0]['hooks'][0]['command']
+        for target, edition in ((first, b'first'), (second, b'second')):
+            selector.unlink()
+            selector.symlink_to(target)
+            result = subprocess.run(shlex.split(command), capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), edition)
+        self.assertEqual(plan['python'], str(selector))
+
+    def test_fresh_native_launch_choices_are_dynamic_but_old_receipts_remain_exact(self):
+        current = self.async_plan()
+        self.assertEqual(install.runtime_configs(current)[0]['binary'], 'mneme-mcp')
+        old = {**current, 'config_revision': 38, 'python': sys.executable}
+        old['plan_sha256'] = install.plan_hash(old)
+        install.validate_plan(old)
+        self.assertEqual(install.runtime_configs(old)[0]['binary'], str(self.prefix / 'bin/mneme-mcp'))
+        # Payloads are still independently reviewed bytes, not launch selectors.
+        native = next(row for row in current['files'] if row['destination'] == 'bin/mneme-mcp')
+        self.assertEqual(native['sha256'], install.digest((self.sources / 'mneme-mcp').read_bytes()))
+
+    def test_explicit_python_selector_is_lexical_and_does_not_pin_an_edition(self):
+        link = self.sources / 'selected-python'
+        link.symlink_to(sys.executable)
+        plan = install.prepare(self.project, self.prefix, self.sources / 'mnemed',
+            self.sources / 'mneme-mcp', 18765, program_root=self.sources, python=str(link))
+        self.assertEqual(plan['python'], str(link))
+        handler = install.planned_hook_handlers(plan)['SessionStart'][0]['hooks'][0]
+        self.assertEqual(__import__('shlex').split(handler['command'])[0], str(link))
+        server = tomllib.loads(install.config_outputs(plan, {'config.toml': None, 'hooks.json': None})[
+            'config.toml'].decode())['mcp_servers'][install.SERVER]
+        self.assertEqual(server['command'], str(link))
+        link.unlink()
+        self.assertEqual(install.planned_hook_handlers(plan)['SessionStart'][0]['hooks'][0], handler)
+        install.validate_plan(plan)
+        self.assertFalse(self.prefix.exists())
+
+    def test_explicit_native_tool_selectors_are_separate_from_artifact_sources(self):
+        mcp, native = self.sources / 'selected-mcp', self.sources / 'selected-native'
+        mcp.symlink_to(self.sources / 'mneme-mcp')
+        native.symlink_to(self.sources / 'mnemed')
+        plan = install.prepare(self.project, self.prefix, self.sources / 'mnemed',
+            self.sources / 'mneme-mcp', 18765, program_root=self.sources,
+            mcp_command=str(mcp), native_command=str(native))
+        self.assertEqual(plan['mcp_command'], str(mcp))
+        self.assertEqual(plan['native_command'], str(native))
+        self.assertEqual(install.runtime_configs(plan)[0]['binary'], str(mcp))
+        self.assertEqual(plan['files'][1]['source'], str(self.sources / 'mneme-mcp'))
+        mcp.unlink()
+        native.unlink()
+        install.validate_plan(plan)  # Static configuration is not an edition check.
+
+    def test_windows_default_python_is_selected_at_authoring_not_receipt_replay(self):
+        selected = str(self.sources / 'setup-python.exe')
+        with patch('install.HOST_PLATFORM', 'windows'), patch.object(sys, 'executable', selected):
+            plan = self.plan()
+        self.assertEqual(plan['python'], selected)
+        before = {'config.toml': None, 'hooks.json': None}
+        outputs = install.config_outputs(plan, before)
+        with patch.object(sys, 'executable', str(self.sources / 'later-python.exe')):
+            self.assertEqual(install.config_outputs(plan, before), outputs)
+        server = tomllib.loads(outputs['config.toml'].decode())['mcp_servers'][install.SERVER]
+        self.assertEqual(server['command'], selected)
+
     def test_shared_async_handler_builder_keeps_exact_lifecycle_shape(self):
         events = install.hook_handlers("python hook_launcher.py --config device.json", async_mode=True, recording=True)
         self.assertEqual(set(events), {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "Interrupt", "SessionEnd"})
@@ -28,6 +107,7 @@ class InstallTests(unittest.TestCase):
         current = self.plan()
         old = copy.deepcopy(current)
         old["config_revision"] = 19
+        if old["config_revision"] < 40: old["python"] = sys.executable
         old.pop("tag_stewardship", None)
         old.pop("tag_guide_id", None)
         old["files"] = old["files"][:len(install.V19_DESTINATIONS)]
@@ -35,7 +115,7 @@ class InstallTests(unittest.TestCase):
         install.validate_plan(old)
         self.assertNotEqual(len(old["files"]), len(install.DESTINATIONS))
         before = {"config.toml": None, "hooks.json": None}
-        self.assertEqual(install.config_outputs(old, before), install.config_outputs(current, before))
+        self.assertEqual(install.config_outputs(old, before), install.config_outputs({**current, "config_revision": 38, "python": sys.executable}, before))
 
     def test_touchstone_handoff_inventory_is_versioned_on_both_platforms(self):
         self.assertEqual(len(install.V26_DESTINATIONS), 40)
@@ -54,6 +134,7 @@ class InstallTests(unittest.TestCase):
                     install.validate_plan(current)
                     old = copy.deepcopy(current)
                     old["config_revision"] = revision
+                    if old["config_revision"] < 40: old["python"] = sys.executable
                     old["files"] = old["files"][:len(install.V28_DESTINATIONS if revision >= 28 else install.V26_DESTINATIONS)]
                     old["plan_sha256"] = install.plan_hash(old)
                     install.validate_plan(old)
@@ -67,6 +148,7 @@ class InstallTests(unittest.TestCase):
                             install.validate_plan(invalid)
                     future = copy.deepcopy(current)
                     future["config_revision"] = install.EXISTING_SERVICE_REVISION + 1
+                    if future["config_revision"] < 40: future["python"] = sys.executable
                     future["plan_sha256"] = install.plan_hash(future)
                     with self.assertRaisesRegex(ValueError, "unsupported planned configuration revision"):
                         install.validate_plan(future)
@@ -94,8 +176,8 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(install.V34_DESTINATIONS, (*install.V32_DESTINATIONS, ("lib/stable_hooks.py", False)))
         self.assertEqual(install.V36_DESTINATIONS, (*install.V34_DESTINATIONS, ("lib/session_activity.py", False)))
         self.assertEqual(install.DESTINATIONS, (*install.V36_DESTINATIONS, ("lib/packet_accounting.py", False)))
-        self.assertEqual(install.CONFIG_REVISION, 38)
-        self.assertEqual(install.EXISTING_SERVICE_REVISION, 39)
+        self.assertEqual(install.CONFIG_REVISION, 40)
+        self.assertEqual(install.EXISTING_SERVICE_REVISION, 41)
 
     def test_genuine_revision30_inventory_and_old_plans_do_not_gain_review_module(self):
         fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
@@ -110,6 +192,7 @@ class InstallTests(unittest.TestCase):
             with self.subTest(revision=revision):
                 old = copy.deepcopy(current)
                 old["config_revision"] = revision
+                if old["config_revision"] < 40: old["python"] = sys.executable
                 old["files"] = old["files"][:len(install.V30_DESTINATIONS)]
                 old["plan_sha256"] = install.plan_hash(old)
                 install.validate_plan(old)
@@ -134,6 +217,7 @@ class InstallTests(unittest.TestCase):
                     install.validate_plan(current)
                     old = copy.deepcopy(current)
                     old["config_revision"] = revision
+                    if old["config_revision"] < 40: old["python"] = sys.executable
                     old["files"] = old["files"][:len(install.V32_DESTINATIONS)]
                     old["plan_sha256"] = install.plan_hash(old)
                     install.validate_plan(old)
@@ -168,6 +252,7 @@ class InstallTests(unittest.TestCase):
                     install.validate_plan(current)
                     old = copy.deepcopy(current)
                     old["config_revision"] = revision
+                    if old["config_revision"] < 40: old["python"] = sys.executable
                     old["files"] = old["files"][:len(install.V36_DESTINATIONS)]
                     old["plan_sha256"] = install.plan_hash(old)
                     install.validate_plan(old)
@@ -247,10 +332,11 @@ class InstallTests(unittest.TestCase):
                 current["prefix"] = str(prefix)
                 old = copy.deepcopy(current)
                 old["config_revision"] = revision
+                if old["config_revision"] < 40: old["python"] = sys.executable
                 old["files"] = old["files"][:len(inventory)]
                 old["plan_sha256"] = install.plan_hash(old)
                 outputs = install.config_outputs(old, originals)
-                self.assertEqual(outputs, install.config_outputs(current, originals))
+                self.assertEqual(outputs, install.config_outputs({**current, "config_revision": revision, "python": sys.executable}, originals))
                 result = install.apply(old)
                 self.assertEqual((prefix / "lib/touchstone_handoff.py").exists(), revision >= 28)
                 self.assertEqual((prefix / "lib/assessment.py").exists(), revision >= 30)
@@ -348,6 +434,27 @@ class InstallTests(unittest.TestCase):
             spawn.assert_not_called()
         self.assertEqual(state_path.read_bytes(), original_state)
 
+    def test_fresh_dynamic_service_can_be_retained_without_freezing_an_owner_edition(self):
+        initial = self.plan()
+        first = install.apply(initial)
+        original_service = self.prefix / 'config/service.json'
+        original_bytes = original_service.read_bytes()
+        self.assertEqual(json.loads(original_bytes)['binary'], 'mneme-mcp')
+        install.uninstall(first['receipt'])
+        self.prefix = self.base / 'retained-dynamic-runtime'
+        with patch('host_platform.shutil.which', side_effect=AssertionError('owner selector resolved during preparation')), \
+             patch('service._probe') as probe, patch('service.subprocess.Popen') as spawn:
+            retained = self.existing_plan(original_service)
+            self.assertEqual(retained['config_revision'], 41)
+            self.assertNotIn('existing_owner_binary', retained)
+            install.validate_plan(retained)
+            self.assertFalse(self.prefix.exists())
+            install.apply(retained)
+            probe.assert_not_called()
+            spawn.assert_not_called()
+        self.assertEqual((self.prefix / 'config/service.json').read_bytes(), original_bytes)
+        self.assertEqual(original_service.read_bytes(), original_bytes)
+
     def test_existing_owner_accepts_exact_named_project_schema(self):
         path, data = self.existing_owner()
         data["database_path"] = data.pop("project_db")
@@ -376,7 +483,7 @@ class InstallTests(unittest.TestCase):
     def test_existing_owner_rejects_foreign_mixed_connect_and_unbounded_inputs(self):
         cases = [
             {"project_db": "/foreign.db"}, {"working_directory": "/foreign"},
-            {"port": True}, {"port": 19876}, {"binary": str(self.sources / "mnemed")},
+            {"port": True}, {"port": 19876}, {"binary": "other-command"},
             {"database_name": "user", "database_path": "/foreign.db"},
             {"mode": "connect", "url": "http://127.0.0.1:18765/"},
             {"unknown": True}, {"state_dir": "relative"},
@@ -429,6 +536,7 @@ class InstallTests(unittest.TestCase):
                               (21, {**plan["existing_service_config"], "unknown": True})):
             candidate = copy.deepcopy(plan)
             candidate["config_revision"] = revision
+            if candidate["config_revision"] < 40: candidate["python"] = sys.executable
             if pin is None:
                 candidate.pop("existing_service_config")
             else:
@@ -445,6 +553,7 @@ class InstallTests(unittest.TestCase):
     def test_revision20_receipt_outputs_and_uninstall_remain_unchanged(self):
         plan = self.plan()
         plan["config_revision"] = 20
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         plan["files"] = plan["files"][:len(install.V20_DESTINATIONS)]
@@ -527,6 +636,7 @@ class InstallTests(unittest.TestCase):
     def test_rev5_receipt_shape_remains_known_but_old_plan_cannot_apply(self):
         plan = self.plan()
         plan['config_revision'] = 5
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -544,6 +654,7 @@ class InstallTests(unittest.TestCase):
     def test_rev6_output_retains_exact_legacy_tools_and_cannot_apply(self):
         plan = self.plan()
         plan['config_revision'] = 6
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -567,6 +678,7 @@ class InstallTests(unittest.TestCase):
         plan = self.plan()
         result = install.apply(plan)
         plan['config_revision'] = 6
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -592,6 +704,7 @@ class InstallTests(unittest.TestCase):
         result = install.apply(current)
         old = copy.deepcopy(current)
         old['config_revision'] = 7
+        if old["config_revision"] < 40: old["python"] = sys.executable
         old.pop("tag_stewardship", None)
         old.pop("tag_guide_id", None)
         self.historic(old)
@@ -618,6 +731,7 @@ class InstallTests(unittest.TestCase):
         result = install.apply(current)
         old = copy.deepcopy(current)
         old['config_revision'] = 8
+        if old["config_revision"] < 40: old["python"] = sys.executable
         old.pop("tag_stewardship", None)
         old.pop("tag_guide_id", None)
         self.historic(old)
@@ -642,6 +756,7 @@ class InstallTests(unittest.TestCase):
     def test_rev8_pending_recovers_original_shadow_output(self):
         old = self.shadow_plan()
         old['config_revision'] = 8
+        if old["config_revision"] < 40: old["python"] = sys.executable
         old.pop("tag_stewardship", None)
         old.pop("tag_guide_id", None)
         self.historic(old)
@@ -687,9 +802,11 @@ class InstallTests(unittest.TestCase):
                     old.pop('recall_mode')
                 if revision == 1:
                     old.pop('config_revision')
+                    old['python'] = sys.executable
                     self.historic(old)
                 else:
                     old['config_revision'] = revision
+                    if old["config_revision"] < 40: old["python"] = sys.executable
                     old.pop("tag_stewardship", None)
                     old.pop("tag_guide_id", None)
                     self.historic(old)
@@ -703,7 +820,6 @@ class InstallTests(unittest.TestCase):
     def test_shadow_requires_explicit_model_and_pinned_absolute_codex(self):
         for options, message in [
             ({'recall_mode': 'shadow'}, '--shadow-model'),
-            ({'recall_mode': 'shadow', 'shadow_model': 'gpt-5.6-sol'}, 'absolute --shadow-codex'),
             ({'shadow_model': 'gpt-5.6-sol'}, 'require --recall-mode shadow'),
         ]:
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, message):
@@ -713,19 +829,26 @@ class InstallTests(unittest.TestCase):
         codex = self.sources / 'codex'
         codex.write_text('# fixture\n')
         codex.chmod(0o700)
-        with self.assertRaisesRegex(ValueError, 'absolute --shadow-codex'):
+        with self.assertRaisesRegex(ValueError, "'codex' or an absolute path"):
             install.prepare(self.project, self.prefix, self.sources / 'mnemed',
                             self.sources / 'mneme-mcp', 18765, program_root=self.sources,
                             recall_mode='shadow', shadow_model='gpt-5.6-sol',
-                            shadow_codex=Path('codex'))
+                            shadow_codex=Path('other-codex'))
         self.assertFalse(self.prefix.exists())
 
-    def test_shadow_bundle_is_pinned_without_copying_external_codex(self):
+    def test_shadow_defaults_to_dynamic_path_selector_without_lookup(self):
+        with patch('shutil.which', side_effect=AssertionError('resolved during prepare')):
+            plan = install.prepare(self.project, self.prefix, self.sources / 'mnemed',
+                self.sources / 'mneme-mcp', 18765, program_root=self.sources,
+                recall_mode='shadow', shadow_model='gpt-5.6-sol')
+        self.assertEqual(plan['shadow_codex'], 'codex')
+        hook = install.runtime_configs(plan)[1]
+        self.assertEqual(hook['shadow_codex'], 'codex')
+        self.assertNotIn('shadow_codex_sha256', hook)
+
+    def test_shadow_bundle_is_dynamic_without_copying_external_codex(self):
         plan = self.shadow_plan()
-        self.assertEqual(plan['shadow_codex'], {
-            'source': str((self.sources / 'codex').resolve()),
-            'sha256': install.digest((self.sources / 'codex').read_bytes()),
-        })
+        self.assertEqual(plan['shadow_codex'], str(self.sources / 'codex'))
         self.assertEqual(plan['files'][10]['destination'], 'lib/shadow.py')
         shadow = next(row for row in plan['files'] if row['destination'] == 'lib/shadow.py')
         self.assertEqual(shadow['sha256'], install.digest((self.sources / 'shadow.py').read_bytes()))
@@ -740,7 +863,6 @@ class InstallTests(unittest.TestCase):
             'memory_mode': 'shadow',
             'shadow_model': 'gpt-5.6-sol',
             'shadow_codex': str((self.sources / 'codex').resolve()),
-            'shadow_codex_sha256': plan['shadow_codex']['sha256'],
         })
         codex_hooks = json.loads((self.project / '.codex/hooks.json').read_text())['hooks']
         self.assertEqual(codex_hooks['UserPromptSubmit'][-1]['hooks'][0]['additionalContextLimit'], 0)
@@ -758,6 +880,12 @@ class InstallTests(unittest.TestCase):
         changed['plan_sha256'] = install.plan_hash(changed)
         with self.assertRaisesRegex(ValueError, 'explicit supported shadow model'):
             install.apply(changed)
+        plan['shadow_codex'] = {'source': str(self.sources / 'codex'),
+                                'sha256': install.digest((self.sources / 'codex').read_bytes())}
+        plan['plan_sha256'] = install.plan_hash(plan)
+        install.validate_plan(plan)
+        hook = install.runtime_configs(plan)[1]
+        self.assertEqual(hook['shadow_codex_sha256'], plan['shadow_codex']['sha256'])
         (self.sources / 'codex').write_text('# changed fixture\n')
         with self.assertRaisesRegex(ValueError, 'shadow Codex executable changed'):
             install.apply(plan)
@@ -799,6 +927,7 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         old = copy.deepcopy(plan)
         old['config_revision'] = 14
+        if old["config_revision"] < 40: old["python"] = sys.executable
         old.pop("tag_stewardship", None)
         old.pop("tag_guide_id", None)
         old['files'] = old['files'][:len(install.V14_DESTINATIONS)]
@@ -806,15 +935,15 @@ class InstallTests(unittest.TestCase):
         install.validate_plan(old)
         original = {'config.toml': None, 'hooks.json': None}
         self.assertEqual(install.config_outputs(old, original),
-                         install.config_outputs({**plan, 'config_revision': 17}, original))
+                         install.config_outputs({**plan, 'config_revision': 17, 'python': sys.executable}, original))
         with self.assertRaisesRegex(ValueError, 'prepare a new plan'):
             install.apply(old)
         self.assertFalse(self.prefix.exists())
 
     def test_revision13_recovery_output_is_byte_stable_and_cannot_gain_new_policy(self):
         plan = self.async_plan(recording_mode='automatic')
-        current = install.config_outputs({**plan, 'config_revision':17}, {'config.toml':None,'hooks.json':None})
-        old = copy.deepcopy(plan); old['config_revision'] = 13; self.historic(old)
+        current = install.config_outputs({**plan, 'config_revision':17, 'python': sys.executable}, {'config.toml':None,'hooks.json':None})
+        old = copy.deepcopy(plan); old['config_revision'] = 13; old['python'] = sys.executable; self.historic(old)
         old['plan_sha256'] = install.plan_hash(old)
         install.validate_plan(old)
         self.assertEqual(install.config_outputs(old, {'config.toml':None,'hooks.json':None}),current)
@@ -889,10 +1018,7 @@ class InstallTests(unittest.TestCase):
 
     def test_async_bundle_hook_groups_and_uninstall(self):
         plan = self.async_plan()
-        self.assertEqual(plan['reader_codex'], {
-            'source': str((self.sources / 'codex').resolve()),
-            'sha256': install.digest((self.sources / 'codex').read_bytes()),
-        })
+        self.assertEqual(plan['reader_codex'], str(self.sources / 'codex'))
         self.assertEqual([row['destination'] for row in plan['files'][11:14]],
                          ['lib/reader_worker.py', 'lib/reader_runtime.py', 'lib/reader_contract.py'])
         result = install.apply(plan)
@@ -907,7 +1033,6 @@ class InstallTests(unittest.TestCase):
             'librarian_effort': 'medium', 'recording_mode': 'off',
             'tag_stewardship': False, 'tag_guide_id': None,
             'reader_codex': str((self.sources / 'codex').resolve()),
-            'reader_codex_sha256': plan['reader_codex']['sha256'],
         })
         events = json.loads((self.project / '.codex/hooks.json').read_text())['hooks']
         self.assertEqual(set(events), {'SessionStart', 'UserPromptSubmit', 'Stop',
@@ -931,6 +1056,26 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(events[name][0]['hooks'][0]['timeout'], 5)
         self.assertEqual(install.uninstall(result['receipt'])['status'], 'configuration removed')
 
+    def test_explicit_selectors_preserve_symlink_and_follow_updates_after_prepare(self):
+        for mode in ('async', 'shadow'):
+            with self.subTest(mode=mode):
+                self.prefix = self.base / ('dynamic-' + mode)
+                plan = self.async_plan() if mode == 'async' else self.shadow_plan()
+                field = 'reader_codex' if mode == 'async' else 'shadow_codex'
+                link = self.sources / ('selected-' + mode)
+                link.symlink_to(self.sources / 'codex')
+                options = dict(recall_mode=mode)
+                options.update(reader_model='gpt-6.1-sol', reader_codex=link) if mode == 'async' else options.update(
+                    shadow_model='gpt-5.6-sol', shadow_codex=link)
+                prepared = install.prepare(self.project, self.prefix, self.sources / 'mnemed',
+                    self.sources / 'mneme-mcp', 18765, program_root=self.sources, **options)
+                self.assertEqual(prepared[field], str(link))
+                self.assertNotIn(field + '_sha256', install.runtime_configs(prepared)[1])
+                (self.sources / 'codex').write_text('# updated external executable\n')
+                result = install.apply(prepared)
+                self.assertEqual(json.loads((self.prefix / 'config/hooks.json').read_text())[field], str(link))
+                install.uninstall(result['receipt'])
+
     def test_async_reader_pin_drift_and_plan_validation(self):
         plan = self.async_plan()
         altered = copy.deepcopy(plan)
@@ -938,6 +1083,12 @@ class InstallTests(unittest.TestCase):
         altered['plan_sha256'] = install.plan_hash(altered)
         with self.assertRaisesRegex(ValueError, 'supported reader model'):
             install.apply(altered)
+        plan['reader_codex'] = {'source': str(self.sources / 'codex'),
+                                'sha256': install.digest((self.sources / 'codex').read_bytes())}
+        plan['plan_sha256'] = install.plan_hash(plan)
+        install.validate_plan(plan)
+        hook = install.runtime_configs(plan)[1]
+        self.assertEqual(hook['reader_codex_sha256'], plan['reader_codex']['sha256'])
         (self.sources / 'codex').write_text('# changed fixture\n')
         with self.assertRaisesRegex(ValueError, 'reader Codex executable changed'):
             install.apply(plan)
@@ -947,7 +1098,7 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         result = install.apply(plan)
         original = {'config.toml': None, 'hooks.json': None}
-        current = install.config_outputs(plan, original)
+        current = install.config_outputs({**plan, "config_revision": 38, "python": sys.executable}, original)
         expected = json.loads(current['hooks.json'])
         end = expected['hooks']['SessionEnd']
         end[0]['hooks'][0]['timeout'] = 5
@@ -955,6 +1106,7 @@ class InstallTests(unittest.TestCase):
         end.append({'hooks': [{'type': 'command', 'command': command + ' --reader-background',
                                'timeout': 5, 'async': True}]})
         plan['config_revision'] = 17
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         plan['files'] = plan['files'][:len(install.V19_DESTINATIONS)]
@@ -1043,6 +1195,7 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         result = install.apply(plan)
         plan['config_revision'] = 9
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -1073,6 +1226,7 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         result = install.apply(plan)
         plan['config_revision'] = 10
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -1095,6 +1249,7 @@ class InstallTests(unittest.TestCase):
     def test_revision9_pending_recovers_original_async_output(self):
         plan = self.async_plan()
         plan['config_revision'] = 9
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -1115,9 +1270,10 @@ class InstallTests(unittest.TestCase):
     def test_revision11_outputs_keep_exact_pre_save_authorization(self):
         plan = self.async_plan(recording_mode='automatic')
         before = {'config.toml': b'# existing config\n', 'hooks.json': None}
-        current = install.config_outputs({**plan, 'config_revision':17}, before)
+        current = install.config_outputs({**plan, 'config_revision':17, 'python': sys.executable}, before)
         old = copy.deepcopy(plan)
         old['config_revision'] = 11
+        if old["config_revision"] < 40: old["python"] = sys.executable
         old.pop("tag_stewardship", None)
         old.pop("tag_guide_id", None)
         self.historic(old)
@@ -1139,9 +1295,10 @@ class InstallTests(unittest.TestCase):
     def test_revision12_keeps_exact_pre_concern_authorization(self):
         plan = self.async_plan(recording_mode='automatic')
         before = {'config.toml': b'# existing config\n', 'hooks.json': None}
-        current = install.config_outputs({**plan, 'config_revision':17}, before)
+        current = install.config_outputs({**plan, 'config_revision':17, 'python': sys.executable}, before)
         old = copy.deepcopy(plan)
         old['config_revision'] = 12
+        if old["config_revision"] < 40: old["python"] = sys.executable
         old.pop("tag_stewardship", None)
         old.pop("tag_guide_id", None)
         self.historic(old)
@@ -1164,6 +1321,7 @@ class InstallTests(unittest.TestCase):
         plan = self.async_plan(recording_mode='automatic')
         result = install.apply(plan)
         plan['config_revision'] = 11
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -1183,6 +1341,7 @@ class InstallTests(unittest.TestCase):
     def test_revision11_pending_recovers_original_bytes_without_save(self):
         plan = self.async_plan(recording_mode='automatic')
         plan['config_revision'] = 11
+        if plan["config_revision"] < 40: plan["python"] = sys.executable
         plan.pop("tag_stewardship", None)
         plan.pop("tag_guide_id", None)
         self.historic(plan)
@@ -1219,9 +1378,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(server['enabled_tools'], install.TOOLS)
         self.assertIn('episode', server['enabled_tools'])
         self.assertIn('save', server['enabled_tools'])
-        self.assertEqual(server['command'], sys.executable)
-        self.assertEqual(server['args'], [str(self.prefix / 'lib/launcher.py'),
+        expected_argv = install.python_hook_argv('python3', [str(self.prefix / 'lib/launcher.py'),
                                           '--service-config', str(self.prefix / 'config/service.json')])
+        self.assertEqual([server['command'], *server['args']], expected_argv)
         self.assertEqual(server['startup_timeout_sec'], 30)
         self.assertNotIn('url', server)
         self.assertEqual(set(server['tools']), set(install.TOOLS))
@@ -1270,9 +1429,11 @@ class InstallTests(unittest.TestCase):
         old_plan.pop('recall_mode')
         if revision == 1:
             old_plan.pop('config_revision')
+            old_plan['python'] = sys.executable
             self.historic(old_plan)
         else:
             old_plan['config_revision'] = revision
+            if old_plan["config_revision"] < 40: old_plan["python"] = sys.executable
             old_plan.pop("tag_stewardship", None)
             old_plan.pop("tag_guide_id", None)
             self.historic(old_plan)
@@ -1292,6 +1453,7 @@ class InstallTests(unittest.TestCase):
         result = install.apply(original)
         old_plan = copy.deepcopy(original)
         old_plan['config_revision'] = 3
+        if old_plan["config_revision"] < 40: old_plan["python"] = sys.executable
         old_plan.pop("tag_stewardship", None)
         old_plan.pop("tag_guide_id", None)
         self.historic(old_plan)
@@ -1336,6 +1498,7 @@ class InstallTests(unittest.TestCase):
         result = install.apply(plan)
         old_plan = copy.deepcopy(plan)
         old_plan['config_revision'] = 2
+        if old_plan["config_revision"] < 40: old_plan["python"] = sys.executable
         old_plan.pop("tag_stewardship", None)
         old_plan.pop("tag_guide_id", None)
         self.historic(old_plan)
@@ -1363,6 +1526,7 @@ class InstallTests(unittest.TestCase):
         result = install.apply(plan)
         old_plan = copy.deepcopy(plan)
         old_plan['config_revision'] = 3
+        if old_plan["config_revision"] < 40: old_plan["python"] = sys.executable
         old_plan.pop("tag_stewardship", None)
         old_plan.pop("tag_guide_id", None)
         self.historic(old_plan)
@@ -1390,8 +1554,10 @@ class InstallTests(unittest.TestCase):
                 plan = self.plan()
                 if revision == 1:
                     plan.pop('config_revision')
+                    plan['python'] = sys.executable
                 else:
                     plan['config_revision'] = revision
+                    if plan["config_revision"] < 40: plan["python"] = sys.executable
                     plan.pop("tag_stewardship", None)
                     plan.pop("tag_guide_id", None)
                     self.historic(plan)

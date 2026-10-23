@@ -232,14 +232,16 @@ class NativeHookConfigTests(unittest.TestCase):
         self.assertEqual(select.call_args.args[0], str(logical))
         self.assertFalse((self.root / "state").exists())
 
-    def test_only_native_memory_toml_gets_symlink_admission(self):
+    def test_tool_selectors_allow_symlinks_but_state_and_auth_do_not(self):
         target = self.root / "target"
         target.write_text("fixture")
         linked = self.root / "linked"
         linked.symlink_to(target)
-        for field in ("state_dir", "native_cli", "reader_codex", "reader_auth"):
+        for field in ("state_dir", "reader_auth"):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, "symlink"):
                 registry_runtime.validate_native_static({**self.value, field: str(linked)})
+        for field in ("native_cli", "reader_codex"):
+            self.assertEqual(registry_runtime.validate_native_static({**self.value, field: str(linked)})[field], str(linked))
 
     def test_native_memory_path_rejects_nonabsolute_unbounded_and_ambiguous_strings(self):
         for value in (None, True, "relative.toml", "/tmp/../memory.toml", "/tmp//memory.toml",
@@ -455,6 +457,7 @@ class NativeDiscoveryReplayTests(unittest.TestCase):
         self.config = str(self.root / "memory.toml")
         self.binary = str(self.root / "mnemed")
         Path(self.binary).write_bytes(b"native selection identity witness")
+        Path(self.binary).chmod(0o700)
         self.pin = registry.native_binary_identity(self.binary)
         self.value = snapshot(self.root)
         self.value["discovery"] = {
@@ -640,7 +643,7 @@ class NativeCoreWireTests(unittest.TestCase):
                  patch("core_hook._collect_registry_scope", return_value=section), \
                  patch("builtins.print", side_effect=lambda line, **_: calls.append(line)):
                 self.assertEqual(core_hook.main(command[-1:]), 0)
-                replay.assert_called_once_with(Path(selected.registry_path), Path(selected.native_cli), Path(selected.cwd),
+                replay.assert_called_once_with(Path(selected.registry_path), selected.native_cli, Path(selected.cwd),
                                               expected_selection_digest=selected.digest)
             return ("\n".join(calls) + "\n").encode()
 
@@ -662,7 +665,7 @@ class NativeCoreWireTests(unittest.TestCase):
                  patch("store_registry.native_select", side_effect=ValueError(cause)) as replay, \
                  patch("core_hook._collect_registry_scope") as read:
                 self.assertEqual(core_hook._registry_child_main(), 1)
-                replay.assert_called_once_with(Path(selected.registry_path), Path(selected.native_cli), Path(selected.cwd),
+                replay.assert_called_once_with(Path(selected.registry_path), selected.native_cli, Path(selected.cwd),
                                               expected_selection_digest=selected.digest)
                 read.assert_not_called()
         with patch("core_hook._run_registry_collector", return_value=b""):
@@ -862,7 +865,8 @@ class NativeCallTests(unittest.TestCase):
         process, pipe = MagicMock(), MagicMock()
         process.returncode = 0
         pipe.read.side_effect = [raw, b""]
-        with patch("host_process.spawn", return_value=process), \
+        with patch("store_registry.resolve_command", return_value="/tmp/mnemed"), \
+             patch("host_process.spawn", return_value=process), \
              patch("host_process.BoundedPipe", return_value=pipe), \
              patch("host_process.terminate_tree"):
             response = registry.native_bridge("/tmp/mnemed", ["call"], limit=len(raw))

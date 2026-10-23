@@ -60,8 +60,9 @@ class PortableInstallTests(unittest.TestCase):
         plan = self.prepare()
         outputs = install.config_outputs(plan, {"config.toml": None, "hooks.json": None})
         server = tomllib.loads(outputs["config.toml"].decode("utf-8"))["mcp_servers"][install.SERVER]
-        self.assertEqual(server["args"][0], str(self.prefix / "lib/launcher.py"))
-        self.assertEqual(server["args"][2], str(self.prefix / "config/service.json"))
+        expected = install.python_hook_argv(plan["python"], [str(self.prefix / "lib/launcher.py"),
+            "--service-config", str(self.prefix / "config/service.json")], windows=install.plan_platform(plan) == "windows")
+        self.assertEqual([server["command"], *server["args"]], expected)
 
     def test_windows_plan_binds_exe_inventory_and_separately_encoded_background(self):
         python = self.base / "Python fixture.exe"
@@ -73,7 +74,7 @@ class PortableInstallTests(unittest.TestCase):
         self.assertEqual([row["destination"] for row in plan["files"][:2]],
                          ["bin/mnemed.exe", "bin/mneme-mcp.exe"])
         service, _ = install.runtime_configs(plan)
-        self.assertEqual(service["binary"], str(self.prefix / "bin/mneme-mcp.exe"))
+        self.assertEqual(service["binary"], "mneme-mcp")
         outputs = install.config_outputs(plan, {"config.toml": None, "hooks.json": None})
         hooks = json.loads(outputs["hooks.json"])["hooks"]["UserPromptSubmit"]
         commands = [group["hooks"][0]["command"] for group in hooks]
@@ -108,6 +109,7 @@ class PortableInstallTests(unittest.TestCase):
     def test_legacy_revision_cannot_gain_windows_filenames(self):
         plan = self.prepare()
         plan["config_revision"] = 22
+        plan["python"] = sys.executable
         plan["files"] = plan["files"][:len(install.V22_DESTINATIONS)]
         plan["files"][0]["destination"] = "bin/mnemed.exe"
         plan["plan_sha256"] = install.plan_hash(plan)

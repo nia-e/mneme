@@ -18,7 +18,7 @@ import unittest
 from unittest.mock import patch
 
 import assessment
-from claude_runtime import ClaudeRuntime, REQUIRED_FLAGS, result_usage, subscription_environment
+from claude_runtime import ClaudeRuntime, result_usage, subscription_environment
 import host_files
 import host_process
 from librarian_policy import resolve
@@ -42,6 +42,7 @@ if args==["--help"]:
     if mode=="probe_flood": print("x"*70000)
     sys.exit(0)
 def option(key): return next(a.split("=",1)[1] for a in args if a.startswith(key+"="))
+if mode=="unsupported_flags": sys.exit(2)
 if mode=="no_read": time.sleep(5)
 prompt=sys.stdin.read()
 record({"prompt":prompt, "safety_env": {k:os.environ.get(k) for k in
@@ -119,7 +120,7 @@ class ClaudeRuntimeTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);host_files.set_private(self.root,directory=True)
         self.executable=self.root/("claude.exe" if os.name=="nt" else "claude")
-        self.executable.write_text(FAKE.replace("#!PYTHON","#!"+sys.executable,1).replace("FLAGS"," ".join(REQUIRED_FLAGS)))
+        self.executable.write_text(FAKE.replace("#!PYTHON","#!"+sys.executable,1))
         self.executable.chmod(0o700)
         self.trace=self.root/"trace"
         self.config={"assessor":"claude_code","reader_claude":str(self.executable),
@@ -138,17 +139,6 @@ class ClaudeRuntimeTests(unittest.TestCase):
     def rows(self):
         return [json.loads(line) for line in self.trace.read_text().splitlines()] if self.trace.exists() else []
 
-    def preflight(self,runtime):
-        # Boundary fixture: real fake-executable metadata is verified before the
-        # deliberately tiny paid-work deadline. Otherwise aggregate load can
-        # legitimately expire metadata admission before there is a stdin writer.
-        request=assessment.AssessmentRequest("rules","input",{"type":"object"},100,time.monotonic()+5)
-        runtime._begin_assessment(100)
-        try:
-            executable,digest=runtime._check_binary()
-            runtime._preflight(executable,digest,request,subscription_environment(runtime.budget))
-        finally:runtime._stop_process()
-
     def run_mode(self,mode="normal",**kwargs):
         with patch.dict(os.environ,{"FAKE_CLAUDE_MODE":mode}),ClaudeRuntime(self.config,self.root/"scratch") as runtime:
             result=runtime.assess(observation(),**kwargs)
@@ -161,20 +151,20 @@ class ClaudeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["reason"],"abstained");self.assertTrue(result["provider_attempt"])
         self.assertEqual(result["usage"],{"input_tokens":28,"output_tokens":24,"cached_input_tokens":20,
             "cache_write_input_tokens":5,"uncached_input_tokens":8,"reasoning_output_tokens":None,"total_tokens":52})
-        rows=self.rows();self.assertEqual(rows[0]["args"],["--version"]);self.assertEqual(rows[1]["args"],["--help"])
-        args=rows[2]["args"]
+        rows=self.rows();self.assertEqual(len(rows),2)
+        args=rows[0]["args"]
         self.assertIn("--safe-mode",args);self.assertIn("--tools=",args);self.assertIn("--setting-sources=",args)
         self.assertIn("--disallowedTools=mcp__*",args);self.assertIn("--permission-prompts=none",args)
         self.assertNotIn("--bare",args);self.assertFalse(any(a.startswith("--json-schema") for a in args))
         self.assertIn("--model="+MODEL,args);self.assertIn("--effort=medium",args)
         self.assertIn("--max-turns=1",args);self.assertIn("--no-session-persistence",args)
         self.assertNotIn("codex",args)
-        self.assertIn("OUTPUT_SCHEMA:",rows[3]["prompt"])
-        env=rows[3]["safety_env"];self.assertIsNone(env["ANTHROPIC_API_KEY"]);self.assertIsNone(env["CLAUDECODE"])
+        self.assertIn("OUTPUT_SCHEMA:",rows[1]["prompt"])
+        env=rows[1]["safety_env"];self.assertIsNone(env["ANTHROPIC_API_KEY"]);self.assertIsNone(env["CLAUDECODE"])
         self.assertEqual(env["CLAUDE_CODE_MAX_RETRIES"],"0");self.assertEqual(env["CLAUDE_CODE_RETRY_WATCHDOG"],"0")
         self.assertEqual(env["HOME"],os.environ["HOME"])
         self.assertNotIn("PRIVATE-",json.dumps(result))
-        self.assertFalse(Path(rows[2]["cwd"]).exists())
+        self.assertFalse(Path(rows[0]["cwd"]).exists())
 
     def test_known_usage_survives_invalid_answer_and_model_mismatch(self):
         expected={"bad_json":"invalid_output","answer_cap":"invalid_output","invalid_proposal":"invalid_output",
@@ -204,19 +194,34 @@ class ClaudeRuntimeTests(unittest.TestCase):
                 result=self.run_mode("loaded_"+field)
                 self.assertEqual(result["reason"],"tool_activity");self.assertIsNone(result["proposal"])
 
-    def test_documented_v2_metadata_contract_not_unknown_protocol_or_loose_version(self):
-        for version in ("garbage", "3.0.0 (Claude Code)", "1.9.999 (Claude Code)","2.1.258 (Claude Code)",
-                        "2.1.302 (Other CLI)","2.1.302 (Claude Code) extra", "2.1.302 (Claude Code)\n3.0.0"):
-            with self.subTest(version=version),patch.dict(os.environ,{"FAKE_CLAUDE_VERSION":version}):
-                result=self.run_mode()
-                self.assertEqual(result["reason"],"unsupported_runtime");self.assertFalse(result["provider_attempt"])
-        # Actual official 2.1.302 help omits this documented flag. Its absence is
-        # not a capability denial, and the inference argv must STILL include it.
-        self.assertNotIn("--max-turns",REQUIRED_FLAGS)
-        with patch.dict(os.environ,{"FAKE_CLAUDE_VERSION":"2.1.259 (Claude Code)"}):
+    def test_metadata_is_not_an_admission_gate(self):
+        with patch.dict(os.environ,{"FAKE_CLAUDE_VERSION":"3.0.0 (Claude Code)"}):
             self.assertEqual(self.run_mode()["reason"],"abstained")
-        calls=[row for row in self.rows() if row.get("args",[])[:1]==["-p"]]
-        self.assertEqual(len(calls),1);self.assertIn("--max-turns=1",calls[0]["args"])
+        self.assertEqual(len(self.rows()),2)
+        self.assertEqual(self.rows()[0]["args"][0],"-p")
+
+    def test_unpinned_path_command_resolves_again_after_replacement(self):
+        self.config.pop("reader_claude_sha256")
+        self.config["reader_claude"]="claude"
+        with patch.dict(os.environ,{"PATH":str(self.root)+os.pathsep+os.environ.get("PATH","")}), \
+                ClaudeRuntime(self.config,self.root/"scratch") as runtime:
+            self.assertEqual(runtime.assess(observation())["reason"],"abstained")
+            self.executable.write_text(self.executable.read_text()+"\n# updated executable\n")
+            self.assertEqual(runtime.assess(observation())["reason"],"abstained")
+        self.assertEqual(len(self.rows()),4)
+
+    def test_missing_path_and_failed_command_are_ordinary_errors_without_retry(self):
+        self.config.pop("reader_claude_sha256")
+        self.config.pop("reader_claude")
+        with patch.dict(os.environ,{"PATH":str(self.root / "missing")}):
+            result=self.run_mode()
+        self.assertEqual(result["reason"],"unavailable")
+        self.assertFalse(result["provider_attempt"])
+        with patch.dict(os.environ,{"PATH":str(self.root)+os.pathsep+os.environ.get("PATH","")}):
+            result=self.run_mode("unsupported_flags")
+        self.assertTrue(result["provider_attempt"])
+        self.assertEqual(result["reason"],"usage_unknown")
+        self.assertEqual(len(self.rows()),1)
 
     def test_unknown_usage_halts_without_retry(self):
         for mode in ("missing_usage","missing_cache_write","crash","duplicate_result","duplicate_frame"):
@@ -234,24 +239,19 @@ class ClaudeRuntimeTests(unittest.TestCase):
                 self.assertIsNone(result["proposal"]);self.assertTrue(result["provider_attempt"])
 
     def test_missing_unsupported_or_changed_binary_has_no_provider_attempt(self):
-        for mode in ("unsupported","probe_flood","missing_isolation"):
-            with self.subTest(mode=mode):
-                result=self.run_mode(mode);self.assertEqual(result["reason"],"unsupported_runtime")
-                self.assertFalse(result["provider_attempt"]);self.assertIsNone(result["usage"])
         self.config["reader_claude_sha256"]="0"*64
         result=self.run_mode();self.assertEqual(result["reason"],"binary_changed");self.assertFalse(result["provider_attempt"])
         self.config["reader_claude"]=str(self.root/"missing")
         self.assertEqual(self.run_mode()["reason"],"unavailable")
 
     def test_timeout_covers_probe_provider_and_exit(self):
-        for mode in ("probe_timeout","timeout","hang_after_result"):
+        for mode in ("timeout","hang_after_result"):
             with self.subTest(mode=mode):
                 with patch.dict(os.environ,{"FAKE_CLAUDE_MODE":mode}),ClaudeRuntime(self.config,self.root/"scratch") as runtime:
-                    if mode!="probe_timeout":self.preflight(runtime)
                     start=time.monotonic();result=runtime.assess(observation(),timeout=0.2)
                     self.assertLess(time.monotonic()-start,2)
                 self.assertEqual(result["reason"],"timeout")
-                self.assertEqual(result["provider_attempt"],mode!="probe_timeout")
+                self.assertTrue(result["provider_attempt"])
                 if mode=="hang_after_result": self.assertIsNotNone(result["usage"])
 
     def test_full_schema_request_cap_precedes_provider(self):
@@ -264,7 +264,6 @@ class ClaudeRuntimeTests(unittest.TestCase):
 
     def test_blocked_stdin_write_uses_the_same_absolute_deadline(self):
         with patch.dict(os.environ,{"FAKE_CLAUDE_MODE":"no_read"}),ClaudeRuntime(self.config,self.root/"scratch") as runtime:
-            self.preflight(runtime)
             start=time.monotonic()
             result=runtime._fresh_assessment(lambda:("x"*100000,{}),
                 instructions=lambda _:"rules",schema=lambda _:{"type":"object"},validator=lambda value,_:value,
@@ -283,7 +282,7 @@ class ClaudeRuntimeTests(unittest.TestCase):
         self.assertEqual(len(calls),2)
         sessions=[next(a for a in row["args"] if a.startswith("--session-id=")) for row in calls]
         self.assertNotEqual(*sessions);self.assertNotEqual(calls[0]["cwd"],calls[1]["cwd"])
-        self.assertEqual(sum(row.get("args")==["--help"] for row in self.rows()),1)
+        self.assertEqual(sum(row.get("args")==["--help"] for row in self.rows()),0)
 
     @unittest.skipIf(os.name=="nt","Unix process-group evidence; native job ownership separately tested")
     def test_descendant_cleanup_after_exited_parent(self):

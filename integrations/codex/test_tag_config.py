@@ -139,6 +139,7 @@ class TagConfigTests(unittest.TestCase):
         for revision in (20, 21):
             retained = copy.deepcopy(plan)
             retained["config_revision"] = revision
+            retained["python"] = sys.executable
             retained.pop("tag_stewardship"); retained.pop("tag_guide_id")
             retained["files"] = retained["files"][:len(install.V20_DESTINATIONS)]
             if revision == 21:

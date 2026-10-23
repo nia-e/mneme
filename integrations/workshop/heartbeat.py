@@ -2,6 +2,7 @@
 """One eligible two-stage workshop cycle; explicit timing and no network event listeners."""
 
 import argparse
+import copy
 from contextlib import ExitStack
 import datetime as dt
 import fcntl
@@ -689,8 +690,9 @@ def execute(args):
         return {"status": "ready", "note": "No timer or service was started"}, 0
     if (root / "PAUSED").exists():
         return {"status": "paused"}, 0
-    if args.codex is None or not args.codex.is_absolute() or not args.codex.is_file() or not os.access(args.codex, os.X_OK):
-        raise Refusal("run requires --codex pointing to an absolute executable path")
+    # Keep the caller/config selector lexical; this cycle alone owns its edition.
+    args = copy.copy(args)
+    args.codex = codex_guard.resolve_raw_codex(args.codex, getattr(args, "codex_packages", None))
     for schema in (SCHEMA, ORIENTATION_SCHEMA):
         bounded_bytes(schema, MAX_RESULT)
     agenda = optional_context("AGENDA.md", lambda: agenda_preview(root / "AGENDA.md"))
@@ -897,6 +899,13 @@ def execute(args):
                 status = "interrupted"
             if status == "completed" and result is not None:
                 write_json(run / "result.json", result)
+                if cycle_class == "interactive" and result["status"] == "blocked":
+                    # Completed model execution is not completed conversation
+                    # work. Retain the claimed event and its explicit next step;
+                    # seen-only reconciliation must not discard failed replies.
+                    # Deliberate silence (rest/progress) remains terminal.
+                    wake.unfinished(root, run_id, "Prior conversation work blocked; inspect runs/" + run_id
+                                    + " and send receipts before continuing; do not blindly repeat side effects.")
                 schedule(root, result["next_wake_seconds"], result["summary"], result["next_step"],
                          cycle_class=cycle_class)
                 receipt["outcome"] = result["status"]
@@ -953,7 +962,9 @@ def bounded_int(low, high):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path, help="absolute, existing workshop directory")
-    parser.add_argument("--codex", type=Path, help="absolute Codex executable; required for run")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--codex", type=Path, help="absolute raw Codex executable; or use --codex-packages for run")
+    source.add_argument("--codex-packages", type=Path, help="absolute installed package inventory; newest complete edition")
     parser.add_argument("--execution-policy", choices=("workspace", "owner"), default="workspace",
                         help="workspace (default) or authorized Pi owner access")
     parser.add_argument("--timeout", type=cycle_timeout, default=600.0, metavar="SECONDS|unlimited",
@@ -961,7 +972,7 @@ def main():
     parser.add_argument("--max-starts", type=bounded_int(1, 4), default=4)
     parser.add_argument("--hourly-background", action="store_true",
                         help="fixed UTC-hour opportunities with no backfill; replaces only the background daily cap; "
-                             "all cycles share the Pi activity gate, so --codex must name the raw binary")
+                             "all cycles share the Pi activity gate, so selection must name raw packages, never the guarded human launcher")
     parser.add_argument("--signal-source", choices=("signal-owner",),
                         help="opt in to authenticated bridge bursts; source text alone is not authentication")
     parser.add_argument("--mailbox-inbox", action="store_true",

@@ -3,7 +3,8 @@
 
 The native hook command is always /bin/sh <stable-root>/launch. Its implementation
 is deliberately mutable through <stable-root>/current, an atomic symlink to one
-absolute runtime wrapper path. No command is evaluated or discovered on PATH/cwd.
+absolute runtime wrapper path. Python is resolved on PATH at each launch by
+default; an explicit absolute interpreter spelling is also supported.
 
 Install only stages files; select is the explicit atomic activation (and rollback)
 operation. Neither grants native hook trust, touches an owner or lifecycle ledger,
@@ -16,17 +17,22 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import shlex
 import stat
+import subprocess
 import tempfile
 
 import host_files
+import host_process
 
 PLAN_SCHEMA = "mneme.codex-stable-hooks.plan.v1"
 RESULT_SCHEMA = "mneme.codex-stable-hooks.result.v1"
 MAX_PATH_BYTES = 4096
 MAX_PLAN_BYTES = 32 * 1024
 NOTICE = "Automatic memory temporarily disabled: stable runtime unavailable."
+PYTHON_CANDIDATES = ("python3", "python3.14", "python3.13", "python3.12", "python3.11")
+PYTHON_PROBE = "import sys; raise SystemExit(sys.version_info < (3, 11))"
 _FIELDS = {"schema", "stable_root", "runtime", "python", "hooks_program", "hook_config_path"}
 
 
@@ -74,12 +80,27 @@ exec "$selector" "$@"
 """.encode("utf-8")
 
 
+def _python(value):
+    """Keep launch-time PATH intent, or an explicit absolute interpreter spelling."""
+    return "python3" if value == "python3" else str(_path(value))
+
+
 def render_runtime(python, hooks_program, hook_config_path):
-    """Pin one coherent interpreter/dispatcher/config invocation, not source bytes."""
+    """Keep dispatcher/config coherent without pinning the default interpreter."""
     _posix()
-    argv = [str(_path(python)), str(_path(hooks_program)), "--config", str(_path(hook_config_path))]
-    return ("#!/bin/sh\n# mneme.stable-hook-runtime.v1\nexec "
-            + shlex.join(argv) + ' "$@"\n').encode("utf-8")
+    python = _python(python)
+    args = shlex.join([str(_path(hooks_program)), "--config", str(_path(hook_config_path))])
+    if python == "python3":
+        # Probe only the bounded supported set. Redirect probe output so startup
+        # diagnostics cannot corrupt the hook protocol; never eval command text.
+        launch = ("for python in " + shlex.join(PYTHON_CANDIDATES) + "; do\n"
+                  + '  if "$python" -c ' + shlex.quote(PYTHON_PROBE) + ' >/dev/null 2>&1; then\n'
+                  + '    exec "$python" ' + args + ' "$@"\n'
+                  + "  fi\ndone\n"
+                  + "printf '%s\\n' 'stable runtime requires Python 3.11 or newer on PATH' >&2\nexit 127\n")
+    else:
+        launch = "exec " + shlex.quote(python) + " " + args + ' "$@"\n'
+    return ("#!/bin/sh\n# mneme.stable-hook-runtime.v1\n" + launch).encode("utf-8")
 
 
 def _read(path, limit, *, private=False):
@@ -103,12 +124,30 @@ def _optional_read(path, limit, *, private=False):
 
 def _inputs(plan):
     """Check machinery only; the dispatcher remains the native policy authority."""
-    interpreter = Path(plan["python"])
+    interpreters = PYTHON_CANDIDATES if plan["python"] == "python3" else (plan["python"],)
+    interpreter = None
+    for candidate in interpreters:
+        found = shutil.which(candidate)
+        if found is None:
+            continue
+        probe = None
+        try:
+            probe = host_process.spawn([found, "-c", PYTHON_PROBE], tree=True,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            status = probe.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        finally:
+            if probe is not None:
+                host_process.terminate_tree(probe, timeout=.2)
+        if status == 0:
+            interpreter = found
+            break
     program = Path(plan["hooks_program"])
-    if any(path.resolve(strict=True) != path for path in (interpreter, program)):
+    if program.resolve(strict=True) != program:
         raise ValueError("runtime machinery path changed; prepare a new plan with resolved bundle paths")
-    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
-        raise ValueError("stable runtime requires an existing executable Python interpreter")
+    if interpreter is None or not Path(interpreter).is_file() or not os.access(interpreter, os.X_OK):
+        raise ValueError("stable runtime requires an existing executable Python 3.11 or newer interpreter")
     if program.name != "hook_launcher.py":
         raise ValueError("stable native hooks require the hook_launcher.py dispatcher")
     _read(program, 1024 * 1024)
@@ -119,12 +158,15 @@ def _checked(plan):
     _posix()
     if not isinstance(plan, dict) or set(plan) != _FIELDS or plan.get("schema") != PLAN_SCHEMA:
         raise ValueError("invalid stable hook plan")
-    checked = {key: str(_path(plan[key])) for key in _FIELDS - {"schema"}}
+    checked = {key: str(_path(plan[key])) for key in _FIELDS - {"schema", "python"}}
+    checked["python"] = _python(plan["python"])
     root, runtime = Path(checked["stable_root"]), Path(checked["runtime"])
     _path(root / "launch")
     _path(root / "current")
     outputs = {root / "launch", root / "current", runtime}
-    inputs = {Path(checked[key]) for key in ("python", "hooks_program", "hook_config_path")}
+    inputs = {Path(checked[key]) for key in ("hooks_program", "hook_config_path")}
+    if checked["python"] != "python3":
+        inputs.add(Path(checked["python"]))
     if (len(outputs) != 3 or root in outputs or outputs & inputs
             or root in inputs or runtime in root.parents
             or any(output in other.parents for output in outputs for other in outputs | inputs)):
@@ -140,13 +182,12 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
-def prepare(*, stable_root, runtime, python, hooks_program, hook_config_path):
-    """Resolve runtime machinery, but never resolve stable command/config spelling."""
+def prepare(*, stable_root, runtime, python="python3", hooks_program, hook_config_path):
+    """Resolve the dispatcher bundle, keeping interpreter and config intent."""
     plan = _checked({"schema": PLAN_SCHEMA, "stable_root": str(stable_root),
                      "runtime": str(runtime), "python": str(python),
                      "hooks_program": str(hooks_program), "hook_config_path": str(hook_config_path)})
-    for key in ("python", "hooks_program"):
-        plan[key] = str(Path(plan[key]).resolve(strict=True))
+    plan["hooks_program"] = str(Path(plan["hooks_program"]).resolve(strict=True))
     plan = _checked(plan)
     _inputs(plan)
     return plan
@@ -275,7 +316,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="operation", required=True)
     preview = commands.add_parser("prepare", help="print an install plan without changing files")
-    for name in ("stable-root", "runtime", "python", "hooks-program", "hook-config-path"):
+    preview.add_argument("--python", default="python3")
+    for name in ("stable-root", "runtime", "hooks-program", "hook-config-path"):
         preview.add_argument("--" + name, required=True)
     for name, help_text in (("install", "stage a new wrapper; do not activate it"),
                             ("select", "activate a staged plan or roll back to a retained plan")):

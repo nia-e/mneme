@@ -62,8 +62,7 @@ class MiscConfigTests(unittest.TestCase):
         for reader, digest in (('codex', None), ('codex', 'a' * 64), ('relative', 'a' * 64)):
             with self.subTest(reader=reader, digest=digest), self.assertRaises(ValueError):
                 misc_config.validate_config({**config, 'reader_codex': reader, 'reader_codex_sha256': digest})
-        with self.assertRaises(ValueError):
-            misc_config.validate_config({**config, 'reader_codex': str(self.reader)})
+        self.assertEqual(misc_config.validate_config({**config, 'reader_codex': str(self.reader)})['reader_codex'], str(self.reader))
 
     def test_cli_reader_option_is_optional_and_keeps_path_intent(self):
         command = [sys.executable, misc_config.__file__]

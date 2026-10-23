@@ -9,7 +9,7 @@ process, local store, or service-state directory.
 """
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import os
@@ -18,6 +18,7 @@ import plistlib
 import posixpath
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -202,7 +203,7 @@ class ServiceConfig:
             database_name, database_path = "project", project_db
         elif database_name is _UNSET or database_path is _UNSET:
             raise ValueError("service config needs database_name and database_path")
-        for name, value in (("binary", binary), ("database_name", database_name),
+        for name, value in (("binary", Path(binary) if isinstance(binary, str) else binary), ("database_name", database_name),
                             ("database_path", database_path), ("port", port),
                             ("state_dir", state_dir), ("working_directory", working_directory),
                             ("token_env", token_env)):
@@ -217,7 +218,13 @@ class ServiceConfig:
 
     def validate_identity(self):
         database_alias(self.database_name)
-        for name in ("binary", "database_path", "state_dir", "working_directory"):
+        binary = self.binary
+        if (not isinstance(binary, Path) or not str(binary) or "\x00" in str(binary)
+                or (not binary.is_absolute() and
+                    (len(binary.parts) != 1 or str(binary) in (".", "..")
+                     or "/" in str(binary) or "\\" in str(binary)))):
+            raise ValueError("binary must be an absolute selector or a bare command name")
+        for name in ("database_path", "state_dir", "working_directory"):
             value = getattr(self, name)
             if not isinstance(value, Path) or not value.is_absolute():
                 raise ValueError("%s must be an absolute path" % name)
@@ -227,11 +234,11 @@ class ServiceConfig:
             raise ValueError("token_env must be a variable name")
         return self
 
-    def validate(self):
-        """Launch validation; status and stop need only stable identity fields."""
+    def validate(self, *, require_binary=True):
+        """Launch validation; reusing an owner does not reselect its executable."""
         self.validate_identity()
-        if not is_executable(self.binary):
-            raise ValueError("Mneme MCP binary is missing or not executable")
+        if require_binary:
+            self.for_launch()
         if not self.database_path.is_file():
             raise ValueError("database_path must be an existing file; initialize an explicit capture store first")
         if not self.working_directory.is_dir():
@@ -239,6 +246,22 @@ class ServiceConfig:
         if self.token_env and not os.environ.get(self.token_env):
             raise ValueError("configured bearer-token environment variable is unset")
         return self
+
+    def for_launch(self):
+        """Resolve launch intent once, only when creating a new owner.
+
+        Keep the selector lexical in configuration. The process witness is the
+        concrete target selected now, never a later PATH or symlink lookup.
+        """
+        self.validate_identity()
+        selected = (str(self.binary) if self.binary.is_absolute()
+                    else shutil.which(str(self.binary)))
+        if selected is None:
+            raise ValueError("Mneme MCP binary is missing or not executable")
+        target = Path(selected).resolve()
+        if not is_executable(target):
+            raise ValueError("Mneme MCP binary is missing or not executable")
+        return replace(self, binary=target)
 
     @property
     def url(self):
@@ -333,10 +356,19 @@ def _state_matches_config(config, state):
     else:
         store_matches = (state.get("database_name") == config.database_name
                          and state.get("database_path") == str(config.database_path))
+    # Old state used its absolute binary as both intent and witness. New state
+    # separates them; never resolve a saved selector to identify a running PID.
+    target = state.get("launch_binary", state.get("binary"))
+    if not isinstance(target, str) or not Path(target).is_absolute() or "\x00" in target:
+        return False
     return (state.get("binary") == str(config.binary)
             and store_matches
             and state.get("port") == config.port
             and state.get("working_directory") == str(config.working_directory))
+
+
+def _witness_config(config, state):
+    return replace(config, binary=Path(state.get("launch_binary", state["binary"])))
 
 
 def _expected_catalog(config, catalog):
@@ -447,7 +479,7 @@ def status(config):
         return {"state": "stopped", "url": config.url}
     if not _state_matches_config(config, state):
         return {"state": "foreign-state", "url": config.url}
-    identity = _matches_process(config, state["pid"], state.get("process_identity"))
+    identity = _matches_process(_witness_config(config, state), state["pid"], state.get("process_identity"))
     if identity is None:
         return {"state": "identity-unverified", "url": config.url, "pid": state["pid"]}
     if not identity:
@@ -461,7 +493,7 @@ def status(config):
 
 def start(config, timeout=10.0):
     _require_managed(config, "start")
-    config.validate()
+    config.validate(require_binary=False)
     fd = _lock(config)
     try:
         existing = status(config)
@@ -469,6 +501,7 @@ def start(config, timeout=10.0):
             return existing
         if existing["state"] not in ("stopped", "stale"):
             raise RuntimeError("refusing to replace %s service state" % existing["state"])
+        launch_config = config.for_launch()
         if _probe(config) is not None:
             raise RuntimeError("refusing to start: Mneme MCP already responds on configured port")
         if existing["state"] == "stale":
@@ -478,12 +511,12 @@ def start(config, timeout=10.0):
                        "ab", buffering=0) as log:
             if IS_WINDOWS:
                 check_private_fd(log)
-            process = spawn(config.argv, stdin=subprocess.DEVNULL,
+            process = spawn(launch_config.argv, stdin=subprocess.DEVNULL,
                             stdout=log, stderr=log, detached=True,
                             close_fds=True, cwd=config.working_directory)
         try:
             recorded_identity = spawned_identity(process) if IS_WINDOWS else None
-            if IS_WINDOWS and not _valid_windows_identity(config, process.pid, recorded_identity):
+            if IS_WINDOWS and not _valid_windows_identity(launch_config, process.pid, recorded_identity):
                 raise RuntimeError("spawned service process identity unavailable; refusing to publish state")
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -494,6 +527,7 @@ def start(config, timeout=10.0):
                     if not _expected_catalog(config, catalog):
                         raise RuntimeError("refusing startup: Mneme MCP has unexpected database catalog")
                     state = {"pid": process.pid, "binary": str(config.binary),
+                             "launch_binary": str(launch_config.binary),
                              "database_name": config.database_name,
                              "database_path": str(config.database_path), "port": config.port,
                              "working_directory": str(config.working_directory)}
@@ -534,7 +568,7 @@ def ensure_ready(config, timeout=10.0):
         if isinstance(config, RemoteConfig):
             raise RuntimeError("remote Mneme %s unavailable; check the configured endpoint, native SSH if selected, credentials and owner service, then retry (no local fallback)" % config.database_name)
         raise RuntimeError("connect-only Mneme %s unavailable; check the SSH tunnel and remote service, then retry (no local fallback)" % config.database_name)
-    config.validate()
+    config.validate(require_binary=False)
     state = _read_state(config)
     if state is not None and not _state_matches_config(config, state):
         raise RuntimeError("refusing to reuse foreign service state")
@@ -581,13 +615,12 @@ def stop(config, timeout=40.0):
         if current["state"] in ("foreign-state", "identity-unverified"):
             raise RuntimeError("refusing to stop a %s service state" % current["state"])
         pid = current["pid"]
-        recorded_identity = None
-        if IS_WINDOWS:
-            state = _read_state(config)
-            if not state or state["pid"] != pid or not _state_matches_config(config, state):
-                raise RuntimeError("service state changed; refusing to signal")
-            recorded_identity = state.get("process_identity")
-        identity = _matches_process(config, pid, recorded_identity)
+        state = _read_state(config)
+        if not state or state["pid"] != pid or not _state_matches_config(config, state):
+            raise RuntimeError("service state changed; refusing to signal")
+        witness = _witness_config(config, state)
+        recorded_identity = state.get("process_identity")
+        identity = _matches_process(witness, pid, recorded_identity)
         if identity is None:
             raise RuntimeError("service process identity became unverified; refusing to signal")
         if not identity:
@@ -606,7 +639,7 @@ def stop(config, timeout=40.0):
             os.kill(pid, signal.SIGTERM)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            identity = _matches_process(config, pid, recorded_identity)
+            identity = _matches_process(witness, pid, recorded_identity)
             if identity is None:
                 raise RuntimeError("service process identity became unverified after termination request; state retained")
             if not identity:

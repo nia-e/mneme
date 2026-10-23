@@ -23,10 +23,10 @@ except ImportError:
 
 SCHEMA = "mneme.codex-install.v1"
 HOST_PLATFORM = "windows" if os.name == "nt" else "posix"
-CONFIG_REVISION = 38
-EXISTING_SERVICE_REVISION = 39
-EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, 35, 37, EXISTING_SERVICE_REVISION)
-SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
+CONFIG_REVISION = 40
+EXISTING_SERVICE_REVISION = 41
+EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, 35, 37, 39, EXISTING_SERVICE_REVISION)
+SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
 END = "# END mneme-codex-v1"
@@ -69,7 +69,7 @@ RECORDING_MODES = ("off", "automatic")
 SHADOW_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra")
 LEGACY_READER_MODELS = ("gpt-5.6-sol",)
 from host_files import atomic_write, ensure_private_directory, open_directory, open_regular
-from host_platform import hook_command, is_executable, prepare_reader_codex, validate_reader_codex
+from host_platform import hook_command, is_executable, prepare_reader_codex, validate_reader_codex, validate_command, python_hook_argv, prepare_python_selector
 from librarian_policy import MODEL, EFFORTS, resolve as resolve_policy
 READER_MODELS = (MODEL,)
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -209,8 +209,11 @@ def validate_existing_service(plan):
         raise ValueError("invalid existing service config pin")
     data = pin["config"]
     config = ServiceConfig._from_data(data)
-    for name in ("binary", "state_dir", "working_directory",
-                 "project_db" if "project_db" in data else "database_path"):
+    dynamic = plan.get("config_revision", 1) >= 40
+    if dynamic:
+        validate_command(data["binary"], default="mneme-mcp")
+    for name in ((() if dynamic else ("binary",)) + ("state_dir", "working_directory",
+                 "project_db" if "project_db" in data else "database_path")):
         value = data[name]
         if (not isinstance(value, str) or str(Path(value)) != value
                 or "\x00" in value or not Path(value).is_absolute()
@@ -220,9 +223,11 @@ def validate_existing_service(plan):
             or str(config.working_directory) != plan["project_root"] or config.port != plan["port"]):
         raise ValueError("existing service does not match the exact project, database and port")
     native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mneme-mcp"))
-    if "memory_config" not in plan and str(config.binary) != native["source"]:
+    if not dynamic and "memory_config" not in plan and str(config.binary) != native["source"]:
         raise ValueError("existing service binary must be the selected MCP source")
-    if "memory_config" in plan:
+    if dynamic and "existing_owner_binary" in plan:
+        raise ValueError("dynamic service selectors must not contain an implicit owner binary pin")
+    if not dynamic and "memory_config" in plan:
         owner = plan.get("existing_owner_binary")
         if (not isinstance(owner, dict) or set(owner) != {"source", "sha256"}
                 or owner["source"] != str(config.binary)
@@ -238,6 +243,8 @@ def revalidate_existing_service(plan):
     pin = validate_existing_service(plan)
     if existing_service_input(pin["source"]) != pin:
         raise ValueError("existing service config changed; prepare a new plan")
+    if plan.get("config_revision", 1) >= 40:
+        return
     native = next(row for row in plan["files"] if row["destination"] == binary_destination(plan, "mneme-mcp"))
     native = plan.get("existing_owner_binary", native)
     binary = Path(native["source"])
@@ -289,12 +296,7 @@ def validate_plan(plan):
         if plan["recall_mode"] == "shadow":
             if type(shadow_model) is not str or shadow_model not in SHADOW_MODELS:
                 raise ValueError("shadow mode requires an explicit supported shadow model")
-            if (not isinstance(shadow_codex, dict) or set(shadow_codex) != {"source", "sha256"}
-                or not isinstance(shadow_codex["source"], str)
-                or not Path(shadow_codex["source"]).is_absolute()
-                or not isinstance(shadow_codex["sha256"], str)
-                or not HEX_SHA256.fullmatch(shadow_codex["sha256"])):
-                raise ValueError("shadow mode requires an absolute pinned Codex executable")
+            planned_reader_config(shadow_codex)
         elif shadow_model is not None or shadow_codex is not None:
             raise ValueError("shadow options require shadow recall mode")
     elif "shadow_model" in plan or "shadow_codex" in plan:
@@ -385,8 +387,11 @@ def validate_plan(plan):
     db = root / ".mneme/codex-memory.db"
     if plan["project_db"] != str(db) or prefix == db or db in prefix.parents:
         raise ValueError("planned project store path is inconsistent")
-    python = Path(plan["python"])
-    if not python.is_absolute():
+    if revision >= 40:
+        validate_command(plan["python"], default="python3")
+        validate_command(plan["mcp_command"], default="mneme-mcp")
+        validate_command(plan["native_command"], default="mnemed")
+    elif not Path(plan["python"]).is_absolute():
         raise ValueError("planned Python path must be absolute")
     from tag_config import FIELDS as tag_config_fields, validate as validate_tag_config
     if revision < 22 and set(plan) & tag_config_fields:
@@ -442,7 +447,7 @@ def validate_plan(plan):
             raise ValueError("old install plan cannot contain activity; prepare a new plan")
         from registry_config import validate_activity_preparation
         validate_activity_preparation(plan["activity"], cwd=root,
-            activity_mcp=prefix / binary_destination(plan, "mneme-mcp"))
+            activity_mcp=plan["mcp_command"] if revision >= 40 else prefix / binary_destination(plan, "mneme-mcp"))
     if revision in EXISTING_SERVICE_REVISIONS:
         validate_existing_service(plan)
     return root, prefix
@@ -484,6 +489,8 @@ def planned_hook_handlers(plan):
     prefix = Path(plan["prefix"])
     revision = plan.get("config_revision", 1)
     argv = [plan["python"], str(prefix / "lib/hooks.py"), "--config", str(prefix / "config/hooks.json")]
+    if revision >= 40:
+        argv = python_hook_argv(plan["python"], argv[1:], windows=plan_platform(plan) == "windows")
     windows = plan_platform(plan) == "windows"
     command = hook_command(argv, windows=windows) if revision >= 24 else shlex.join(argv)
     background = (hook_command([*argv, "--reader-background"], windows=windows)
@@ -496,6 +503,8 @@ def planned_hook_handlers(plan):
     if revision >= 24 and async_mode and "store_registry" in plan:
         core_argv = [plan["python"], str(prefix / "lib/core_hook.py"),
                      "--hook-config", str(prefix / "config/hooks.json")]
+        if revision >= 40:
+            core_argv = python_hook_argv(plan["python"], core_argv[1:], windows=windows)
         # Startup core is a separate bounded read, not worker launch, learning
         # evidence or permission to record. Preserve its complete checked output.
         events["SessionStart"].append({"hooks": [{"type": "command",
@@ -515,12 +524,16 @@ def config_outputs(plan, before):
         raise ValueError("mneme_project configuration already exists; do not overwrite it")
     block = f"\n{BEGIN}\n[mcp_servers.{SERVER}]\n"
     if "memory_config" in plan:
-        block += (f"command = {toml_value(str(prefix / binary_destination(plan, 'mneme-mcp')))}\n"
+        mcp_selector = plan["mcp_command"] if revision >= 40 else str(prefix / binary_destination(plan, "mneme-mcp"))
+        block += (f"command = {toml_value(mcp_selector)}\n"
                   f"args = {toml_value(['--memory-config', plan['memory_config']['path'], '--cwd', str(root)])}\n"
                   "startup_timeout_sec = 30\n")
     elif revision >= 3:
-        block += (f"command = {toml_value(plan['python'])}\n"
-                  f"args = {toml_value([str(prefix / 'lib/launcher.py'), '--service-config', str(prefix / 'config/service.json')])}\n"
+        launcher = [plan["python"], str(prefix / "lib/launcher.py"), "--service-config", str(prefix / "config/service.json")]
+        if revision >= 40:
+            launcher = python_hook_argv(plan["python"], launcher[1:], windows=plan_platform(plan) == "windows")
+        block += (f"command = {toml_value(launcher[0])}\n"
+                  f"args = {toml_value(launcher[1:])}\n"
                   "startup_timeout_sec = 30\n")
     else:
         block += f"url = {json.dumps(plan['url'])}\n"
@@ -563,12 +576,16 @@ def config_outputs(plan, before):
     return {"config.toml": toml, "hooks.json": json_bytes(hooks)}
 
 
-def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
+def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder", python="python3",
             program_root=None, library_helper=None, enroll_existing=False,
             shadow_model=None, shadow_codex=None, reader_model=None, reader_codex=None,
             recording_mode="off", librarian_effort=None, global_preferences=None,
             store_registry=None, existing_service_config=None, tag_stewardship=None, tag_guide_id=None, memory_config=None,
-            activity_root=None, activity_config=None, activity_device=None):
+            activity_root=None, activity_config=None, activity_device=None,
+            mcp_command="mneme-mcp", native_command="mnemed"):
+    python = prepare_python_selector(python, windows=HOST_PLATFORM == "windows")
+    mcp_command = validate_command(mcp_command, default="mneme-mcp")
+    native_command = validate_command(native_command, default="mnemed")
     project_root, prefix = Path(project_root).absolute(), Path(prefix).absolute()
     native_pin = None
     activity = None
@@ -576,7 +593,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         from registry_config import prepare_activity
         activity = prepare_activity(cwd=project_root, activity_root=activity_root,
             activity_config=activity_config, activity_device=activity_device,
-            activity_mcp=prefix / ("bin/mneme-mcp.exe" if HOST_PLATFORM == "windows" else "bin/mneme-mcp"))
+            activity_mcp=mcp_command)
     elif activity_config is not None or activity_device is not None:
         raise ValueError("activity options require explicit --activity-root")
     if memory_config is not None:
@@ -631,12 +648,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
     if recall_mode == "shadow":
         if type(shadow_model) is not str or shadow_model not in SHADOW_MODELS:
             raise ValueError("shadow mode requires --shadow-model (gpt-5.6-sol or gpt-5.6-terra)")
-        if shadow_codex is None or not Path(shadow_codex).is_absolute():
-            raise ValueError("shadow mode requires absolute --shadow-codex")
-        codex_source = Path(shadow_codex).resolve(strict=True)
-        if not is_executable(codex_source):
-            raise ValueError("shadow Codex executable is not usable")
-        shadow_pin = {"source": str(codex_source), "sha256": digest(codex_source.read_bytes())}
+        shadow_pin = prepare_reader_codex("codex" if shadow_codex is None else shadow_codex)["reader_codex"]
     elif shadow_model is not None or shadow_codex is not None:
         raise ValueError("--shadow-model and --shadow-codex require --recall-mode shadow")
     reader_pin = None
@@ -646,8 +658,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         librarian_effort = "medium" if librarian_effort is None else librarian_effort
         resolve_policy({"reader_model":reader_model,"librarian_effort":librarian_effort})
         reader = prepare_reader_codex("codex" if reader_codex is None else reader_codex)
-        reader_pin = ("codex" if reader["reader_codex"] == "codex" else
-                      {"source": reader["reader_codex"], "sha256": reader["reader_codex_sha256"]})
+        reader_pin = reader["reader_codex"]
     elif reader_model is not None or reader_codex is not None or librarian_effort is not None:
         raise ValueError("--reader-model, --reader-codex and --librarian-effort require --recall-mode async")
     if enroll_existing and library_helper is None:
@@ -693,7 +704,8 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
             "librarian_effort": librarian_effort,
             "library_helper": helper_pin, "library_enrollment": enrollment,
             "project_root": str(project_root), "prefix": str(prefix),
-            "python": sys.executable, "port": port, "url": f"http://127.0.0.1:{port}/",
+            "python": python, "mcp_command": mcp_command, "native_command": native_command,
+            "port": port, "url": f"http://127.0.0.1:{port}/",
             "project_db": str(project_root / ".mneme/codex-memory.db"),
             "files": files,
             "expected_configs": {name: None if data is None else digest(data)
@@ -718,12 +730,6 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         plan["authority"] = "native config grants; one device hook actor; no project hook lifecycle"
         plan["does_not"].append("install project hooks; device hooks are prepared separately")
     if existing_service_config is not None:
-        if native_pin is not None:
-            source = existing_service_input(existing_service_config)["config"]["binary"]
-            binary = Path(source)
-            if binary.resolve(strict=True) != binary or not is_executable(binary):
-                raise ValueError("retained owner binary must be a canonical executable")
-            plan["existing_owner_binary"] = {"source": source, "sha256": digest(binary.read_bytes())}
         plan["config_revision"] = EXISTING_SERVICE_REVISION
         plan["existing_service_config"] = existing_service_input(existing_service_config)
         revalidate_existing_service(plan)
@@ -785,13 +791,13 @@ def _restore_known_outputs(dot_codex, originals, after_hashes):
 
 def planned_reader_config(reader):
     """Translate a reviewed symbolic command or retained explicit pin without I/O."""
-    if reader == "codex":
-        config = {"reader_codex": "codex"}
+    if isinstance(reader, str):
+        config = {"reader_codex": reader}
     elif (isinstance(reader, dict) and set(reader) == {"source", "sha256"}
           and isinstance(reader["source"], str)):
         config = {"reader_codex": reader["source"], "reader_codex_sha256": reader["sha256"]}
     else:
-        raise ValueError("async mode requires codex from PATH or an absolute pinned Codex executable")
+        raise ValueError("mode requires codex from PATH or an absolute Codex executable with an optional explicit pin")
     validate_reader_codex(config)
     return config
 
@@ -800,7 +806,8 @@ def runtime_configs(plan):
     """Pure installer-owned runtime outputs; also binds exact hook-review scope."""
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
     shadow_codex, reader_codex = plan["shadow_codex"], plan["reader_codex"]
-    service = {"binary": str(prefix / binary_destination(plan, "mneme-mcp")), "project_db": plan["project_db"],
+    dynamic = plan.get("config_revision", 1) >= 40
+    service = {"binary": plan["mcp_command"] if dynamic else str(prefix / binary_destination(plan, "mneme-mcp")), "project_db": plan["project_db"],
                "working_directory": str(root), "port": plan["port"], "state_dir": str(prefix / "run")}
     if "existing_service_config" in plan:
         service = dict(validate_existing_service(plan)["config"])
@@ -812,8 +819,8 @@ def runtime_configs(plan):
         hook.pop("recall_mode")
         hook.update(schema="mneme.codex-hooks.config.v3", memory_mode="shadow",
                     shadow_model=plan["shadow_model"],
-                    shadow_codex=shadow_codex["source"],
-                    shadow_codex_sha256=shadow_codex["sha256"])
+                    **{key.replace("reader_", "shadow_", 1): value
+                       for key, value in planned_reader_config(shadow_codex).items()})
     elif plan["recall_mode"] == "async":
         hook.pop("recall_mode")
         hook.update(schema="mneme.codex-hooks.config.v8", memory_mode="async",
@@ -830,7 +837,7 @@ def runtime_configs(plan):
 
     if "memory_config" in plan:
         hook = {"schema": "mneme.codex-hooks.config.v13", "memory_config": plan["memory_config"]["path"],
-                "native_cli": str(prefix / binary_destination(plan, "mnemed")),
+                "native_cli": plan["native_command"] if dynamic else str(prefix / binary_destination(plan, "mnemed")),
                 "state_dir": str(root / ".mneme/codex-hook-state"),
                 **planned_reader_config(reader_codex)}
     return service, hook
@@ -869,7 +876,7 @@ def apply(plan):
     if helper is not None and digest(Path(helper["source"]).read_bytes()) != helper["sha256"]:
         raise ValueError("library helper changed; prepare a new plan")
     shadow_codex = plan["shadow_codex"]
-    if shadow_codex is not None and digest(Path(shadow_codex["source"]).read_bytes()) != shadow_codex["sha256"]:
+    if isinstance(shadow_codex, dict) and digest(Path(shadow_codex["source"]).read_bytes()) != shadow_codex["sha256"]:
         raise ValueError("shadow Codex executable changed; prepare a new plan")
     reader_codex = plan["reader_codex"]
     if isinstance(reader_codex, dict) and digest(Path(reader_codex["source"]).read_bytes()) != reader_codex["sha256"]:
@@ -1025,14 +1032,18 @@ def main():
     prep.add_argument("--tag-guide-id", help="optional canonical guide node ID in the selected owner")
     prep.add_argument("--shadow-model", choices=SHADOW_MODELS,
                       help="required with --recall-mode shadow; no implicit model")
-    prep.add_argument("--shadow-codex", type=Path,
-                      help="required absolute Codex executable; its hash is checked before assessment")
+    prep.add_argument("--shadow-codex",
+                      help="shadow command: codex from PATH (default), or an absolute executable")
     prep.add_argument("--reader-model", choices=READER_MODELS,
                       help="required with --recall-mode async; explicitly selected librarian model")
     prep.add_argument("--librarian-effort", choices=EFFORTS,
                       help="async low/medium/high resource preset; default medium (not a spending cap)")
+    prep.add_argument("--mcp-command", default="mneme-mcp", help="runtime MCP selector, separate from --mcp artifact source")
+    prep.add_argument("--native-command", default="mnemed", help="runtime native CLI selector, separate from --mnemed artifact source")
+    prep.add_argument("--python", default="python3",
+                      help="runtime Python selector: python3 from PATH (default), or a lexical absolute executable")
     prep.add_argument("--reader-codex",
-                      help="async reader command: codex from PATH (default), or an absolute executable to hash-pin")
+                      help="async reader command: codex from PATH (default), or an absolute executable (no automatic hash pin)")
     prep.add_argument("--memory-config", type=Path,
                       help="native memory.toml policy; installs configured MCP only; device hooks prepared separately")
     prep.add_argument("--store-registry", type=Path,
@@ -1058,7 +1069,7 @@ def main():
     try:
         if args.command == "prepare":
             plan = prepare(args.project_root, args.prefix, args.mnemed, args.mcp, args.port,
-                           recall_mode=args.recall_mode, library_helper=args.library_helper,
+                           recall_mode=args.recall_mode, python=args.python, library_helper=args.library_helper,
                            enroll_existing=args.enroll_existing,
                            shadow_model=args.shadow_model, shadow_codex=args.shadow_codex,
                            reader_model=args.reader_model, reader_codex=args.reader_codex,
@@ -1069,6 +1080,7 @@ def main():
                            store_registry=args.store_registry, memory_config=args.memory_config,
                            activity_root=args.activity_root, activity_config=args.activity_config,
                            activity_device=args.activity_device,
+                           mcp_command=args.mcp_command, native_command=args.native_command,
                            global_preferences=(global_preferences_input(args.global_preferences)
                                                if args.global_preferences is not None else None))
             args.output.parent.mkdir(parents=True, exist_ok=True)

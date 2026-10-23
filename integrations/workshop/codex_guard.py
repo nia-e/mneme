@@ -22,6 +22,8 @@ import os
 from pathlib import Path
 import stat
 import sys
+
+import raw_codex
 from typing import BinaryIO
 
 
@@ -83,6 +85,25 @@ def _activity_gate(path: Path, *, create: bool) -> BinaryIO | None:
     return gate
 
 
+def resolve_raw_codex(selector: Path | None, packages: Path | None = None) -> Path:
+    """Select one executable edition for this launch, without pinning its config.
+
+    The selector may move between sessions. Resolve it before starting children
+    so a later selector swap cannot split one cycle across different editions.
+    This does not protect against replacement of the selected edition itself.
+    """
+    if packages is not None:
+        if selector is not None:
+            raise Refusal("choose --codex or --codex-packages, not both")
+        return raw_codex.select_package(packages)
+    if selector is None or not selector.is_absolute():
+        raise Refusal("--codex must name an absolute executable raw Codex binary")
+    executable = selector.resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise Refusal("--codex must name an absolute executable raw Codex binary")
+    return executable
+
+
 def session_arguments(arguments: list[str]) -> list[str] | None:
     """None denotes narrow non-session commands; otherwise force foreground.
 
@@ -99,19 +120,22 @@ def session_arguments(arguments: list[str]) -> list[str] | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path, help="existing absolute workshop directory")
-    parser.add_argument("--codex", required=True, type=Path, help="absolute raw Codex executable, not this shim")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--codex", type=Path, help="absolute raw Codex executable, not this shim")
+    source.add_argument("--codex-packages", type=Path, help="absolute installed package inventory; newest complete edition")
     parser.add_argument("arguments", nargs=argparse.REMAINDER, help="-- followed by unchanged Codex arguments")
     args = parser.parse_args(argv)
     if not args.arguments or args.arguments[0] != "--":
         parser.error("separate Codex arguments with -- (bare -- starts an interactive session)")
     if not args.root.is_absolute() or not args.root.is_dir():
         parser.error("--root must name an existing absolute directory")
-    if not args.codex.is_absolute() or not args.codex.is_file() or not os.access(args.codex, os.X_OK):
-        parser.error("--codex must name an absolute executable raw Codex binary")
+    if args.codex is not None and not args.codex.is_absolute():
+        parser.error("--codex must be absolute")
     original = args.arguments[1:]
     arguments = session_arguments(original)
     gate = None
     try:
+        executable = resolve_raw_codex(args.codex, args.codex_packages)
         if arguments is not None:
             gate = try_activity_gate(args.root / LOCK_NAME)
             if gate is None:
@@ -122,8 +146,8 @@ def main(argv: list[str] | None = None) -> int:
             os.set_inheritable(gate.fileno(), True)
         else:
             arguments = original
-        os.execvpe(str(args.codex), [str(args.codex), *arguments], os.environ)
-    except (OSError, Refusal) as exc:
+        os.execvpe(str(executable), [str(executable), *arguments], os.environ)
+    except (OSError, ValueError) as exc:
         print(f"Codex launch refused: {exc}", file=sys.stderr)
         return 1
     finally:

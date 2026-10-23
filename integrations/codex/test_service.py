@@ -29,7 +29,7 @@ class ServiceTests(unittest.TestCase):
         self.addCleanup(unix_contract.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        root = Path(self.temp.name)
+        root = Path(self.temp.name).resolve()
         binary = root / "isolated" / "bin" / executable_name("mneme-mcp")
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"not run")
@@ -72,6 +72,87 @@ class ServiceTests(unittest.TestCase):
         path = self.config.state_dir / "config.json"
         path.write_text(json.dumps(data))
         return path
+
+    def _mock_start(self, config):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        with patch("service.spawn", return_value=process) as spawn, \
+                patch("service._probe", side_effect=[None, self._catalog()]):
+            self.assertEqual(start(config)["state"], "ready")
+        state_path = config.state_dir / "mneme-codex-service.json"
+        return spawn.call_args.args[0], json.loads(state_path.read_text())
+
+    def test_path_selector_is_persisted_but_new_spawns_resolve_current_path(self):
+        config = self._named_config("project", binary="mneme-mcp")
+        loaded = ServiceConfig.from_json(self._config_json(
+            binary="mneme-mcp", database_name="project"))
+        self.assertEqual(loaded, config)
+        other = self.config.binary.parent.parent / "next" / "mneme-mcp"
+        other.parent.mkdir()
+        other.write_bytes(b"not executed")
+        other.chmod(0o700)
+        for target in (self.config.binary, other):
+            with patch.dict(os.environ, {"PATH": str(target.parent)}):
+                argv, state = self._mock_start(config)
+            self.assertEqual(argv[0], str(target.resolve()))
+            self.assertEqual(state["binary"], "mneme-mcp")
+            self.assertEqual(state["launch_binary"], str(target.resolve()))
+            (config.state_dir / "mneme-codex-service.json").unlink()
+
+    def test_symlink_selector_replacement_keeps_live_witness_and_updates_next_spawn(self):
+        selector = self.config.binary.parent / "current"
+        selector.symlink_to(self.config.binary)
+        config = self._named_config("project", binary=selector)
+        argv, state = self._mock_start(config)
+        other = selector.parent / "replacement"
+        other.write_bytes(b"not executed")
+        other.chmod(0o700)
+        selector.unlink()
+        selector.symlink_to(other)
+        self.assertEqual(config.binary, selector)
+        self.assertEqual(state["binary"], str(selector))
+        good_ps = subprocess.CompletedProcess([], 0, stdout=" ".join(argv) + "\n")
+        with patch("service.subprocess.run", return_value=good_ps), \
+                patch("service._probe", return_value=self._catalog()), \
+                patch("service.spawn", side_effect=AssertionError("must reuse owner")):
+            self.assertEqual(status(config)["state"], "ready")
+            self.assertEqual(start(config)["state"], "ready")
+        wrong_ps = subprocess.CompletedProcess([], 0, stdout=" ".join(config.for_launch().argv) + "\n")
+        with patch("service.subprocess.run", return_value=wrong_ps):
+            self.assertEqual(status(config)["state"], "stale")
+        (config.state_dir / "mneme-codex-service.json").unlink()
+        next_argv, _ = self._mock_start(config)
+        self.assertEqual(next_argv[0], str(other.resolve()))
+
+    def test_path_disappearance_does_not_strand_live_owner_or_authorize_replacement(self):
+        config = self._named_config("project", binary="mneme-mcp")
+        with patch.dict(os.environ, {"PATH": str(self.config.binary.parent)}):
+            argv, _ = self._mock_start(config)
+        good_ps = subprocess.CompletedProcess([], 0, stdout=" ".join(argv) + "\n")
+        with patch.dict(os.environ, {"PATH": ""}), \
+                patch("service.subprocess.run", return_value=good_ps), \
+                patch("service._probe", return_value=self._catalog()), \
+                patch("service.spawn", side_effect=AssertionError("must reuse owner")):
+            self.assertEqual(start(config)["state"], "ready")
+            self.assertTrue(ensure_ready(config)["reuse_only"])
+            with patch("service._matches_process", side_effect=[True, True, False]), \
+                    patch("service.os.kill") as kill:
+                self.assertEqual(stop(config)["state"], "stopped")
+                kill.assert_called_once_with(123, signal.SIGTERM)
+        with patch.dict(os.environ, {"PATH": ""}), \
+                patch("service.spawn", side_effect=AssertionError("no fallback")):
+            with self.assertRaisesRegex(ValueError, "missing or not executable"):
+                start(config)
+
+    def test_selected_executable_failure_never_retries_or_publishes(self):
+        config = self._named_config("project", binary="mneme-mcp")
+        with patch.dict(os.environ, {"PATH": str(self.config.binary.parent)}), \
+                patch("service._probe", return_value=None), \
+                patch("service.spawn", side_effect=OSError("selected command failed")) as spawn:
+            with self.assertRaisesRegex(OSError, "selected command failed"):
+                start(config)
+        spawn.assert_called_once()
+        self.assertFalse((config.state_dir / "mneme-codex-service.json").exists())
 
     def test_named_config_and_legacy_project_constructor_compatibility(self):
         user = self._named_config()
@@ -334,7 +415,7 @@ class ServiceTests(unittest.TestCase):
             self.assertFalse(_matches_process(self.config, 123))
 
     def test_config_requires_explicit_absolute_paths_and_token(self):
-        bad = ServiceConfig(Path("mneme-mcp"), self.config.project_db,
+        bad = ServiceConfig(Path("relative/mneme-mcp"), self.config.project_db,
                             self.config.port, self.config.state_dir, self.config.working_directory)
         with self.assertRaises(ValueError):
             bad.validate()
@@ -561,7 +642,7 @@ class ServicePortabilityTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         binary = self.root / "program space \u03bb.exe"
         binary.write_bytes(b"never executed except through mocked spawn")
         binary.chmod(0o700)
@@ -604,9 +685,22 @@ class ServicePortabilityTests(unittest.TestCase):
         self.assertNotIn("start_new_session", spawn.call_args.kwargs)
         self.assertEqual(json.loads(self.path.read_text())["process_identity"], self.identity)
 
+    def test_windows_logical_selector_uses_recorded_concrete_identity(self):
+        config = ServiceConfig("mneme-mcp", self.config.database_path, self.config.port,
+                               self.config.state_dir, self.root)
+        self._record(binary="mneme-mcp", launch_binary=str(self.config.binary))
+        with self._windows(), patch.dict(os.environ, {"PATH": ""}), \
+                patch("service.process_identity", return_value=self.identity), \
+                patch("service._probe", return_value=self.catalog), \
+                patch("service.spawn", side_effect=AssertionError("must reuse owner")):
+            self.assertEqual(status(config)["state"], "ready")
+            self.assertEqual(start(config)["state"], "ready")
+        wrong = {**self.identity, "executable": str(self.root / "replacement.exe")}
+        with self._windows(), patch("service.process_identity", return_value=wrong):
+            self.assertEqual(status(config)["state"], "stale")
+
     def test_windows_native_binary_validation_refuses_shell_wrappers_before_work(self):
         with self._windows(), patch("host_platform.WINDOWS", True), \
-                patch("service._lock", side_effect=AssertionError("unexpected lock")), \
                 patch("service._probe", side_effect=AssertionError("unexpected HTTP")), \
                 patch("service.spawn", side_effect=AssertionError("unexpected spawn")):
             self.assertEqual(self.config.validate().binary, self.config.binary)

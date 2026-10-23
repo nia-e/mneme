@@ -421,10 +421,15 @@ def _registry_child_collect(request, notice_state, deadline):
             if set(witness) != {"schema", "config_path", "native_cli", "cwd", "digest", "binary_pin"}:
                 raise ValueError("invalid compact core selection witness")
             native_validate_binary_pin(witness["native_cli"], witness["binary_pin"])
-            selection = native_select(_absolute_path(witness["config_path"]), _absolute_path(witness["native_cli"]),
+            selection = native_select(_absolute_path(witness["config_path"]), witness["native_cli"],
                                       _absolute_path(witness["cwd"]), expected_selection_digest=witness["digest"])
-            if selection.digest != witness["digest"] or selection.binary_pin != witness["binary_pin"]:
+            native_validate_binary_pin(witness["native_cli"], witness["binary_pin"])
+            if selection.digest != witness["digest"]:
                 raise ValueError("core selection changed; use a fresh session")
+            # New native selections omit edition pins; retain an explicitly
+            # pinned legacy witness only after checking it around replay.
+            from dataclasses import replace
+            selection = replace(selection, binary_pin=witness["binary_pin"])
         else:
             from store_registry import NATIVE_SELECTION_SCHEMA
             if isinstance(witness, dict) and witness.get("schema") == NATIVE_SELECTION_SCHEMA:

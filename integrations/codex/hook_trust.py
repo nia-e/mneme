@@ -64,7 +64,8 @@ def reviewed_definitions(root, service_path, bundle_root=None):
         raise TrustError("invalid_install_receipt") from None
     if (planned_root != root or planned_prefix != prefix
             or plan.get("config_revision") not in install.SUPPORTED_APPLY_REVISIONS
-            or Path(plan["python"]).resolve() != Path(sys.executable).resolve()):
+            or (plan["config_revision"] < 40
+                and Path(plan["python"]).resolve() != Path(sys.executable).resolve())):
         raise TrustError("receipt_scope_or_interpreter_changed")
     try:
         install.revalidate_existing_service(plan)

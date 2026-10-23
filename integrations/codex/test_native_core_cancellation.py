@@ -51,6 +51,15 @@ class NativeCoreCancellationTests(unittest.TestCase):
         time.sleep(.95)
         self.assertFalse(finished.exists(), "native selector survived collector cancellation")
 
+    def test_unchanged_explicit_legacy_core_pin_survives_unpinned_native_replay(self):
+        selected = self.selected()
+        replay = registry.NativeSelection(self.value, selected.registry_path,
+                                          selected.native_cli, selected.cwd)
+        request = {"selection": self.witness(selected), "timeout": 1}
+        with patch("store_registry.native_select", return_value=replay) as select:
+            self.assertEqual(core_hook._registry_child_collect(request, None, time.monotonic() + 1), 0)
+        select.assert_called_once()
+
     def test_changed_binary_refuses_frozen_revalidation_before_native_execution(self):
         selected = self.selected()
         self.binary.write_bytes(b"replacement executable")

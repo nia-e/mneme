@@ -15,6 +15,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 
 WINDOWS = os.name == "nt"
 
@@ -34,34 +35,79 @@ def is_executable(path, *, windows=None):
     return path.is_file() and (path.suffix.lower() == ".exe" if windows else os.access(path, os.X_OK))
 
 
+def validate_command(value, *, default):
+    """Validate a logical PATH command or lexical absolute executable selector.
+
+    Selectors identify replaceable tooling, not an executable edition. Absolute
+    symlinks deliberately retain their spelling across package-manager updates.
+    """
+    if not isinstance(value, (str, Path)):
+        raise ValueError(f"executable must be {default!r} or an absolute path")
+    value = str(value)
+    if (not value or len(value.encode()) > 4096
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
+        raise ValueError("invalid bounded executable selector")
+    if value != default and (not Path(value).is_absolute()
+            or str(Path(value)) != value or ".." in Path(value).parts):
+        raise ValueError(f"executable must be {default!r} or an absolute path")
+    return value
+
+
+def resolve_command(value, *, default):
+    """Resolve the caller's current PATH immediately before each process launch."""
+    value = validate_command(value, default=default)
+    found = shutil.which(executable_name(default)) if value == default else value
+    if found is None or not is_executable(found):
+        raise ValueError(f"executable unavailable: {value}")
+    return os.path.abspath(found)
+
+
 def validate_reader_codex(config):
-    """A launch-time PATH command or an explicit legacy executable pin."""
-    codex = config.get("reader_codex")
-    if codex == "codex":
-        if "reader_codex_sha256" in config:
+    """A replaceable selector, optionally retaining an explicit legacy hash."""
+    codex = validate_command(config.get("reader_codex"), default="codex")
+    if "reader_codex_sha256" in config:
+        if codex == "codex":
             raise ValueError("PATH reader_codex must omit reader_codex_sha256")
-        return
-    if not isinstance(codex, (str, Path)) or not Path(codex).is_absolute():
-        raise ValueError("reader_codex must be 'codex' or an absolute path")
-    digest = config.get("reader_codex_sha256")
-    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-        raise ValueError("invalid reader_codex_sha256")
+        digest = config["reader_codex_sha256"]
+        if codex == "codex" or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("invalid reader_codex_sha256")
 
 
 def prepare_reader_codex(value="codex"):
-    """Persist PATH intent unchanged; only an explicit path requests a pin."""
-    if not isinstance(value, (str, Path)):
-        raise ValueError("reader_codex must be 'codex' or an absolute path")
-    if str(value) == "codex":
-        return {"reader_codex": "codex"}
-    path = Path(value)
-    if not path.is_absolute():
-        raise ValueError("reader_codex must be 'codex' or an absolute path")
-    path = path.resolve(strict=True)
-    if not is_executable(path):
-        raise ValueError("reader_codex must be executable")
-    return {"reader_codex": str(path),
-            "reader_codex_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    """Preserve launch intent; choosing a path does not request an edition pin."""
+    value = validate_command(value, default="codex")
+    if value != "codex":
+        resolve_command(value, default="codex")
+    return {"reader_codex": value}
+
+
+def prepare_python_selector(value="python3", *, windows=None):
+    """Keep POSIX PATH intent; preserve established setup-selected Windows Python.
+
+    This is authoring only. Receipt rendering must never depend on the later
+    machine's current interpreter. Explicit absolute selectors remain lexical.
+    """
+    value = validate_command(value, default="python3")
+    windows = WINDOWS if windows is None else windows
+    return sys.executable if windows and value == "python3" else value
+
+
+def python_hook_argv(python, arguments, *, windows=None):
+    """Launch supported Python dynamically without persisting its resolved edition.
+
+    Explicit absolute selectors are invoked unchanged. POSIX's logical default
+    probes a finite compatible interpreter set each launch, so an old system
+    python3 cannot hide an installed supported interpreter.
+    """
+    python = validate_command(python, default="python3")
+    windows = WINDOWS if windows is None else windows
+    if python != "python3" or windows:
+        return [executable_name(python, windows=windows) if python == "python3" else python, *arguments]
+    script = ("for python in python3 python3.14 python3.13 python3.12 python3.11; do "
+              "if \"$python\" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' "
+              ">/dev/null 2>&1; then exec \"$python\" \"$@\"; fi; done; "
+              "printf '%s\\n' 'Mneme requires Python 3.11 or newer on PATH' >&2; exit 127")
+    return ["/bin/sh", "-c", script, "mneme-python", *arguments]
 
 
 def find_executable(name, *, sibling_dir=None):

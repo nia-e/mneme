@@ -18,7 +18,7 @@ import re
 import time
 
 from host_files import open_regular
-from host_platform import default_config_dir
+from host_platform import default_config_dir, validate_command, resolve_command
 from profile import select_for_cwd
 from service import load_config, server_database_path
 
@@ -609,12 +609,44 @@ class _NativeBridgeResponse(dict):
         self.wire_bytes = wire_bytes
 
 
+class NativeCommandError(ValueError):
+    """Current executable availability or protocol failure, not owner identity drift."""
+
+
+def _native_command_failure(output, status):
+    """Expose only the known bounded error envelope, never raw tool/body output."""
+    detail = None
+    try:
+        value = json.loads(output, object_pairs_hook=_unique)
+        error = value.get("error") if isinstance(value, dict) else None
+        if (value.get("schema") == "mneme.config-call.v1" and value.get("ok") is False
+                and isinstance(error, dict)
+                and error.get("kind") in {"input", "protocol", "native", "tool", "transport"}
+                and isinstance(error.get("message"), str)):
+            # The same structured diagnostics are already exposed by NativeClient.
+            # Do not retain result fields, arbitrary stderr or unknown envelopes.
+            message = " ".join(error["message"].split())[:512]
+            detail = {"kind": error["kind"], "message": message}
+    except (ValueError, AttributeError, TypeError):
+        pass
+    message = f"native configuration request failed (exit status {status})"
+    if detail is not None:
+        message += f": {detail['kind']}: {detail['message']}"
+    error = NativeCommandError(message)
+    error.details = detail
+    return error
+
+
 def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIVE_SNAPSHOT_BYTES):
     import subprocess
     import time
     import math
     import host_process
-    if (not Path(binary).is_absolute() or type(timeout) not in (int, float)
+    try:
+        binary = resolve_command(binary, default="mnemed")
+    except ValueError as error:
+        raise NativeCommandError(str(error)) from error
+    if (type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 30):
         raise ValueError("invalid bounded native config request")
     raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode() if payload is not None else b""
@@ -628,8 +660,11 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
         # mutation, and older binaries can only refuse the frozen CLI flag.
         options["env"] = {**os.environ, "MNEME_DISCOVERY_TIMEOUT_MS": str(max(1, int(timeout * 1000) - 50))}
     deadline = time.monotonic() + timeout
-    process = host_process.spawn([str(binary), "--json", "config", *arguments], tree=not _native_inherited_process_group.get(),
-                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **options)
+    try:
+        process = host_process.spawn([str(binary), "--json", "config", *arguments], tree=not _native_inherited_process_group.get(),
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **options)
+    except OSError as error:
+        raise NativeCommandError("native command could not be launched") from error
     pipe = host_process.BoundedPipe(process, max_read_bytes=min(limit + 1, 16384))
     try:
         pipe.write(raw, deadline)
@@ -641,14 +676,21 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
                 break
             output.extend(chunk)
             if len(output) > limit:
-                raise ValueError("native config response exceeds byte limit")
+                raise NativeCommandError("native config response exceeds byte limit")
         process.wait(timeout=max(.001, deadline - time.monotonic()))
         if process.returncode:
-            raise ValueError("native configuration refused; check the matching helper/CLI bundle and reselect before work")
-        value = json.loads(output, object_pairs_hook=_unique)
+            raise _native_command_failure(output, process.returncode)
+        try:
+            value = json.loads(output, object_pairs_hook=_unique)
+        except ValueError as error:
+            raise NativeCommandError("invalid native configuration response") from error
         if not isinstance(value, dict):
-            raise ValueError("invalid native configuration response")
+            raise NativeCommandError("invalid native configuration response")
         return _NativeBridgeResponse(value, len(output))
+    except (TimeoutError, subprocess.TimeoutExpired) as error:
+        raise NativeCommandError("native configuration request timed out") from error
+    except OSError as error:
+        raise NativeCommandError("native configuration request interrupted") from error
     finally:
         pipe.close()
         host_process.terminate_tree(process, timeout=.2)
@@ -674,7 +716,7 @@ def native_validate_binary_pin(binary, pin):
 
 
 def native_select(config_path, binary, cwd, *, expected_selection_digest=None, timeout=None):
-    config_path, binary, cwd = str(_path(config_path)), str(_path(binary)), str(_path(cwd))
+    config_path, binary, cwd = str(_path(config_path)), validate_command(binary, default="mnemed"), str(_path(cwd))
     arguments = ["select", "--config", config_path, "--cwd", cwd]
     if expected_selection_digest is not None:
         if not isinstance(expected_selection_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_selection_digest):
@@ -684,11 +726,8 @@ def native_select(config_path, binary, cwd, *, expected_selection_digest=None, t
         arguments.extend(["--expected-selection-digest", expected_selection_digest])
     allowance = native_selection_remaining(timeout if timeout is not None else
                                            3.0 if expected_selection_digest is not None else NATIVE_SELECTION_TIMEOUT)
-    pin = native_binary_identity(binary)
     snapshot = native_bridge(binary, arguments, timeout=allowance)
-    if native_binary_identity(binary) != pin:
-        raise ValueError("native binary changed during selection; use a fresh session")
-    selected = NativeSelection(snapshot, config_path, binary, cwd, pin)
+    selected = NativeSelection(snapshot, config_path, binary, cwd)
     if expected_selection_digest is not None and selected.digest != expected_selection_digest:
         raise ValueError("native selected configuration changed; use a fresh session")
     return selected
@@ -744,6 +783,7 @@ class NativeSelection:
 
     def __post_init__(self):
         _native_binary_pin(self.binary_pin)
+        validate_command(self.native_cli, default="mnemed")
         value = self.snapshot
         if (not isinstance(value, dict) or value.get("schema") != "mneme.config-selection.v1"
                 or not isinstance(value.get("digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", value["digest"])
@@ -831,7 +871,8 @@ class NativeSelection:
     def revalidate(self, *, operation=None, store_name=None):
         native_validate_binary_pin(self.native_cli, self.binary_pin)
         current = native_select(self.registry_path, self.native_cli, self.cwd, expected_selection_digest=self.digest)
-        if current.snapshot != self.snapshot or current.binary_pin != self.binary_pin:
+        native_validate_binary_pin(self.native_cli, self.binary_pin)
+        if current.snapshot != self.snapshot:
             raise ValueError("native selected configuration changed; use a fresh session")
         if operation is not None:
             operation = "read" if operation == "explicit" else operation
@@ -839,7 +880,9 @@ class NativeSelection:
                 raise ValueError("selected owner does not permit this operation")
         elif store_name is not None:
             current.named(store_name)
-        return current
+        # Retained explicitly pinned snapshots keep their legacy witness; new
+        # selections never mint an executable-edition identity.
+        return replace(current, binary_pin=self.binary_pin)
 
 
 @dataclass(frozen=True)

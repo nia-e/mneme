@@ -36,7 +36,7 @@ def main():
     for flag in ("workspace-root", "state-dir", "service-config", "database-path", "db-id"):
         parser.add_argument("--" + flag, required=True)
     parser.add_argument("--reader-codex", default="codex",
-                        help="codex from PATH (default), or an absolute executable to hash-pin")
+                        help="codex from PATH (default), or an absolute executable (no automatic hash pin)")
     args = parser.parse_args()
     print(json.dumps(prepare(**vars(args)), ensure_ascii=False, indent=2))
 

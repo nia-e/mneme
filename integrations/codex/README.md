@@ -56,8 +56,8 @@ Useful options:
 | Option | Purpose |
 | --- | --- |
 | `--root PATH` | Select a project other than the current directory. |
-| `--mcp-binary PATH`, `--python PATH` | Select installed prerequisites explicitly. |
-| `--codex-binary PATH` | Optional absolute Codex path for hook trust and a legacy pinned background reader. |
+| `--mcp-binary PATH`, `--python PATH` | Choose lexical runtime selectors explicitly; Python accepts `python3` or an absolute interpreter path. |
+| `--codex-binary PATH` | Optional absolute Codex launcher for hook trust and the reader; no automatic hash pin. |
 | `--port PORT` | Choose the local owner port for new setup. |
 | `--library-config PATH` | Select and retain a device-local library config. |
 | `--no-trust-hooks` | Leave generated hooks pending manual review. |
@@ -65,7 +65,12 @@ Useful options:
 The background reader defaults to launch-time `codex` lookup from the hook
 process's `PATH`, rather than retaining the executable found during setup.
 Setup uses the current PATH executable for hook trust if available; otherwise
-trust remains pending and setup can continue.
+trust remains pending and setup can continue. Fresh native/MCP launch defaults are
+`mnemed` and `mneme-mcp` from current `PATH`; setup checks its selected runtime MCP
+before creating storage. An explicit absolute selector keeps its symlink spelling.
+On POSIX, hooks discover compatible Python 3.11+ on `PATH` each launch. Windows
+authoring preserves its setup-selected interpreter once; receipt reconstruction
+never substitutes a later interpreter. An explicit Python path remains lexical.
 
 By default, init trusts only its exact generated, enabled project hooks through
 Codex's native config API. Missing APIs leave trust pending rather than bypassing
@@ -241,25 +246,31 @@ Each store has one shared HTTP owner. The launcher starts or reuses that owner;
 Codex sessions do not each open a database. While it is running, use MCP, the
 configured CLI, or the bridge—not `mnemed --db PATH` or another host on that store.
 
-Installed helpers use their sibling `bin/mnemed`. Updating a binary elsewhere on
-PATH does not update the copied integration. Use a matching native pair; builds
-with different embedders are not interchangeable on an existing store.
+Installed helpers resolve `mnemed` from current `PATH` for each new child (an
+explicit `MNEME_CLIENT_BINARY` overrides it). A packaged sibling is a fallback only
+when no PATH command exists; failure of a selected executable is not retried on an
+older one. Published helper modules stay coherent, but copied native payloads do
+not determine fresh configurations' launch intent. Store/embedder identity checks
+still apply; changing executable edition does not change an existing store.
 
-Native declarative hooks also require a matching helper/CLI bundle. Initial
+Native declarative hooks require coherent helper modules and a CLI implementing
+the actual bounded selection/call protocol, not a metadata version match. Initial
 selection may acquire bounded discovery metadata; every later native selection
 check, core collector, reader child, checkpoint and reviewed install-plan check
 uses `config select --expected-selection-digest` for offline replay—even when
 the original configuration did not enable discovery. An older CLI that lacks
 this flag refuses; the helpers never retry with fresh selection. Update the
-matching bundle and start a fresh session after an intentional configuration or
+tooling and start a fresh session after an intentional configuration or
 discovery-receipt change. Do not reset an existing session ledger to bypass its
 selection fence.
 
-A managed-local service config uses absolute paths:
+A managed-local service config uses absolute state/store paths and a logical or
+absolute executable selector. Each new owner spawn resolves that selector; a
+running owner retains its exact recorded process witness for status/stop:
 
 ```json
 {
-  "binary": "/absolute/runtime/bin/mneme-mcp",
+  "binary": "mneme-mcp",
   "database_name": "user",
   "database_path": "/absolute/stores/user.db",
   "port": 18766,
@@ -403,7 +414,8 @@ unchanged owned wiring. Keep receipts and memory data when resolving failures.
 
 For hook-only replacement against an existing managed-local owner, add
 `--existing-service-config /absolute/old-prefix/config/service.json`, selecting
-its exact binary with `--mcp` and existing port with `--port`. Remove unchanged old
+the existing port with `--port`. `--mcp` selects the reviewed installation payload;
+new plans keep the retained owner's launch selector separately. Remove unchanged old
 project wiring using its receipt first; retain the owner runtime/state. The root
 and database must match. Connect-only or foreign owners are not supported here.
 
@@ -423,8 +435,12 @@ fresh reader process starts. The generated adapter keeps `"reader_codex": "codex
 and omits `reader_codex_sha256`; replacing the PATH launcher does not invalidate
 session bindings or reset accounting. An already-running process keeps its
 existing executable. Preparing this configuration does not require `codex` to be
-installed. Existing explicit absolute-path/hash configurations remain supported;
-pass an absolute `--reader-codex` only when that fixed binding is wanted.
+installed. Absolute `--reader-codex` paths are also unpinned and preserve symlink
+spelling. Only an explicitly retained legacy SHA field requests edition checking;
+new preparation does not add one. The same rule applies to `--codex-binary` and
+shadow/Claude reader selectors. Native install plans separate reviewed binary
+payloads from `--mcp-command` / `--native-command` runtime selectors (logical
+`mneme-mcp` / `mnemed` defaults).
 
 The reader selects source-backed context from the configured store and delivers
 it at eligible tool boundaries. Late results are discarded; no-tool turns may
@@ -568,8 +584,8 @@ typed touchstone SAVE are unchanged.
 ### Isolated shadow pilot (opt-in)
 
 For a disposable isolated project, use `--recall-mode shadow`,
-`--shadow-model gpt-5.6-sol` (or `gpt-5.6-terra`) and
-`--shadow-codex /absolute/bin/codex`. A separate assessor records local observations
+`--shadow-model gpt-5.6-sol` (or `gpt-5.6-terra`). The assessor defaults to
+`codex` on PATH; `--shadow-codex /absolute/bin/codex` selects an unpinned launcher. A separate assessor records local observations
 of bounded context delivery, without memory writes. Task material can reach the
 selected provider. This is an experimental mode, not a quality guarantee.
 

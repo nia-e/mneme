@@ -50,6 +50,7 @@ class RegistryInstallTests(unittest.TestCase):
                 self.assertEqual(events["SessionStart"][:-1], legacy_events["SessionStart"])
                 argv = [plan["python"], str(self.fixture.prefix / "lib/core_hook.py"),
                         "--hook-config", str(self.fixture.prefix / "config/hooks.json")]
+                argv = install.python_hook_argv(plan["python"], argv[1:], windows=install.plan_platform(plan) == "windows")
                 core = events["SessionStart"][-1]
                 self.assertEqual(core, {"hooks": [{"type": "command",
                     "command": hook_command(argv, windows=install.plan_platform(plan) == "windows"),
@@ -164,6 +165,7 @@ print(json.dumps({"schema": config["schema"], "selected": len(selected.stores)})
     def test_old_receipt_cannot_smuggle_in_registry_authority(self):
         plan = self.plan()
         plan["config_revision"] = 22
+        plan["python"] = sys.executable
         plan["files"] = plan["files"][:len(install.V22_DESTINATIONS)]
         plan["plan_sha256"] = install.plan_hash(plan)
         with self.assertRaisesRegex(ValueError, "new async install plan"):
@@ -199,6 +201,8 @@ class RegistryMigrationCliTests(unittest.TestCase):
         old_prefix = fixture.prefix
         old_plan = fixture.async_plan(program_root=Path(install.__file__).parent,
                                      recording_mode="automatic", tag_stewardship=False)
+        old_plan.update(config_revision=38, python=sys.executable)
+        old_plan["plan_sha256"] = install.plan_hash(old_plan)
         old = install.apply(old_plan)
         dot_codex = fixture.project / ".codex"
         saved_configs = {name: (dot_codex / name).read_bytes() for name in install.CONFIG_NAMES}

@@ -62,6 +62,20 @@ fn init_help_and_illegal_selectors_are_local_and_bounded() {
         assert_eq!(result["stage"], "preflight");
         assert_eq!(result["published"], false);
     }
+    for selector in ["python3.14", "./python", "bin/python"] {
+        let output = fixture.run(&["--json", "init", "--python", selector]);
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["stage"], "preflight");
+        assert_eq!(result["published"], false);
+        #[cfg(feature = "cozo")]
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("absolute interpreter selector")
+        );
+    }
     let invalid = fixture.run(&["init", "--port", "1"]);
     assert!(!invalid.status.success());
     fixture.unchanged();

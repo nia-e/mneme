@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from host_platform import hook_command, is_executable, prepare_reader_codex, validate_reader_codex
+from host_platform import prepare_python_selector, validate_command, resolve_command, python_hook_argv, hook_command, is_executable, prepare_reader_codex, validate_reader_codex
 from tag_config import FIELDS as TAG_FIELDS, prepared_fields, validate as validate_tag_config
 from librarian_policy import resolve
 from misc_binding import canonical_path, validate_excluded_roots
@@ -34,8 +34,7 @@ def validate_config(value):
     if not isinstance(value["reader_codex"], str):
         raise ValueError("misc reader command must be a string")
     validate_reader_codex(value)
-    if value["reader_codex"] != "codex":
-        canonical_path(value["reader_codex"])
+    validate_command(value["reader_codex"], default="codex")
     if not isinstance(value["excluded_roots"], list):
         raise ValueError("excluded_roots must be a JSON array")
     validate_excluded_roots(value["excluded_roots"])
@@ -51,18 +50,17 @@ def validate_config(value):
 
 
 def prepare(*, state_dir, service_config, database_path, db_id, reader_codex="codex",
-            hooks_program, hook_config_path, excluded_roots=(), python=sys.executable,
+            hooks_program, hook_config_path, excluded_roots=(), python="python3",
             librarian_effort="medium", recording_mode="automatic", reader_auth=None, tag_stewardship=None, tag_guide_id=None):
     service = canonical_path(service_config)
     reader = prepare_reader_codex(reader_codex)
     program = canonical_path(Path(hooks_program).resolve(strict=True))
-    # Python installations commonly expose their executable via a symlink.
-    # Pin the executable itself; workspace bindings separately retain lexical
-    # origin and canonical root so aliases cannot erase privacy boundaries.
-    interpreter = canonical_path(Path(python).resolve(strict=True))
+    interpreter = prepare_python_selector(python)
+    if interpreter != "python3":
+        resolve_command(interpreter, default="python3")
     state = canonical_path(state_dir)
     destination = canonical_path(hook_config_path)
-    if not service.is_file() or not program.is_file() or not is_executable(interpreter):
+    if not service.is_file() or not program.is_file():
         raise ValueError("misc preparation requires existing service, hook program and Python")
     config = {"schema": MISC_SCHEMA, "state_dir": str(state), "service_config": str(service),
               "memory_scope": "misc", "memory_mode": "async", "reader_model": "gpt-6.1-sol",
@@ -78,7 +76,7 @@ def prepare(*, state_dir, service_config, database_path, db_id, reader_codex="co
     if owner.database_name != "project" or str(owner.database_path) != database_path:
         raise ValueError("misc target differs from service configuration")
     from install import PROGRAMS, hook_handlers
-    argv = [str(interpreter), str(program), "--config", str(destination)]
+    argv = python_hook_argv(interpreter, [str(program), "--config", str(destination)])
     command = hook_command(argv)
     background = hook_command([*argv, "--reader-background"])
     sources = Path(__file__).parent
@@ -99,9 +97,9 @@ def main():
                  "hooks-program", "hook-config-path"):
         parser.add_argument("--" + flag, required=True)
     parser.add_argument("--reader-codex", default="codex",
-                        help="codex from PATH (default), or an absolute executable to hash-pin")
+                        help="codex from PATH (default), or an absolute executable (no automatic hash pin)")
     parser.add_argument("--excluded-root", action="append", default=[], dest="excluded_roots")
-    parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--python", default="python3")
     parser.add_argument("--librarian-effort", choices=("low", "medium", "high"), default="medium")
     parser.add_argument("--recording-mode", choices=("off", "automatic"), default="automatic")
     parser.add_argument("--tag-stewardship", action=argparse.BooleanOptionalAction, default=None)

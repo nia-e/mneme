@@ -68,6 +68,19 @@ class StableHookTests(unittest.TestCase):
             stable_root=self.root, runtime=self.root / "runtimes" / "v2 executable",
             python=sys.executable, hooks_program=program, hook_config_path=self.config)
 
+    def test_staging_probe_timeout_cleans_owned_interpreter_tree(self):
+        from unittest.mock import MagicMock
+        process = MagicMock()
+        process.wait.side_effect = subprocess.TimeoutExpired("python", 5)
+        with mock.patch("stable_hooks.shutil.which", return_value=sys.executable), \
+             mock.patch("stable_hooks.host_process.spawn", return_value=process) as spawn, \
+             mock.patch("stable_hooks.host_process.terminate_tree") as terminate:
+            with self.assertRaisesRegex(ValueError, "Python 3.11"):
+                stable_hooks._inputs(self.plan)
+        self.assertTrue(spawn.call_args.kwargs["tree"])
+        process.wait.assert_called_once_with(timeout=5)
+        terminate.assert_called_once_with(process, timeout=.2)
+
     def test_prepare_is_read_only_and_command_does_not_resolve_or_require_install(self):
         self.assertFalse(self.root.exists())
         self.assertEqual(stable_hooks.entrypoint_argv(self.root / "launch"),
@@ -78,7 +91,7 @@ class StableHookTests(unittest.TestCase):
         self.assertEqual(stable_hooks.entrypoint_argv(link / "launch")[1], str(link / "launch"))
         self.assertFalse(self.root.exists())
 
-    def test_prepare_resolves_interpreter_and_dispatcher_but_keeps_config_spelling(self):
+    def test_prepare_resolves_dispatcher_but_keeps_interpreter_and_config_spelling(self):
         interpreter_alias = self.base / "python-current"
         interpreter_alias.symlink_to(sys.executable)
         bundle_alias = self.base / "bundle-current"
@@ -86,15 +99,83 @@ class StableHookTests(unittest.TestCase):
         plan = stable_hooks.prepare(
             stable_root=self.root, runtime=self.runtime, python=interpreter_alias,
             hooks_program=bundle_alias / "hook_launcher.py", hook_config_path=self.config)
-        self.assertEqual(plan["python"], str(Path(sys.executable).resolve()))
+        self.assertEqual(plan["python"], str(interpreter_alias))
         self.assertEqual(plan["hooks_program"], str(self.program))
         self.assertEqual(plan["hook_config_path"], str(self.config))
-        interpreter_alias.unlink()
-        interpreter_alias.symlink_to("/not/a/python")
         bundle_alias.unlink()
         bundle_alias.symlink_to("/not/a/bundle", target_is_directory=True)
         self.publish(plan)
         self.assertEqual(self.invoke().returncode, 0)
+
+    def test_default_interpreter_resolves_current_path_and_symlink_at_each_launch(self):
+        first, second = self.base / "first", self.base / "second"
+        first.mkdir()
+        second.mkdir()
+        def executable(directory, name, output, status=0):
+            path = directory / name
+            path.write_text("#!/bin/sh\nif [ \"$1\" = -c ]; then exit 0; fi\n"
+                            + "printf '%s\\n' " + output + "\nexit " + str(status) + "\n")
+            path.chmod(0o700)
+            return path
+        old = executable(first, "old", "old")
+        new = executable(first, "new", "new", 23)
+        link = first / "python3"
+        link.symlink_to(old)
+        executable(second, "python3", "second")
+        with mock.patch.dict(os.environ, {"PATH": str(first)}):
+            plan = stable_hooks.prepare(stable_root=self.root, runtime=self.runtime,
+                                        hooks_program=self.program, hook_config_path=self.config)
+            self.assertEqual(plan["python"], "python3")
+            self.publish(plan)
+        def run(path):
+            return subprocess.run(stable_hooks.entrypoint_argv(self.root / "launch"),
+                                  env={**os.environ, "PATH": str(path)}, capture_output=True, timeout=5)
+        self.assertEqual(run(first).stdout, b"old\n")
+        link.unlink()
+        link.symlink_to(new)
+        changed = run(first)
+        self.assertEqual((changed.stdout, changed.returncode), (b"new\n", 23))
+        self.assertEqual(run(second).stdout, b"second\n")
+        missing = run(self.base / "missing")
+        self.assertEqual(missing.returncode, 127)
+        self.assertEqual(missing.stdout, b"")
+        self.assertIn(b"Python 3.11", missing.stderr)
+        with mock.patch.dict(os.environ, {"PATH": str(self.base / "missing")}):
+            with self.assertRaisesRegex(ValueError, "Python 3.11"):
+                stable_hooks.select(plan)
+
+    def test_default_interpreter_skips_incompatible_candidates_without_protocol_output(self):
+        directory = self.base / "python candidates"
+        directory.mkdir()
+        for name, body in (("python3.14", "echo old-probe-noise; exit 1"),
+                           ("python3.11", "if [ \"$1\" = -c ]; then echo probe-noise; exit 0; fi; echo supported"),
+                           ("python3", "exit 1")):
+            path = directory / name
+            path.write_text("#!/bin/sh\n" + body + "\n")
+            path.chmod(0o700)
+        with mock.patch.dict(os.environ, {"PATH": str(directory)}):
+            plan = stable_hooks.prepare(stable_root=self.root, runtime=self.runtime,
+                                        hooks_program=self.program, hook_config_path=self.config)
+            self.publish(plan)
+            result = subprocess.run(stable_hooks.entrypoint_argv(self.root / "launch"),
+                                    capture_output=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"supported\n", b""))
+
+    def test_absolute_interpreter_symlink_can_update_and_missing_launch_propagates(self):
+        interpreter = self.base / "python's current"
+        interpreter.symlink_to(sys.executable)
+        plan = stable_hooks.prepare(stable_root=self.root, runtime=self.runtime,
+                                    python=interpreter, hooks_program=self.program,
+                                    hook_config_path=self.config)
+        self.publish(plan)
+        replacement = self.base / "replacement"
+        replacement.write_text("#!/bin/sh\nexit 29\n")
+        replacement.chmod(0o700)
+        interpreter.unlink()
+        interpreter.symlink_to(replacement)
+        self.assertEqual(self.invoke().returncode, 29)
+        interpreter.unlink()
+        self.assertIn(self.invoke().returncode, (126, 127))
 
     def test_replacing_pinned_machinery_with_symlink_refuses_install_and_select(self):
         other = self.program.with_name("other.py")
@@ -193,7 +274,7 @@ class StableHookTests(unittest.TestCase):
     def test_selected_runtime_has_no_updater_or_source_import_dependency(self):
         copied = self.base / "copied helper"
         copied.mkdir()
-        for name in ("stable_hooks.py", "host_files.py"):
+        for name in ("stable_hooks.py", "host_files.py", "host_process.py"):
             shutil.copyfile(Path(stable_hooks.__file__).parent / name, copied / name)
         plan_file = self.base / "plan.json"
         plan_file.write_text(json.dumps(self.plan))

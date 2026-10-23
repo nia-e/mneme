@@ -30,7 +30,7 @@ class ProjectSetupTests(unittest.TestCase):
             library_config=None, port=19871, no_recording=False, no_trust_hooks=False, json=True)
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"HOME":str(self.base / "home"), "XDG_DATA_HOME":str(self.base / "data"),
-                                "XDG_CONFIG_HOME":str(self.base / "config")}).start()
+                                "XDG_CONFIG_HOME":str(self.base / "config"), "PATH":str(self.bin)}).start()
         self.native = patch.object(setup, "native", side_effect=self.native_call).start()
         self.trust = patch.object(setup, "trust_project_hooks", return_value={"status":"trusted", "trusted":8}).start()
         self.ready = patch.object(setup, "ensure_ready", return_value={"state":"ready"}).start()
@@ -163,12 +163,13 @@ class ProjectSetupTests(unittest.TestCase):
                 path.unlink()
         self.native.assert_not_called()
 
-    def run_cli(self, codex):
+    def run_cli(self, codex, python=None):
         output = io.StringIO()
         with redirect_stdout(output):
             status = setup.main(['--root', str(self.root), '--mnemed', str(self.args.mnemed),
                 '--library-helper', str(self.args.library_helper), '--mcp-binary', str(self.args.mcp_binary),
-                '--port', str(self.args.port), '--no-trust-hooks', '--json', '--codex-binary', codex])
+                '--port', str(self.args.port), '--no-trust-hooks', '--json', '--codex-binary', codex,
+                *(['--python', python] if python is not None else [])])
         return status, json.loads(output.getvalue())
 
     def test_cli_rejects_relative_reader_spellings_without_normalizing_to_path_command(self):
@@ -176,12 +177,75 @@ class ProjectSetupTests(unittest.TestCase):
             with self.subTest(reader=reader):
                 status, result = self.run_cli(reader)
                 self.assertEqual(status, 1)
-                self.assertIn("reader_codex must be 'codex' or an absolute path", result['error'])
+                self.assertIn("executable must be 'codex' or an absolute path", result['error'])
                 self.assertFalse((self.root / '.mneme').exists())
                 self.assertFalse((self.root / '.codex').exists())
         self.native.assert_not_called()
         self.ready.assert_not_called()
         self.trust.assert_not_called()
+
+    def test_dynamic_launcher_envelope_is_exact_and_legacy_direct_launcher_still_loads(self):
+        self.run_setup()
+        path = self.root / '.codex/config.toml'
+        raw = path.read_text()
+        service, _, _ = setup.configured_integration(self.root)
+        prefix = service.parent.parent
+        launcher_args = [str(prefix / 'lib/launcher.py'), '--service-config', str(service)]
+        expected = setup.install.python_hook_argv('python3', launcher_args)
+        import tomllib
+        server = tomllib.loads(raw)['mcp_servers'][setup.install.SERVER]
+        self.assertEqual([server['command'], *server['args']], expected)
+        if len(expected) > 4:
+            # The shell body is data with one exact approved shape, not a parser
+            # invitation to adopt any command with a familiar-looking suffix.
+            changed = raw.replace('for python in', 'echo unexpected; for python in', 1)
+            self.assertNotEqual(changed, raw)
+            path.write_text(changed)
+            with self.assertRaisesRegex(ValueError, 'not the shipped local launcher'):
+                setup.configured_integration(self.root)
+        path.write_text('[mcp_servers.' + setup.install.SERVER + ']\ncommand = "python3"\nargs = ' +
+                        json.dumps(launcher_args) + '\n')
+        self.assertEqual(setup.configured_integration(self.root)[0], service)
+
+    def test_explicit_runtime_python_reaches_plan_without_canonicalizing_symlink(self):
+        import sys
+        selected = self.bin / 'selected-python'
+        selected.symlink_to(sys.executable)
+        status, result = self.run_cli(str(self.bin / "codex"), python=str(selected))
+        self.assertEqual(status, 0, result)
+        receipt = json.loads((self.root / '.mneme/codex-integration/receipt.json').read_text())
+        self.assertEqual(receipt['plan']['python'], str(selected))
+        definitions = setup.install.planned_hook_handlers(receipt['plan'])
+        import shlex
+        self.assertEqual(shlex.split(definitions['SessionStart'][0]['hooks'][0]['command'])[0], str(selected))
+
+    def test_explicit_mcp_runtime_selector_retains_symlink_spelling(self):
+        selected = self.bin / 'selected-mcp'
+        selected.symlink_to(self.bin / 'mneme-mcp')
+        self.args.mcp_binary = selected
+        self.run_setup()
+        prefix = self.root / '.mneme/codex-integration'
+        receipt = json.loads((prefix / 'receipt.json').read_text())
+        service = json.loads((prefix / 'config/service.json').read_text())
+        self.assertEqual(receipt['plan']['mcp_command'], str(selected))
+        self.assertEqual(service['binary'], str(selected))
+        self.assertEqual(receipt['plan']['native_command'], 'mnemed')
+
+    def test_default_mcp_selector_uses_path_without_persisting_discovered_path(self):
+        self.args.mcp_binary = None
+        self.run_setup()
+        prefix = self.root / '.mneme/codex-integration'
+        self.assertEqual(json.loads((prefix / 'config/service.json').read_text())['binary'], 'mneme-mcp')
+
+    def test_missing_runtime_mcp_refuses_before_storage_even_with_sibling_artifact(self):
+        self.args.mcp_binary = None
+        with patch('host_platform.shutil.which', return_value=None), \
+             self.assertRaisesRegex(ValueError, 'executable unavailable: mneme-mcp'):
+            self.run_setup()
+        self.assertFalse((self.root / '.mneme').exists())
+        self.assertFalse((self.root / '.codex').exists())
+        self.native.assert_not_called()
+        self.ready.assert_not_called()
 
     def test_cli_literal_codex_remains_symbolic(self):
         status, result = self.run_cli('codex')
@@ -190,13 +254,14 @@ class ProjectSetupTests(unittest.TestCase):
         self.assertEqual(hook['reader_codex'], 'codex')
         self.assertNotIn('reader_codex_sha256', hook)
 
-    def test_cli_absolute_reader_remains_pinned(self):
-        reader = self.bin / 'codex'
+    def test_cli_absolute_reader_remains_lexical_and_unpinned(self):
+        reader = self.bin / 'selected-codex'
+        reader.symlink_to(self.bin / 'codex')
         status, result = self.run_cli(str(reader))
         self.assertEqual(status, 0, result)
         hook = json.loads((self.root / '.mneme/codex-integration/config/hooks.json').read_text())
         self.assertEqual(hook['reader_codex'], str(reader))
-        self.assertEqual(hook['reader_codex_sha256'], setup.install.digest(reader.read_bytes()))
+        self.assertNotIn('reader_codex_sha256', hook)
 
     def test_default_reader_stays_symbolic_while_trust_resolves_current_path(self):
         self.args.codex_binary = None
@@ -236,7 +301,7 @@ class ProjectSetupTests(unittest.TestCase):
 
     def test_explicit_missing_codex_has_no_store_or_configuration_residue(self):
         self.args.codex_binary = self.bin / "absent"
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaisesRegex(ValueError, "executable unavailable"):
             self.run_setup()
         self.assertFalse((self.root / ".mneme").exists())
         self.assertFalse((self.root / ".codex").exists())

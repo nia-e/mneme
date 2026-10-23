@@ -24,6 +24,8 @@ else:
     import host_process
     from rollout_primitives import read_regular
 
+from host_platform import validate_command, resolve_command
+
 SCHEMA = "mneme.codex-shadow.v1"
 MAX_INPUT = 8192
 MAX_CUE = 800
@@ -64,16 +66,20 @@ def _short(value: object, limit: int) -> str:
 
 
 def _validate(payload: object) -> dict:
-    if not isinstance(payload, dict) or set(payload) != {"schema", "turn_key", "cue", "answer", "cards", "model", "codex", "codex_sha256", "state_dir"}:
+    required = {"schema", "turn_key", "cue", "answer", "cards", "model", "state_dir"}
+    if (not isinstance(payload, dict) or required - set(payload)
+            or set(payload) - required - {"codex", "codex_sha256"}):
         raise ValueError("invalid shadow input")
+    payload = {"codex": "codex", "codex_sha256": None, **payload}
     if payload["schema"] != SCHEMA or not isinstance(payload["turn_key"], str) or len(payload["turn_key"]) != 64:
         raise ValueError("invalid shadow identity")
     if not all(c in "0123456789abcdef" for c in payload["turn_key"]):
         raise ValueError("invalid shadow identity")
-    if payload["model"] not in MODELS or not isinstance(payload["codex"], str) or not Path(payload["codex"]).is_absolute():
+    if payload["model"] not in MODELS or not isinstance(payload["codex"], str) or not payload["codex"]:
         raise ValueError("invalid assessor configuration")
+    validate_command(payload["codex"], default="codex")
     digest = payload["codex_sha256"]
-    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+    if digest is not None and (not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
         raise ValueError("invalid assessor pin")
     if not isinstance(payload["state_dir"], str) or not Path(payload["state_dir"]).is_absolute():
         raise ValueError("invalid shadow state directory")
@@ -133,18 +139,20 @@ def _events_are_tool_free(raw: bytes) -> bool:
 
 def _run(payload: dict) -> dict:
     started = time.monotonic()
-    if not Path(payload["codex"]).is_file() or not os.access(payload["codex"], os.X_OK):
-        return {"status": "model_unavailable", "judgments": []}
-    hasher = hashlib.sha256()
     try:
-        with os.fdopen(host_files.open_regular(payload["codex"], single_link=False), "rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(block)
-    except (OSError, ValueError):
+        executable = resolve_command(payload["codex"], default="codex")
+    except ValueError:
         return {"status": "model_unavailable", "judgments": []}
-    digest = hasher.hexdigest()
-    if digest != payload["codex_sha256"]:
-        return {"status": "model_unavailable", "judgments": []}
+    if payload["codex_sha256"] is not None:
+        hasher = hashlib.sha256()
+        try:
+            with open(executable, "rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(block)
+        except (OSError, ValueError):
+            return {"status": "model_unavailable", "judgments": []}
+        if hasher.hexdigest() != payload["codex_sha256"]:
+            return {"status": "model_unavailable", "judgments": []}
     case = {"task_cue": payload["cue"], "delivered_cards": payload["cards"],
             "final_answer_excerpt": payload["answer"]}
     case["delivered_cards"] = [{"id": card["id"], "summary": card["summary"]}
@@ -154,7 +162,7 @@ def _run(payload: dict) -> dict:
         host_files.ensure_private_directory(temp)
         schema, output = temp / "schema.json", temp / "result.json"
         host_files.atomic_write(schema, json.dumps(OUTPUT_SCHEMA).encode())
-        command = _command(payload["codex"], payload["model"], schema, output, temp)
+        command = _command(executable, payload["model"], schema, output, temp)
         process = pipes = None
         try:
             process = host_process.spawn(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -237,7 +245,7 @@ def _write_result(state_dir: Path, turn_key: str, result: dict) -> None:
 
 
 def launch(state_dir: Path, session_id: str, turn_id: str, cue: str,
-           answer: str, cards: list[dict], codex: Path, codex_sha256: str, model: str) -> bool:
+           answer: str, cards: list[dict], codex: Path | str, codex_sha256: str | None, model: str) -> bool:
     """Queue one bounded worker; caller's journal owns once-only admission."""
     key = hashlib.sha256((session_id + "\0" + turn_id).encode()).hexdigest()
     payload = {"schema": SCHEMA, "turn_key": key, "cue": _short(cue, MAX_CUE),
@@ -248,6 +256,8 @@ def launch(state_dir: Path, session_id: str, turn_id: str, cue: str,
                          for card in cards],
                "model": model, "codex": str(codex), "codex_sha256": codex_sha256,
                "state_dir": str(state_dir)}
+    if codex_sha256 is None:
+        payload.pop("codex_sha256")
     try:
         _validate(payload)
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()

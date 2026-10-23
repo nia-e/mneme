@@ -21,7 +21,7 @@ From the repository root, create a workspace and a versioned runtime:
 workshop="$HOME/workshop"
 runtime="$HOME/.local/share/mneme/workshop/releases/example"
 mkdir -p "$workshop" "$runtime"
-cp integrations/workshop/{heartbeat.py,hourly.py,codex_guard.py,wake.py,orientation.schema.json,result.schema.json} "$runtime/"
+cp integrations/workshop/{heartbeat.py,hourly.py,codex_guard.py,raw_codex.py,wake.py,orientation.schema.json,result.schema.json} "$runtime/"
 cp integrations/workshop/WORKSHOP_AGENTS.md "$workshop/AGENTS.md"
 cp integrations/workshop/AGENDA.example.md "$workshop/AGENDA.md"
 touch "$workshop/PAUSED"
@@ -165,6 +165,39 @@ A busy guard exits 75. The runner must use the raw executable or it would conten
 with its own gate. Direct raw launches bypass this cooperation; legacy scheduling
 does not acquire the manual-session activity gate. Neither lock is a security
 boundary. Never delete or replace lock files to clear a busy session.
+
+### Installed Codex selection
+
+For manually installed versioned packages, use `--codex-packages` instead of
+`--codex`. Both the human guard and heartbeat accept the same package root:
+
+```sh
+python3 "$runtime/codex_guard.py" --root "$workshop" \
+  --codex-packages "$HOME/.local/share/codex" -- exec 'A scoped task'
+```
+
+The selector chooses the newest complete installed SemVer package, including
+prereleases, using package layout metadata and its matching
+`mneme.codex-install.v1` release-manifest marker. Incomplete installs are skipped;
+no downloads, per-version approvals, hash allowlists or architecture approval
+checks happen here. A selected executable's launch/protocol errors stay ordinary
+errors rather than silently falling back to an older edition. Keep installed
+edition directories immutable while their processes run.
+
+Selection is frozen once per foreground invocation or heartbeat cycle (both
+orientation and work), then refreshed on the next invocation/cycle. The legacy
+`--codex /absolute/selector` route likewise resolves symlinks once per invocation
+or cycle, without rewriting durable configuration to that edition.
+
+A background raw-reader shim may call:
+
+```sh
+python3 "$runtime/raw_codex.py" --packages "$HOME/.local/share/codex" -- ARGS
+```
+
+This raw route **does not take the human activity guard**. Keep human `codex`
+launches routed through `codex_guard.py`; heartbeat owns its gate itself. Ship
+`raw_codex.py` alongside the guard and heartbeat in the same runtime directory.
 
 ### One cycle
 

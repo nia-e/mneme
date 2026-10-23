@@ -298,7 +298,7 @@ require an additional project MCP process or project hook installation.
 
 ## Prepare one Codex device actor
 
-Use Python 3.11+ and a matched rebuilt native/helper bundle. This command prints a
+Use Python 3.11+ and a coherent published helper bundle. This command prints a
 reviewable plan; it does not publish config, grant hook trust, start a service or
 contact a database:
 
@@ -310,8 +310,13 @@ python3 /runtime/lib/registry_config.py prepare-native \
   --hook-config-path /absolute/generated-hooks.json
 ```
 
-The resulting hook adapter holds native config/executable paths and retained
-state directories. The background reader defaults to `"reader_codex": "codex"`, with
+The resulting hook adapter holds native config/executable selectors and retained
+state directories. `native_cli` may be `"mnemed"` (resolved from current `PATH` for
+each native request) or an absolute launcher path. Executable editions are not
+store identity: replacing a tool does not invalidate the selected owner, refill
+accounting, or weaken native config, receipt and database checks. Unsupported
+flags, protocol mismatches and missing commands are ordinary bounded failures;
+there is no whole-version admission gate. The background reader defaults to `"reader_codex": "codex"`, with
 no `reader_codex_sha256`: each fresh reader process resolves `codex` from the hook
 process's `PATH`. Updating that launcher does not change the adapter or refill
 packet budgets; an already-running reader process keeps its existing executable.
@@ -319,8 +324,24 @@ Preparing this configuration does not require `codex` to be installed.
 
 `--workspace-adapters` accepts an explicit JSON list of
 `{root,state_dir,reader_codex}` machinery bindings. Use `"codex"` for the same dynamic
-lookup, or an explicit absolute path to retain the legacy path/hash binding.
-Existing pinned configurations remain supported and are not rewritten implicitly.
+lookup, or an explicit absolute launcher path. Absolute tool paths preserve
+symlink spelling and do not implicitly request a hash pin. A stable package-manager
+launcher can therefore select updated tooling without changing the adapter.
+Existing explicit SHA-pinned configurations remain supported and are not rewritten
+implicitly. New preparation omits executable SHA fields; helper bundle source
+hashes and installation receipts still protect coherent publication.
+
+Stable POSIX hooks dynamically discover a compatible Python 3.11+ interpreter
+on `PATH` at every launch. Explicit absolute interpreter selectors retain their
+lexical path. A running worker keeps its actual process identity and interpreter;
+only later launches see changes. Windows authoring preserves the established
+setup-selected interpreter for the default; it is stored once, not substituted
+while reconstructing receipts. Dynamic compatible-PATH interpreter discovery is
+currently a POSIX contract. Explicit Windows selectors remain lexical and unpinned.
+Claude and legacy shadow readers follow the same
+unpinned selector contract. MCP client selection uses an explicit
+`MNEME_CLIENT_BINARY` override, then current `PATH`, then a packaged sibling when
+no PATH command exists; a selected command failure is not retried elsewhere.
 These machinery bindings preserve existing ledgers; they do not select stores or
 grant background authority. Core and asynchronous lifecycle recipes are emitted
 independently and consult native configuration when invoked.

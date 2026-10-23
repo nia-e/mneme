@@ -107,6 +107,12 @@ def configured_integration(root):
     if not isinstance(server, dict) or server.get("enabled", True) is not True:
         raise ValueError("existing project Mneme integration is explicitly disabled; init will not enable it")
     args = server.get("args")
+    if isinstance(args, list) and len(args) > 3:
+        # New receipts use the exact shipped dynamic-Python envelope. Do not
+        # unwrap arbitrary shell commands when identifying an existing owner.
+        candidate = args[-3:]
+        if [server.get("command"), *args] == install.python_hook_argv("python3", candidate):
+            args = candidate
     if (not isinstance(args, list) or len(args) != 3 or not all(isinstance(x, str) for x in args)
             or Path(args[0]).name != "launcher.py" or args[1] != "--service-config"
             or not Path(args[2]).is_absolute()):
@@ -225,6 +231,11 @@ def setup(args, result):
             raise ValueError("other existing Mneme/managed project integration; init preserves it instead of installing a second one")
         if previous_owner is not None:
             raise ValueError("project CLI owner already exists without a matching local Codex integration; init will not replace or compete with it")
+        mcp_command = str(args.mcp_binary) if args.mcp_binary is not None else "mneme-mcp"
+        # Validate the runtime selector before any storage creation. A packaged
+        # sibling may supply artifact bytes, but is not an implicit launch pin.
+        from host_platform import resolve_command
+        resolve_command(mcp_command, default="mneme-mcp")
         mcp = executable(args.mcp_binary, "mneme-mcp", mnemed.parent / executable_name("mneme-mcp"))
         # Persist the command choice, not whichever executable happens to be
         # installed today. Hook trust resolves its one-shot executable below.
@@ -239,6 +250,8 @@ def setup(args, result):
         plan = install.prepare(root, prefix, mnemed, mcp, port, recall_mode="async",
                                recording_mode="off" if args.no_recording else "automatic",
                                reader_model=install.READER_MODELS[0], reader_codex=reader_codex,
+                               python=getattr(args, "python", "python3"),
+                               mcp_command=mcp_command, native_command="mnemed",
                                store_registry=store_registry)
         result["stage"] = "store_admission"
         install.config_directory(dot)
@@ -337,8 +350,10 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True, type=Path)
     for name in ("mcp-binary", "library-config", "store-registry"):
         parser.add_argument("--" + name, type=Path)
+    parser.add_argument("--python", default="python3",
+                        help="runtime Python selector: python3 from PATH (default), or a lexical absolute executable")
     parser.add_argument("--codex-binary",
-                        help="optional absolute reader pin; default codex follows PATH and is resolved separately for hook trust")
+                        help="optional absolute reader executable (no automatic hash pin); default codex follows PATH and is resolved separately for hook trust")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-recording", action="store_true")
     parser.add_argument("--no-trust-hooks", action="store_true")

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 import codex_guard
 
@@ -180,6 +181,42 @@ class GuardCliTests(unittest.TestCase):
     def read_ready(self):
         _wait_for(self.root / "ready.json")
         return json.loads((self.root / "ready.json").read_text())
+
+    def test_selector_is_resolved_before_gate_and_refreshed_next_invocation(self):
+        selector = self.root / "current"
+        other = self.root / "other-codex"
+        other.write_bytes(self.fake.read_bytes())
+        other.chmod(0o700)
+        selector.symlink_to(self.fake)
+        expected = [self.fake, other]
+        real_gate = codex_guard.try_activity_gate
+        for edition in expected:
+            def swap_after_selection(path):
+                selector.unlink()
+                selector.symlink_to(other)
+                return real_gate(path)
+            with patch.object(codex_guard, "try_activity_gate", side_effect=swap_after_selection), \
+                    patch.object(codex_guard.os, "execvpe", side_effect=OSError("fake exec")) as launch:
+                self.assertEqual(codex_guard.main([
+                    "--root", str(self.root), "--codex", str(selector), "--", "exec"]), 1)
+            self.assertEqual(launch.call_args.args[:2],
+                             (str(edition), [str(edition), "--no-daemon", "exec"]))
+
+    def test_package_selection_runs_once_and_still_takes_human_gate(self):
+        with patch.object(codex_guard.raw_codex, "select_package", return_value=self.fake) as select, \
+                patch.object(codex_guard.os, "execvpe", side_effect=OSError("fake exec")) as launch:
+            with codex_guard.try_activity_gate(self.root / codex_guard.LOCK_NAME):
+                code = codex_guard.main(["--root", str(self.root), "--codex-packages", str(self.root), "--", "exec"])
+            self.assertEqual(code, codex_guard.BUSY_EXIT)
+            select.assert_called_once_with(self.root)
+            launch.assert_not_called()
+
+    def test_missing_selector_is_an_ordinary_launch_error(self):
+        self.fake.unlink()
+        result = self.run_cli(["exec"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Codex launch refused:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_argument_transparency_inherited_fd_stdio_and_exit(self):
         self.env.update(GUARD_READ_STDIN="1", GUARD_EXIT="23")

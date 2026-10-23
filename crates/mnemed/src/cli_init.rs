@@ -18,13 +18,13 @@ pub(crate) struct InitArgs {
     /// Leave the installed project hooks pending manual Codex trust review.
     #[arg(long)]
     no_trust_hooks: bool,
-    /// Existing MCP executable; defaults to the sibling of this mnemed, then PATH.
+    /// Explicit MCP runtime selector and installation source; omitted requires mneme-mcp on PATH.
     #[arg(long)]
     mcp_binary: Option<PathBuf>,
     /// Existing Codex executable for the librarian; defaults to PATH.
     #[arg(long)]
     codex_binary: Option<PathBuf>,
-    /// Python 3.11+ executable; otherwise discover Python (or Windows py) on PATH.
+    /// Runtime Python selector: python3 or an absolute interpreter path; omitted discovers compatible Python on PATH.
     #[arg(long)]
     python: Option<PathBuf>,
     /// Explicit device-local registry config (never publishes to peers).
@@ -367,6 +367,16 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
             json,
         );
     }
+    if args
+        .python
+        .as_deref()
+        .is_some_and(|selector| !selector.is_absolute() && selector != Path::new("python3"))
+    {
+        return refuse(
+            "init --python must be python3 or an absolute interpreter selector; relative paths and other bare names are not persisted; no project state changed",
+            json,
+        );
+    }
     let python = discover_python(args.python.as_deref()).await;
     let Some(python) = python else {
         return refuse(
@@ -410,6 +420,7 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
         command.arg("--no-trust-hooks");
     }
     for (flag, value) in [
+        ("--python", &args.python),
         ("--mcp-binary", &args.mcp_binary),
         ("--codex-binary", &args.codex_binary),
         ("--library-config", &args.library_config),

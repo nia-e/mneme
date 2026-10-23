@@ -36,10 +36,10 @@ FAKE_CLAUDE = '''
 import json, pathlib, sys
 root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
-if args == ["--version"]:
-    print("2.1.300 (Claude Code)"); sys.exit(0)
-if args == ["--help"]:
-    print((root / "capabilities.txt").read_text()); sys.exit(0)
+# Metadata probes are not admission. Only the bounded provider protocol runs.
+assert args[:1] == ["-p"]
+if (root / "reject-flags").exists():
+    sys.exit(2)
 assert "--safe-mode" in args and "--max-turns=1" in args
 assert not any(value.startswith("--json-schema") for value in args)
 prompt = sys.stdin.read()
@@ -66,12 +66,10 @@ for name, digest in manifest.items():
     assert hashlib.sha256((lib / name).read_bytes()).hexdigest() == digest
 from claude_config import prepare, load_config
 from claude_observer import admit_source_turn, observe_source_turn
-from claude_runtime import REQUIRED_FLAGS
 from assessment import runtime
 from store_registry import NativeClient
 from registry_runtime import selection
 from rollout_primitives import digest
-(root / "capabilities.txt").write_text("--print " + " ".join(REQUIRED_FLAGS))
 config_path = root / "adapter.json"
 prepared = prepare(memory_config=root / "memory.toml", native_cli=root / "native",
     state_dir=root / "state-claude", reader_claude=root / "claude",
@@ -140,12 +138,22 @@ with runtime(config, root / "scratch") as assessor:
     assert answer["reason"] == "abstained", answer
     assert answer["provider_attempt"] and answer["usage"]["input_tokens"] == 7, answer
     assert assessor.process is None and assessor._own_cwd is None
-(root / "capabilities.txt").write_text("--print --model")
+(root / "reject-flags").touch()
 with runtime(config, root / "scratch-refusal") as assessor:
     answer = assessor.assess(observation, timeout=5)
-    assert answer["reason"] == "unsupported_runtime" and not answer["provider_attempt"], answer
+    assert answer["reason"] == "usage_unknown" and answer["provider_attempt"], answer
     assert assessor.process is None and assessor._own_cwd is None
+(root / "reject-flags").unlink()
+# Replacing ordinary tooling is accepted; an explicit legacy hash still binds bytes.
+original_digest = hashlib.sha256((root / "claude").read_bytes()).hexdigest()
 (root / "claude").write_text((root / "claude").read_text()+"\n# changed\n")
+updated = load_config(config_path, cwd=str(root / "workspace"))
+with runtime(updated, root / "scratch-updated") as assessor:
+    answer = assessor.assess(observation, timeout=5)
+    assert answer["reason"] == "abstained" and answer["provider_attempt"], answer
+pinned = json.loads(config_path.read_text())
+pinned["reader_claude_sha256"] = original_digest
+config_path.write_text(json.dumps(pinned))
 try:
     load_config(config_path, cwd=str(root / "workspace"))
 except ValueError as error:
