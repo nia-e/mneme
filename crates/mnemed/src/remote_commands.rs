@@ -89,6 +89,9 @@ pub(crate) fn prepare(command: &Command, db: &str) -> Result<Request, AnyErr> {
         return Err("remote database name must not be empty".into());
     }
     let (operation, arguments) = match command {
+        Command::Activity(_) => {
+            return Err("activity is a local diagnostic and cannot use a remote owner".into());
+        }
         Command::Config(_)
         | Command::Cache(_)
         | Command::Client(_)
@@ -466,6 +469,9 @@ fn snapshot_notice(result: &Value, now: Option<u64>) -> Result<Option<String>, A
 }
 
 pub(crate) fn render(command: &Command, result: &Value, json_output: bool) -> Result<(), AnyErr> {
+    if matches!(command, Command::Activity(_)) {
+        return Err("activity is a local diagnostic and cannot use a remote owner".into());
+    }
     if !json_output {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -43,6 +43,87 @@ MAX_WORKERS = 2
 STATE_LOCK_SECONDS = 0.5
 
 
+def _activity_origin(data, pending):
+    """Pure control-identity projection; never join old diagnostics by turn."""
+    return {"turn": pending.get("turn"), "generation": data.get("generation"),
+            "context_generation": data.get("context_generation"),
+            "attempt": str(pending.get("request", "unknown")) + ":" + str(pending.get("epoch", "unknown"))}
+
+
+def _activity_digest(config):
+    frozen = config.get("frozen_selection")
+    value = frozen.get("digest") if isinstance(frozen, dict) else None
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
+def _activity_event(config, session, pending=None):
+    pending = pending or {}
+    frozen = config.get("frozen_selection")
+    cwd = frozen.get("cwd") if isinstance(frozen, dict) else None
+    if not isinstance(cwd, str) or str(config.get("selection_cwd")) != cwd:
+        cwd = None  # A configured project root is not an observed host cwd.
+    return {"session_id": session, "turn_id": pending.get("turn"), "cwd": cwd}
+
+
+def activity_projection(config, origin, cards, db_id=None, selection_digest=None):
+    """Bounded body-free snapshot of typed cards already acquired by this operation."""
+    try:
+        groups = {}
+        aliases = {}
+        frozen = config.get("frozen_selection")
+        snapshot = frozen.get("snapshot") if isinstance(frozen, dict) else None
+        for row in snapshot.get("active", []) if isinstance(snapshot, dict) else []:
+            if isinstance(row, dict) and isinstance(row.get("store"), dict):
+                store = row["store"]
+                owner = store.get("owner")
+                if isinstance(owner, dict):
+                    aliases[(row.get("name"), store.get("id"))] = owner.get("db")
+        unknown = 0
+        for card in cards[:1024]:
+            owner_id, node = card.get("db_id", db_id), card.get("id", card.get("node_id"))
+            if (not isinstance(owner_id, str) or not re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", owner_id)
+                    or not isinstance(node, str) or not re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", node)):
+                unknown += 1
+                continue
+            name = card.get("store_name") or card.get("scope") or config.get("memory_scope", "project")
+            name = name if isinstance(name, str) and len(name.encode()) <= 128 else "unknown"
+            alias = card.get("db_alias") or aliases.get((name, owner_id)) or ("user" if name in ("global_preference", "workshop") else
+                                             "unknown" if card.get("scope") == "named" else "project")
+            alias = alias if isinstance(alias, str) and len(alias.encode()) <= 128 else "unknown"
+            group = groups.setdefault((name, owner_id, alias), {"owner": {"name": name, "id": owner_id, "db": alias},
+                                                             "nodes": [], "count": 0, "omitted": 0})
+            group["count"] += 1
+            if len(group["nodes"]) < 256:
+                group["nodes"].append(node)
+            else:
+                group["omitted"] += 1
+        values = list(groups.values())
+        if unknown or len(cards) > 1024:
+            values.append({"owner": None, "nodes": [], "count": unknown + max(0, len(cards) - 1024),
+                           "omitted": unknown + max(0, len(cards) - 1024)})
+        return {"origin": dict(origin), "selection_digest": selection_digest,
+                "groups": values, "at": int(time.time())}
+    except Exception:
+        return None
+
+
+def _activity_emit(config, event, kind, outcome, projection=None, *, reason=None):
+    """Telemetry is optional and never changes worker reservations or results."""
+    try:
+        if capture_source.source_host(config) != "codex":
+            return
+        from session_activity import emit
+        event = {key: event.get(key) for key in ("session_id", "turn_id", "cwd")}
+        if not isinstance(event["cwd"], str):
+            return
+        projection = projection or {}
+        for group in projection.get("groups") or [{}]:
+            emit(event, kind, outcome, reason=reason, origin=projection.get("origin"),
+                 selection_digest=projection.get("selection_digest"), at=projection.get("at"), **group)
+    except Exception:
+        pass
+
+
 def _short(value: str, limit: int) -> str:
     return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
@@ -288,6 +369,7 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
 def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> dict[str, Any]:
     """Invalidate old ready work on *every* prompt, even a trivial one."""
     if _config_current(config) is None:
+        _activity_emit(config, event, "recall_admission", "busy", reason="configuration_unavailable")
         return {"outcome": "busy"}
     budget = resolve(config)
     identity = _identity(event, prompt=True)
@@ -297,13 +379,19 @@ def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> 
     prompt = event["prompt"]
     digest = hashlib.sha256(prompt.encode()).hexdigest()
     if not _looks_replayed(config, session, turn, digest) and not _invalidate(config, session):
+        _activity_emit(config, event, "recall_admission", "busy", reason="state_unavailable")
         return {"outcome": "busy"}
+    observation = {}
     def mark(data):
+        def done(outcome, changed, reason=None):
+            observation.update(origin=_activity_origin(data, {"turn": turn, "request": digest, "epoch": data["epoch"]}),
+                               selection_digest=_activity_digest(config), at=int(time.time()), reason=reason)
+            return outcome, changed
         active = data["active"]
         if isinstance(active, dict) and active.get("turn") == turn and active.get("request") == digest:
-            return "replay", False
+            return done("replay", False, "duplicate")
         if isinstance(active, dict) and active.get("turn") == turn:
-            return "invalid_identity", False
+            return done("invalid_identity", False, "identity_conflict")
         if data["ready"] is not None:
             _count(data, "dropped")
         data["ready"] = None
@@ -311,20 +399,22 @@ def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> 
         data["epoch"] += 1
         data["fence"] = _fence(config, session)
         if data["fence"] is None:
-            return "busy", False
+            return done("busy", False, "state_unavailable")
         cue = ("Recent task: " + data["prior"] + "\n" if data["prior"] else "") + "Current task: " + _short(prompt, MAX_PROMPT)
         data["active"] = {"turn": turn, "request": digest, "epoch": data["epoch"],
                           "cue": cue, "closed": False}
         if capture_source.source_host(config) != "codex" or not substantive or not prompt.strip() or config.get("schema") == "mneme.codex-hooks.config.v13" and config.get("recall_mode") != "automatic":
-            return "skipped", True
+            return done("skipped", True, "disabled" if config.get("schema") == "mneme.codex-hooks.config.v13" and config.get("recall_mode") != "automatic" else "non_substantive")
         data["prior"] = _fragment(prompt)
         if data["unknown_usage"] or data["attempts"] >= resolve(config).attempts or data["input_tokens"] >= resolve(config).input_tokens or data["output_tokens"] >= resolve(config).output_tokens:
-            return "budget", True
+            return done("budget", True, "unknown_accounting" if data["unknown_usage"] else "budget")
         data["pending"] = {"turn": turn, "request": digest, "epoch": data["epoch"]}
-        return "queued", True
+        return done("queued", True)
     # Prompt admission remains best effort: retrying it could reorder an old
     # prompt behind a newer lifecycle event. Closures may wait; notices do not.
     ok, result = _state(config, session, mark)
+    _activity_emit(config, event, "recall_admission", result if ok else "busy", observation,
+                   reason=observation.pop("reason", None) if ok else "state_unavailable")
     return {"outcome": result if ok else "busy"}
 
 
@@ -359,7 +449,9 @@ def consume(config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     if identity is None:
         return {"outcome": "skipped", "cards": []}
     session, turn = identity
+    observation = None
     def claim(data):
+        nonlocal observation
         active, ready = data["active"], data["ready"]
         marker = _fence(config, session)
         if marker is None or data["fence"] != marker:
@@ -378,6 +470,11 @@ def consume(config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
             _count(data, "dropped")
             data["ready"] = None
             return ("stale", [], None), True
+        # Existing publication/reset invariants bind a current ready packet to
+        # this generation. Derive only after every active/fence check succeeds;
+        # stale packets do not borrow the new generation's provenance.
+        observation = activity_projection(config, _activity_origin(data, ready), ready.get("cards", []),
+                                          ready.get("db_id"), _activity_digest(config))
         from hooks import _pack_async_delivery
         cards = []
         seen = _emitted_keys(data["emitted"])
@@ -414,6 +511,14 @@ def consume(config: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     ok, result = _state(config, session, claim, create=False)
     outcome, cards, db_id = result[:3] if ok else ("busy", [], None)
     response = {"outcome": outcome, "cards": cards}
+    if ok and outcome == "stale":
+        _activity_emit(config, event, "delivery_consumed", "stale", reason="stale_context")
+    if ok and observation is not None and len(result) == 4:
+        # Consumed means removed from the queue, not packed into final host output.
+        _activity_emit(config, event, "delivery_consumed", "consumed", observation,
+                       reason={"duplicate": "duplicate", "omitted": "packing_omission"}.get(outcome))
+        response["_activity"] = activity_projection(config, observation["origin"], cards, db_id,
+                                                    observation["selection_digest"])
     if ok and len(result) == 4:
         response.update({key: result[3][key] for key in ("context", "displayed", "budget_omitted_count", "concerns", "concern_omitted_count")})
         if "read_coverage" in result[3]:
@@ -531,6 +636,7 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
     digest = hashlib.sha256(event.get("prompt", "").encode()).hexdigest()
     deadline = time.monotonic() + 0.5
     while time.monotonic() < deadline:
+        launch_activity = None
         recording_work = False
         if recording and not pending_only:
             import recording_jobs
@@ -538,11 +644,15 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
                               if capture_source.source_host(config) == "claude_code"
                               else recording_jobs.has_work(config, session))
         def launch(data):
+            nonlocal launch_activity
             active = data["active"]
             pending = data["pending"]
             reader_work = (_runnable_pending(config, session, data) if pending_only else
                            isinstance(pending, dict) and isinstance(active, dict)
                            and (closing or (active.get("turn") == turn and active.get("request") == digest)))
+            if reader_work:
+                launch_activity = activity_projection(config, _activity_origin(data, pending), [],
+                                                      selection_digest=_activity_digest(config))
             if not recording_work and not reader_work and (pending_only or not maintenance):
                 return "not_ready", False
             if _alive(data.get("worker_pid"), data.get("worker_identity")):
@@ -575,6 +685,10 @@ def background(config: dict[str, Any], event: dict[str, Any], *, pending_only: b
             return "launched", True
         ok, result = _state(config, session, launch, create=False)
         if ok and result != "not_ready":
+            if launch_activity is not None:
+                _activity_emit(config, event, "recall_admission", result, launch_activity,
+                               reason={"running": "worker_running", "no_config": "configuration_unavailable",
+                                       "unavailable": "worker_unavailable"}.get(result))
             return {"outcome": result}
         time.sleep(0.02)
     return {"outcome": "busy_or_not_ready"}
@@ -1139,10 +1253,16 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
         slot = _slot(config)
         if slot is None:
             def capacity(data):
+                pending = data.get("pending") or {}
+                observation = (activity_projection(config, _activity_origin(data, pending), [],
+                                                   selection_digest=_activity_digest(config)) if pending else None)
+                event = _activity_event(config, session_id, pending)
                 data["pending"] = None
                 _count(data, "capacity")
-                return None, True
-            _state(config, session_id, capacity, create=False)
+                return (event, observation), True
+            captured, activity = _state(config, session_id, capacity, create=False)
+            if captured and activity[1] is not None:
+                _activity_emit(config, activity[0], "recall_admission", "capacity", activity[1], reason="worker_capacity")
             return
         if runtime_factory is None:
             from assessment import runtime as runtime_factory
@@ -1151,8 +1271,9 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
         runtime_context = None
         next_stewardship = 0.0
         while time.monotonic() - last_activity < idle_seconds:
+            activity_event = None
             def take(data):
-                nonlocal generation
+                nonlocal generation, activity_event
                 if generation is None:
                     generation = data["generation"]
                 if data["generation"] != generation:
@@ -1196,6 +1317,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                 if context_token is None:
                     return None, True
                 data["inflight"] = pending
+                activity_event = _activity_event(config, session_id, pending)
                 emitted = _emitted_keys(data["emitted"])
                 return (pending, active["cue"],
                         (data["context_generation"], context_token),
@@ -1315,6 +1437,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                                   **({"routing": routing} if routing else {}))
             except Exception:
                 result = {"outcome": "unavailable", "cards": [], "provider_attempt": False}
+            selection_at = int(time.time())
             usage = _usage(result) if result.get("provider_attempt") else None
             def settle_selector(data):
                 matched = data.get("reservation") == pending
@@ -1349,7 +1472,9 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     **target_kwargs(config),
                     allowed=lambda: (config.get("recording_mode") == "automatic"
                                      and settled_ok and settled and concern_current()))
+            selection_activity = None
             def publish(data):
+                nonlocal selection_activity
                 changed = False
                 if result.get("outcome") == "selected":
                     _count(data, "selected")
@@ -1375,6 +1500,19 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                         and all(active.get(k) == pending.get(k) for k in ("turn", "request", "epoch"))
                         and data.get("pending") is None and data.get("fence") == marker
                         and _fence(config, session_id) == marker)
+                selection_activity = activity_projection(config,
+                    {"turn": pending["turn"], "generation": generation,
+                     "context_generation": context_generation[0],
+                     "attempt": pending["request"] + ":" + str(pending["epoch"])},
+                    result.get("cards", []) if result.get("outcome") == "selected" else [],
+                    result.get("db_id"), _activity_digest(config))
+                if selection_activity is not None:
+                    selection_activity["at"] = selection_at
+                    details = result.get("selection")
+                    selected_reason = details.get("selector_reason") if isinstance(details, dict) else None
+                    reason = (selected_reason if selected_reason in {"prompt_cap", "empty_or_seen", "invalid_input",
+                              "nonsubstantive", "abstained"} else None)
+                    selection_activity["reason"] = reason if publish_current else "stale_context"
                 previous = data.get("last_selection")
                 previous = previous.get("origin") if isinstance(previous, dict) else None
                 previous = previous if isinstance(previous, dict) else {}
@@ -1411,7 +1549,12 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     _count(data, "dropped")
                     changed = True
                 return None, changed
-            _state(config, session_id, publish, create=False)
+            published, _ = _state(config, session_id, publish, create=False)
+            if published and selection_activity is not None:
+                outcome = result.get("outcome")
+                outcome = outcome if outcome in {"selected", "abstained", "empty", "skipped", "budget", "omitted", "unavailable"} else "unavailable"
+                _activity_emit(config, activity_event or _activity_event(config, session_id, pending), "recall_selection", outcome,
+                               selection_activity, reason=selection_activity.pop("reason", None))
         else:
             idle_retirement = True
         if idle_retirement:

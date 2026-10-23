@@ -19,6 +19,204 @@ from store_registry import SCHEMA as REGISTRY_SCHEMA, load_registry
 from tag_config import prepared_fields
 
 
+
+ACTIVITY_SCHEMA = "mneme.session-activity.config.v1"
+ACTIVITY_PREPARE_SCHEMA = "mneme.codex-activity-prepare.v1"
+MAX_ACTIVITY_BYTES = 64 * 1024
+ACTIVITY_SERVER = "mneme_session_activity"
+
+
+def _activity_bytes(value):
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                       allow_nan=False) + "\n").encode()
+
+
+def _activity_path(value, *, existing=False):
+    if (not isinstance(value, (str, Path)) or len(str(value).encode()) > 4096
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in str(value))):
+        raise ValueError("activity paths must be bounded canonical absolute paths")
+    path = canonical_path(value, directory=existing)
+    if str(path) != str(value) or len(path.parts) > 256:
+        raise ValueError("activity paths must be canonical absolute paths")
+    return path
+
+
+def _activity_manifest(value, *, filesystem=True):
+    if (not isinstance(value, dict) or set(value) - {"schema", "root", "workspaces", "device"}
+            or not {"schema", "root", "workspaces"} <= set(value)
+            or value["schema"] != ACTIVITY_SCHEMA):
+        raise ValueError("unsupported activity manifest")
+    paths = [value["root"]]
+    workspaces = value["workspaces"]
+    if not isinstance(workspaces, list) or not 1 <= len(workspaces) <= 256:
+        raise ValueError("activity workspaces must be a bounded nonempty list")
+    seen = set()
+    for binding in workspaces:
+        if (not isinstance(binding, dict) or set(binding) != {"path", "source"}
+                or binding["source"] != "codex" or not isinstance(binding["path"], str)
+                or binding["path"] in seen):
+            raise ValueError("invalid or duplicate activity workspace binding")
+        seen.add(binding["path"])
+        paths.append(binding["path"])
+    for index, path in enumerate(paths):
+        if (not isinstance(path, str) or len(path.encode()) > 4096 or "\x00" in path
+                or not Path(path).is_absolute() or str(Path(path)) != path or ".." in Path(path).parts
+                or len(Path(path).parts) > 256
+                or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in path)):
+            raise ValueError("invalid activity path")
+        if filesystem and index == 0:
+            _activity_path(path)
+        # Retained, unrelated bindings are historical metadata. Their workspace
+        # may have moved or disappeared; only the current/new binding is probed.
+    device = value.get("device")
+    if (device is not None and (not isinstance(device, str) or not device or len(device.encode()) > 128
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in device))):
+        raise ValueError("activity device must be a bounded label or null")
+    if len(_activity_bytes(value)) > MAX_ACTIVITY_BYTES:
+        raise ValueError("activity manifest exceeds 64 KiB")
+    return value
+
+
+def _read_activity(path):
+    from host_files import check_private_fd, open_regular
+    _activity_path(path)
+    try:
+        descriptor = open_regular(path)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as stream:
+        check_private_fd(stream)
+        raw = stream.read(MAX_ACTIVITY_BYTES + 1)
+    if len(raw) > MAX_ACTIVITY_BYTES:
+        raise ValueError("activity manifest exceeds 64 KiB")
+    # Reuse the producer's bounded, duplicate-key/depth rejecting decoder only;
+    # no operational helper, lock or retention path runs during preparation.
+    from session_activity import _decode
+    _activity_manifest(_decode(raw))
+    return raw
+
+
+def prepare_activity(*, cwd, activity_root, activity_mcp, activity_config=None, activity_device=None):
+    """Prepare a shared diagnostic binding; no directory creation or publication."""
+    from host_files import check_private_directory
+    from host_platform import default_config_dir
+    if os.name != "posix":
+        raise ValueError("platform_unsupported: session activity setup requires Unix")
+    workspace = _activity_path(cwd, existing=True)
+    root = _activity_path(activity_root)
+    destination = _activity_path(activity_config or default_config_dir() / "activity.json")
+    executable = _activity_path(activity_mcp)
+    if root.exists():
+        check_private_directory(root)
+    before = _read_activity(destination)
+    manifest = {"schema": ACTIVITY_SCHEMA, "root": str(root), "workspaces": [], "device": activity_device}
+    if before is not None:
+        from session_activity import _decode
+        manifest = _decode(before)
+        if manifest["root"] != str(root):
+            raise ValueError("activity root differs from existing binding; refusing replacement")
+        if activity_device is not None and manifest.get("device") != activity_device:
+            raise ValueError("activity device differs from existing binding; review it separately")
+        manifest.setdefault("device", None)
+    binding = {"path": str(workspace), "source": "codex"}
+    if binding not in manifest["workspaces"]:
+        manifest["workspaces"].append(binding)
+    _activity_manifest(manifest)
+    return {"schema": ACTIVITY_PREPARE_SCHEMA, "config_path": str(destination),
+            "expected_sha256": None if before is None else hashlib.sha256(before).hexdigest(),
+            "manifest": manifest,
+            "mcp": {"command": str(executable),
+                    "args": ["--activity-config", str(destination), "--cwd", str(workspace)],
+                    "enabled_tools": ["session_activity"]}}
+
+
+def validate_activity_preparation(value, *, cwd, activity_mcp):
+    """Static receipt validation, including uninstall after retained paths disappear."""
+    if (not isinstance(value, dict) or set(value) != {"schema", "config_path", "expected_sha256", "manifest", "mcp"}
+            or value["schema"] != ACTIVITY_PREPARE_SCHEMA):
+        raise ValueError("unsupported prepared activity binding")
+    _activity_manifest(value["manifest"], filesystem=False)
+    path = value["config_path"]
+    if (not isinstance(path, str) or not Path(path).is_absolute() or str(Path(path)) != path
+            or ".." in Path(path).parts or len(path.encode()) > 4096 or len(Path(path).parts) > 256
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in path)):
+        raise ValueError("invalid activity config path")
+    fingerprint = value["expected_sha256"]
+    if fingerprint is not None and (not isinstance(fingerprint, str) or len(fingerprint) != 64
+                                   or any(c not in "0123456789abcdef" for c in fingerprint)):
+        raise ValueError("invalid activity config fingerprint")
+    if {"path": str(cwd), "source": "codex"} not in value["manifest"]["workspaces"]:
+        raise ValueError("prepared activity workspace does not match project")
+    if value["mcp"] != {"command": str(activity_mcp),
+            "args": ["--activity-config", path, "--cwd", str(cwd)], "enabled_tools": ["session_activity"]}:
+        raise ValueError("prepared activity MCP does not match project")
+
+
+def revalidate_activity(value):
+    """Fence changed inputs before installer output or setup directory creation."""
+    from host_files import check_private_directory
+    manifest = _activity_manifest(value["manifest"])
+    _activity_path(value["mcp"]["args"][-1], existing=True)
+    root = _activity_path(manifest["root"])
+    if root.exists():
+        check_private_directory(root)
+    before = _read_activity(_activity_path(value["config_path"]))
+    desired = _activity_bytes(manifest)
+    if before != desired and (None if before is None else hashlib.sha256(before).hexdigest()) != value["expected_sha256"]:
+        raise ValueError("activity manifest changed since prepare; prepare a new plan")
+
+
+def _create_activity_directory(path, *, private):
+    from host_files import ensure_private_directory, ensure_state_directory, sync_directory
+    create = ensure_private_directory if private else ensure_state_directory
+    create(path)
+    # Include ancestors on replay too: a previous setup may have created them
+    # before losing its durability acknowledgement. Paths are bounded to 256 parts.
+    # Existing config directory modes stay intact; these are only sync barriers.
+    for directory in (path, *path.parents):
+        sync_directory(directory)
+
+
+def publish_activity(value):
+    """Explicit setup only; preserve shared enrollment/data on later install failure.
+
+    A small independent setup lock fences concurrent manifest merges. Replaying
+    the exact published bytes is safe after a lost fsync acknowledgement; unknown
+    bytes always require a new prepare. No reader uses or creates this lock.
+    """
+    from host_files import (atomic_write, check_private_fd, lock_file, open_regular,
+                            sync_directory, sync_file)
+    revalidate_activity(value)
+    destination = _activity_path(value["config_path"])
+    manifest = _activity_manifest(value["manifest"])
+    root = _activity_path(manifest["root"])
+    desired = _activity_bytes(manifest)
+    # Refuse drift before creating the setup directory or diagnostic root.
+    before = _read_activity(destination)
+    if before != desired and (None if before is None else hashlib.sha256(before).hexdigest()) != value["expected_sha256"]:
+        raise ValueError("activity manifest changed since prepare; prepare a new plan")
+    _create_activity_directory(destination.parent, private=False)
+    lock = open_regular(destination.with_name("." + destination.name + ".setup.lock"), os.O_RDWR | os.O_CREAT)
+    try:
+        check_private_fd(lock)
+        lock_file(lock, blocking=False)
+        before = _read_activity(destination)
+        if before != desired and (None if before is None else hashlib.sha256(before).hexdigest()) != value["expected_sha256"]:
+            raise ValueError("activity manifest changed since prepare; prepare a new plan")
+        _create_activity_directory(root, private=True)
+        if before != desired:
+            atomic_write(destination, desired)
+        else:
+            # A previous rename may have succeeded before its fsync failed.
+            # Matching bytes prove identity, not durability of that publication.
+            sync_file(destination)
+            sync_directory(destination.parent)
+        if _read_activity(destination) != desired:
+            raise ValueError("activity publication readback differs; retain binding and prepare a new plan")
+    finally:
+        os.close(lock)
+
+
 def default_registry(*, global_preferences=None, misc=None, global_core=False):
     """Translate reviewed predecessor policies without granting new authority."""
     stores = []
@@ -109,7 +307,8 @@ def prepare(*, store_registry, state_dir, reader_codex, hooks_program, hook_conf
 
 def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
                    hooks_program, hook_config_path, python=sys.executable,
-                   reader_auth=None, workspace_adapters=None, stable_root=None):
+                   reader_auth=None, workspace_adapters=None, stable_root=None,
+                   activity_root=None, activity_config=None, activity_device=None, activity_mcp=None):
     """Preview one device actor; native selection may freeze discovery metadata.
 
     Workspace adapters choose only retained ledger locations and reader binaries.
@@ -144,6 +343,16 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
         raise ValueError("native preparation requires existing native CLI, reader, dispatcher and Python")
     if program.name != "hook_launcher.py":
         raise ValueError("native device hooks require shipped hook_launcher.py")
+    activity = None
+    if activity_root is not None:
+        if activity_mcp is None:
+            raise ValueError("--activity-root requires an explicit --activity-mcp executable")
+        activity = prepare_activity(cwd=workspace, activity_root=activity_root,
+            activity_mcp=activity_mcp, activity_config=activity_config, activity_device=activity_device)
+        if not is_executable(activity["mcp"]["command"]):
+            raise ValueError("activity MCP must be an existing executable")
+    elif any(value is not None for value in (activity_config, activity_device, activity_mcp)):
+        raise ValueError("activity options require explicit --activity-root")
     selected = native_select(str(path), str(native), str(workspace))
     config = {"schema": NATIVE_SCHEMA, "memory_config": str(path), "native_cli": str(native),
               "state_dir": str(canonical_path(state_dir)), "reader_codex": str(reader),
@@ -189,6 +398,8 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
         "installation": "not performed", "services": "not contacted",
         "session_policy": "disable old hooks; close old sessions; quiesce all retained ledgers; start fresh sessions",
         "dispatch_policy": "one device actor for all workspaces; no additive project hook actors"}
+    if activity is not None:
+        result["activity"] = activity
     if stable_runtime is not None:
         result["stable_runtime"] = stable_runtime
         result["trust_policy"] = (
@@ -307,6 +518,13 @@ def main(argv=None):
                         help="reviewed JSON list of root/state_dir/reader_codex machinery bindings, not policy")
     native.add_argument("--stable-root", type=Path,
                         help="opt into a fixed POSIX hook entrypoint; stage/select its runtime with stable_hooks.py")
+    native.add_argument("--activity-root", type=Path,
+                        help="opt in to a separately reviewed private diagnostic root and manifest proposal")
+    native.add_argument("--activity-config", type=Path,
+                        help="manifest override; default platform Mneme config directory/activity.json")
+    native.add_argument("--activity-device", help="optional device display label")
+    native.add_argument("--activity-mcp", type=Path,
+                        help="explicit MCP executable for separate stdio-only activity entry")
     args = vars(parser.parse_args(argv))
     operation = args.pop("operation")
     if operation == "quiescence":

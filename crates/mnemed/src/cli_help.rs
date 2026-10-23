@@ -34,7 +34,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
         }
         assert_eq!(
             names.iter().filter(|name| name.as_str() != "help").count(),
-            42,
+            43,
             "review the workflow guide when commands change"
         );
         let examples = help
@@ -54,6 +54,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
             assert!(examples.contains(command), "missing example {command}");
         }
         for command in [
+            "activity",
             "stores",
             "cache",
             "edit-summary",
@@ -85,6 +86,7 @@ fn root_help_keeps_the_complete_generated_catalog() {
 #[test]
 fn nested_help_preserves_command_specific_contracts_without_opening_a_store() {
     for (command, expected) in [
+        ("activity", "no owner discovery"),
         ("recall-context", "always JSON"),
         ("body", "unbounded escape hatch"),
         ("query", "ANN seeds"),

@@ -1285,6 +1285,8 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
     try:
         _admit_async_state(config, session_id)
     except (HookError, OSError, ValueError, AttributeError, TypeError, RecursionError, OverflowError):
+        _activity_emit(event, "recall_admission", "skipped", reason="lifecycle_unavailable",
+                       selection_digest=_activity_selection_digest(config))
         return _lifecycle_failure(event, background=background)
     if config.get("schema") == CONFIG_SCHEMA_V13 and config.get("recall_mode") != "automatic" and config.get("recording_mode") != "automatic" and not config.get("_background_maintenance") and name not in ("SessionStart", "SessionEnd"):
         return {}
@@ -1406,6 +1408,7 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
             return _with_touchstone_nomination(config, event)
         return _with_touchstone_nomination(config, event, base + (suffix if first else " Async reader was already attempted for this turn; replay did not re-inject cards."))
     if name == "PostToolUse":
+        activity = None
         try:
             result = _reader_worker().consume(config, event)
             if not isinstance(result, dict) or result.get("outcome") not in ("emitted", "omitted"):
@@ -1413,15 +1416,18 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
             cards = result.get("cards")
             if not isinstance(cards, list) or (not cards and result.get("outcome") != "omitted"):
                 return _with_touchstone_nomination(config, event)
+            activity = result.get("_activity")
             packed = _pack_async_delivery(cards, session_id, turn_id, result.get("db_id"),
                                           prior_budget_omitted=result.get("budget_omitted_count", 0),
                                           concerns=result.get("concerns"), read_coverage=result.get("read_coverage"))
             # Consumption already packed before marking emitted. Do not accept a
             # second, different accounting decision at the hook boundary.
             if packed["cards"] != cards:
+                _activity_delivery(event, activity, "omitted", reason="packing_mismatch")
                 return {}
             context = result.get("context", packed["context"])
             if context != packed["context"]:
+                _activity_delivery(event, activity, "omitted", reason="context_mismatch")
                 return {}
             displayed = packed["displayed"]
             output = _context(name, context)
@@ -1437,8 +1443,10 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
                         "displayed": displayed})
                 except Exception:
                     pass  # Optional evidence may fail; the exact recall output cannot.
+            _activity_delivery(event, activity, "prepared")
             return output
         except Exception:
+            _activity_delivery(event, activity, "omitted", reason="packing_failed")
             return _with_touchstone_nomination(config, event)
     if name in ("Stop", "Interrupt"):
         _close_async_turn(config, session_id, turn_id, cancel=name == "Interrupt")
@@ -1453,7 +1461,154 @@ def _handle_async(event: dict[str, Any], config: dict[str, Any],
     return {}
 
 
+def _activity_emit(event, kind, outcome, **fields):
+    """Diagnostics are not part of delivery, authority, or paid-work control."""
+    try:
+        from session_activity import emit
+        return emit(event, kind, outcome, **fields)
+    except Exception:
+        return False
+
+
+@contextmanager
+def _defer_activity():
+    """Optional observations cannot spend a still-active native work budget."""
+    manager = None
+    batch = None
+    try:
+        from session_activity import defer
+        candidate = defer()
+        batch = candidate.__enter__()
+        manager = candidate
+    except Exception:
+        pass
+    try:
+        yield batch
+    finally:
+        if manager is not None:
+            try:
+                manager.__exit__(None, None, None)
+            except Exception:
+                pass
+
+
+def _activity_selection_digest(config):
+    frozen = config.get("frozen_selection")
+    value = frozen.get("digest") if isinstance(frozen, dict) else None
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
+def _activity_lifecycle(event, config, at=None):
+    """Publish host identity captured before quiet/disabled lane early returns.
+
+    The host supplies no unique lifecycle occurrence ID when turn_id is absent.
+    Those occurrences are time-keyed best effort, not fabricated exact retries.
+    In particular, do not consult a transcript or a control ledger to guess one.
+    """
+    name = event.get("hook_event_name")
+    source = event.get("source") if name == "SessionStart" else None
+    outcome = source if source in ("startup", "resume", "clear", "compact") else {
+        "Stop": "stop", "Interrupt": "interrupt", "SessionEnd": "end"}.get(name)
+    turn = event.get("turn_id")
+    origin = {"turn": turn, "generation": None, "context_generation": None,
+              "attempt": f"lifecycle:{outcome}:{turn}" if outcome and turn else None}
+    fields = {"origin": origin, "selection_digest": _activity_selection_digest(config), "at": at}
+    observed = False
+    if outcome:
+        observed = _activity_emit(event, "lifecycle", outcome, **fields)
+    if name == "SessionStart" and outcome:
+        recall = config.get("recall_mode")
+        mode = "automatic" if recall == "automatic" else "reminder" if recall == "reminder" else "disabled"
+        _activity_emit(event, "recall_admission", "mode_" + mode, **fields)
+        _activity_emit(event, "recording", "mode_automatic" if config.get("recording_mode") == "automatic" else "mode_disabled",
+                       reason="maintenance_enabled" if config.get("_background_maintenance") else None, **fields)
+    elif name == "UserPromptSubmit" and config.get("recall_mode") != "automatic":
+        _activity_emit(event, "recall_admission", "skipped", reason="disabled_mode", **fields)
+    return observed
+
+
+def _activity_startup_marker(event, result, observed):
+    if not observed or event.get("hook_event_name") != "SessionStart" or not _valid_id(event.get("session_id")):
+        return result
+    specific = result.get("hookSpecificOutput") if isinstance(result, dict) else None
+    if not isinstance(specific, dict) or not isinstance(specific.get("additionalContext"), str):
+        return result
+    marker = (f" Mneme activity session selector: codex:{event['session_id']}. "
+              "For this session's recorded memory activity use session_activity with this exact selector; "
+              "without a session marker, list the available sessions instead of guessing latest.")
+    text = specific["additionalContext"] + marker
+    # Optional guidance cannot evict a card or change the existing output fuse.
+    if len(text.encode("utf-8")) > MAX_CONTEXT_BYTES:
+        return result
+    return {**result, "hookSpecificOutput": {**specific, "additionalContext": text}}
+
+
+def _activity_core(event, prepared):
+    """Publish a returned core projection only at the outer hook boundary."""
+    source, turn = event.get("source"), event.get("turn_id")
+    origin = {"turn": turn, "generation": None, "context_generation": None,
+              "attempt": f"core:{source}:{turn}" if turn is not None else None}
+    for observation in prepared.observations:
+        owner = ({"name": observation.name, "id": observation.owner_id, "db": observation.db}
+                 if observation.owner_id is not None else None)
+        key = hashlib.sha256(json.dumps(["core", source, turn, prepared.at if turn is None else None,
+            prepared.selection_digest, observation.name, observation.owner_id, observation.db,
+            observation.outcome, observation.count, observation.omitted], separators=(",", ":")).encode()).hexdigest()
+        _activity_emit(event, "core", observation.outcome, key=key,
+                       reason="context_budget" if observation.outcome == "omitted" else None,
+                       owner=owner, count=observation.count, omitted=observation.omitted,
+                       origin=origin, selection_digest=prepared.selection_digest, at=prepared.at)
+    if not prepared.observations:
+        key = hashlib.sha256(json.dumps(["core", source, turn, prepared.at if turn is None else None,
+            prepared.selection_digest, "no_selected_owners"], separators=(",", ":")).encode()).hexdigest()
+        _activity_emit(event, "core", "no_selected_owners", count=0, key=key,
+                       origin=origin, selection_digest=prepared.selection_digest, at=prepared.at)
+
+
+def _activity_delivery(event, projection, outcome, *, reason=None):
+    try:
+        if not isinstance(projection, dict):
+            return
+        fields = {"origin": projection.get("origin"), "selection_digest": projection.get("selection_digest")}
+        groups = projection.get("groups")
+        if not isinstance(groups, list) or not groups:
+            _activity_emit(event, "hook_output", outcome, reason=reason, **fields)
+            return
+        for group in groups:
+            _activity_emit(event, "hook_output", outcome, reason=reason,
+                           owner=group.get("owner"), nodes=group.get("nodes", []),
+                           count=group.get("count"), omitted=group.get("omitted", 0), **fields)
+    except Exception:
+        pass  # Even malformed optional diagnostics cannot suppress hook output.
+
+
 def handle_event(event: Any, config: dict[str, Any], *, reader_background: bool = False) -> dict[str, Any]:
+    observed = False
+    activity = None
+    try:
+        if (isinstance(event, dict) and event.get("hook_event_name") in HOOK_EVENTS
+                and not _subagent(event) and _valid_id(event.get("session_id"))
+                and _in_scope(event, config["project_root"])):
+            # Capture before any quiet early return, but optional filesystem
+            # work must not spend the native admission deadline before it runs.
+            activity = ({key: event.get(key) for key in ("hook_event_name", "session_id", "turn_id", "cwd", "source")},
+                        {**{key: config.get(key) for key in ("recall_mode", "recording_mode", "_background_maintenance")},
+                         "frozen_selection": {"digest": _activity_selection_digest(config)}},
+                        int(time.time()))
+    except Exception:
+        pass
+    try:
+        result = _handle_event(event, config, reader_background=reader_background)
+    finally:
+        if activity is not None:
+            try:
+                observed = _activity_lifecycle(*activity)
+            except Exception:
+                pass
+    return _activity_startup_marker(event, result, observed) if not reader_background else result
+
+
+def _handle_event(event: Any, config: dict[str, Any], *, reader_background: bool = False) -> dict[str, Any]:
     if config.get("schema") in (CONFIG_SCHEMA_V12, CONFIG_SCHEMA_V13):
         if (not isinstance(event, dict) or _subagent(event)
                 or not _valid_id(event.get("session_id")) or not _in_scope(event, config["project_root"])):
@@ -1579,6 +1734,7 @@ def checkpoint(config: dict[str, Any], session_id: str, turn_id: str, outcome: s
         raise HookError("invalid checkpoint outcome or IDs")
     if (outcome == "captured" and not 1 <= len(ids) <= 8) or (outcome != "captured" and ids):
         raise HookError("checkpoint IDs do not match outcome")
+    observation = {}
     def mark(data, _now):
         if "frozen_selection" in config:
             from registry_runtime import selection
@@ -1599,13 +1755,28 @@ def checkpoint(config: dict[str, Any], session_id: str, turn_id: str, outcome: s
             raise HookError("no eligible turn to checkpoint")
         existing = turn.get("checkpoint")
         value = {"outcome": outcome, "ids": ids}
+        observation.update(context_generation=data["context_epoch"], at=int(_now))
         if existing is not None:
             if existing != value:
                 raise HookError("checkpoint already recorded differently")
             return {"checkpoint": outcome, "already_recorded": True}, False
         turn["checkpoint"] = value
         return {"checkpoint": outcome, "already_recorded": False}, True
-    return _with_state(config["state_dir"], session_id, mark)
+    result = _with_state(config["state_dir"], session_id, mark)
+    if result["already_recorded"]:
+        return result  # A replay cannot relabel the old claim with today's epoch.
+    # The checkpoint is an actor claim, never an independent native save proof.
+    # Its raw IDs lack owner qualification, so report counts and explicit omitted
+    # identifiers instead of assigning them to whichever owner is current.
+    _activity_emit({"session_id": session_id, "turn_id": turn_id,
+                    "cwd": str(config.get("selection_cwd", config["project_root"]))},
+                   "checkpoint", "actor_reported_capture" if outcome == "captured" else "actor_reported_" + outcome,
+                   origin={"turn": turn_id, "generation": None,
+                           "context_generation": observation.get("context_generation"),
+                           "attempt": "checkpoint:" + turn_id},
+                   count=len(ids), omitted=len(ids), at=observation.get("at"),
+                   selection_digest=_activity_selection_digest(config))
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1652,9 +1823,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "checkpoint":
             replay = ({"expected_selection_digest": args.expected_selection_digest}
                       if args.expected_selection_digest is not None else {})
-            with native_selection_budget(3):
-                config = _config(args.config, workspace_binding=binding, cwd=args.selection_cwd, **replay)
-                result = checkpoint(config, args.session_id, args.turn_id, args.outcome, args.id)
+            with _defer_activity():
+                with native_selection_budget(3):
+                    config = _config(args.config, workspace_binding=binding, cwd=args.selection_cwd, **replay)
+                    result = checkpoint(config, args.session_id, args.turn_id, args.outcome, args.id)
             print(json.dumps(result))
             return 0
         event = _read_event(sys.stdin.buffer)
@@ -1662,9 +1834,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({}))
             return 0
         selection_seconds = 1.5 if event.get("hook_event_name") in ("Interrupt", "SessionEnd") else 3
-        with native_selection_budget(selection_seconds):
-            config = _config(args.config, workspace_binding=binding, cwd=event.get("cwd"))
-            result = handle_event(event, config, reader_background=args.reader_background)
+        with _defer_activity() as activity_batch:
+            with native_selection_budget(selection_seconds):
+                config = _config(args.config, workspace_binding=binding, cwd=event.get("cwd"))
+                result = handle_event(event, config, reader_background=args.reader_background)
+        if not args.reader_background:
+            result = _activity_startup_marker(event, result, bool(getattr(activity_batch, "recorded_lifecycle", False)))
         print(json.dumps(result))
         return 0
     except HookInputError as exc:

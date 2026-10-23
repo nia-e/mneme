@@ -1,0 +1,42 @@
+{
+  "schema": "mneme.session-activity.smoke.v1",
+  "features": "default",
+  "cli": {
+    "name": "mnemed",
+    "bytes": 192285896,
+    "sha256": "853eeb6cb5c532be63ff8709a14ae3f8ac64f7aac8143d7d446c242db92ed1ad"
+  },
+  "mcp": {
+    "name": "mneme-mcp",
+    "bytes": 177111432,
+    "sha256": "f318e222283281de405f565cf616ab96adb3a81157e4e76eb8500fdb37d8d4ac"
+  },
+  "checks": [
+    "explicit isolated install and copied artifact identities",
+    "installed producer emits body-free receipts",
+    "CLI chooser exact/prefix human/JSON and early owner-selector refusal",
+    "stdio initialize closed catalog exact parity refusals and finite shutdown",
+    "fixture inventory unchanged after report and refusal paths"
+  ],
+  "installation": {
+    "config_revision": 36,
+    "helper_count": 48,
+    "helpers_sha256": "e96634e4f69e8bd3aa8c070b8b9ccdbe2e7fcabe0accc423c84e512d38ef8ede",
+    "producer": {
+      "name": "session_activity.py",
+      "bytes": 23676,
+      "sha256": "bbc08dbf372ef0c55f5e1d971e81f72c4d6a30b1c30540b57e2aebde8e6bae0a"
+    },
+    "cli_version": "mnemed 0.1.0",
+    "activity_help_sha256": "a8a0fe973d51a42a2748056b20466effd5545336db1789290faa5a253f4f798e"
+  },
+  "protocol": {
+    "version": "2025-11-25",
+    "server": {
+      "capabilityProfile": "local-session-activity",
+      "name": "mneme-mcp-session-activity",
+      "version": "0.1.0"
+    }
+  },
+  "status": "passed"
+}

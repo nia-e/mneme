@@ -7,6 +7,7 @@ New to Mneme? Start with [installation and a first session](../README.md).
 | Guide | Use it to |
 | --- | --- |
 | [CLI and MCP](cli-and-mcp.md) | Save notes, recall context, inspect memory and connect an agent |
+| [Session activity](cli-and-mcp.md#session-activity) | Inspect best-effort observations of automatic Codex memory work without contacting owners |
 | [Memory model](memory-model.md) | Understand notes, episodes, core memory, links and learning |
 | [Episodes](episodic-memory.md) | Record events, browse a timeline and correct an account |
 | [Touchstones](touchstones.md) | Preserve why something matters and what it referred to |

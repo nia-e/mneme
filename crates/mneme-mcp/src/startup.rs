@@ -18,6 +18,10 @@ pub(crate) struct Startup {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Owner(OwnerOptions),
+    Activity {
+        config: PathBuf,
+        cwd: PathBuf,
+    },
     Library {
         config: PathBuf,
     },
@@ -112,6 +116,7 @@ where
     let mut library_config = None;
     let mut router_config = None;
     let mut memory_config = None;
+    let mut activity_config = None;
     let mut cwd = None;
     let mut configured_library = None;
     let mut http = None;
@@ -139,6 +144,14 @@ where
                     return Err(format!("duplicate --discovery-catalog alias {alias:?}").into());
                 }
                 discovery_catalogs.push((alias.to_owned(), PathBuf::from(path)));
+            }
+            "--activity-config" => {
+                if activity_config.is_some() {
+                    return Err("--activity-config may be specified only once".into());
+                }
+                activity_config = Some(PathBuf::from(
+                    it.next().ok_or("--activity-config needs PATH")?,
+                ));
             }
             "--memory-config" => {
                 if memory_config.is_some() {
@@ -201,12 +214,40 @@ where
             "--allow-direct-feedback" => allow_direct_feedback = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: mneme-mcp --memory-config PATH [--cwd WORKSPACE] [--library NAME] [--http IP:PORT] | mneme-mcp [--db NAME=PATH]... [--discovery-catalog ALIAS=PATH]... [--capability-profile read-only|receipt-grounded|curator|operator] [--allow-direct-feedback (deprecated; operator only)] [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --library-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --router-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]]"
+                    "usage: mneme-mcp --activity-config PATH [--cwd WORKSPACE] | mneme-mcp --memory-config PATH [--cwd WORKSPACE] [--library NAME] [--http IP:PORT] | mneme-mcp [--db NAME=PATH]... [--discovery-catalog ALIAS=PATH]... [--capability-profile read-only|receipt-grounded|curator|operator] [--allow-direct-feedback (deprecated; operator only)] [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --library-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]] | mneme-mcp --router-config PATH [--http IP:PORT [--http-token-env VAR] [--cors-origin ORIGIN]]"
                         .into(),
                 );
             }
             other => return Err(format!("unknown argument {other:?}").into()),
         }
+    }
+    // Diagnostic mode is exclusive. Reject every conflicting selector before
+    // workspace capture, config discovery, owner opening, or token lookup.
+    if let Some(config) = activity_config {
+        if memory_config.is_some()
+            || library_config.is_some()
+            || router_config.is_some()
+            || configured_library.is_some()
+            || !dbs.is_empty()
+            || !discovery_catalogs.is_empty()
+            || capability_profile.is_some()
+            || allow_direct_feedback
+        {
+            return Err(
+                "--activity-config cannot combine owner/configured/library/router settings".into(),
+            );
+        }
+        if http.is_some() || http_token_env.is_some() || cors_origin.is_some() {
+            return Err("activity mode is stdio-only; HTTP options are not supported".into());
+        }
+        let cwd = match cwd {
+            Some(cwd) => cwd,
+            None => capture_cwd().map_err(|_| "cannot capture activity MCP startup workspace")?,
+        };
+        return Ok(Startup {
+            mode: StartupMode::Activity { config, cwd },
+            transport: Transport::Stdio,
+        });
     }
     if http.is_none() && (http_token_env.is_some() || cors_origin.is_some()) {
         return Err("--http-token-env and --cors-origin require --http".into());
@@ -311,6 +352,54 @@ where
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn activity_startup_is_exclusive_stdio_before_workspace_capture() {
+        let startup = parse_with_cwd(
+            ["--activity-config", "activity.json", "--cwd", "workspace"],
+            || panic!("explicit activity cwd must not be captured"),
+        )
+        .unwrap();
+        assert_eq!(
+            startup,
+            Startup {
+                mode: StartupMode::Activity {
+                    config: "activity.json".into(),
+                    cwd: "workspace".into()
+                },
+                transport: Transport::Stdio,
+            }
+        );
+        for extras in [
+            vec!["--db", "tripwire=/must/not/open"],
+            vec!["--discovery-catalog", "user=/must/not/read"],
+            vec!["--memory-config", "/must/not/discover"],
+            vec!["--library-config", "/must/not/read"],
+            vec!["--router-config", "/must/not/contact"],
+            vec!["--library", "any"],
+            vec!["--capability-profile", "operator"],
+            vec!["--allow-direct-feedback"],
+            vec!["--http", "invalid-address"],
+            vec!["--http-token-env", "MUST_NOT_LOOK_UP"],
+            vec!["--cors-origin", "invalid-origin"],
+        ] {
+            let mut args = vec!["--activity-config", "activity.json"];
+            args.extend(extras);
+            assert!(
+                parse_with_cwd(args, || panic!(
+                    "conflicting mode must fail before cwd capture"
+                ))
+                .is_err()
+            );
+        }
+        let captured = parse_with_cwd(["--activity-config", "activity.json"], || {
+            Ok("/captured".into())
+        })
+        .unwrap();
+        assert!(
+            matches!(captured.mode, StartupMode::Activity { cwd, .. } if cwd == PathBuf::from("/captured"))
+        );
+    }
 
     #[test]
     fn configured_mode_captures_workspace_once_and_only_when_needed() {
@@ -493,6 +582,7 @@ mod tests {
         );
 
         for (flag, value) in [
+            ("--activity-config", "activity.json"),
             ("--memory-config", "memory.toml"),
             ("--cwd", "/workspace"),
             ("--library", "named"),

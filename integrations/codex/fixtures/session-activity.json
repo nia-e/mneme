@@ -1,0 +1,21 @@
+{
+  "schema": "mneme.session-activity.v1",
+  "source": "codex",
+  "session_id": "fixture-session-a17c9e-full",
+  "workspace": "/workspace/example",
+  "cwd": "/workspace/example/src",
+  "device": "fixture-device",
+  "first_observed": 1792770000,
+  "last_observed": 1792770010,
+  "events": [
+    {"key":"lifecycle:turn-1:startup","at":1792770000,"kind":"lifecycle","outcome":"startup","reason":null,"origin":{"turn":"turn-1","generation":null,"context_generation":null,"attempt":null},"owner":null,"nodes":[],"count":null,"omitted":0,"selection_digest":null},
+    {"key":"core:turn-1:project","at":1792770001,"kind":"core","outcome":"prepared","reason":null,"origin":{"turn":"turn-1","generation":null,"context_generation":1,"attempt":"core-1"},"owner":{"name":"project","id":"owner-example","db":"project"},"nodes":["01ARZ3NDEKTSV4RRFFQ69G5FAV"],"count":1,"omitted":0,"selection_digest":null},
+    {"key":"selection:attempt-1","at":1792770002,"kind":"recall_selection","outcome":"selected","reason":null,"origin":{"turn":"turn-2","generation":"0123456789abcdef0123456789abcdef","context_generation":1,"attempt":"attempt-1"},"owner":{"name":"project","id":"owner-example","db":"project"},"nodes":["01ARZ3NDEKTSV4RRFFQ69G5FAW"],"count":1,"omitted":0,"selection_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+    {"key":"consumed:attempt-1","at":1792770003,"kind":"delivery_consumed","outcome":"consumed_for_emission","reason":null,"origin":{"turn":"turn-2","generation":"0123456789abcdef0123456789abcdef","context_generation":1,"attempt":"attempt-1"},"owner":null,"nodes":[],"count":1,"omitted":0,"selection_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+    {"key":"output:attempt-1","at":1792770004,"kind":"hook_output","outcome":"omitted","reason":"packing_limit","origin":{"turn":"turn-2","generation":"0123456789abcdef0123456789abcdef","context_generation":1,"attempt":"attempt-1"},"owner":null,"nodes":[],"count":0,"omitted":1,"selection_digest":null},
+    {"key":"recording:attempt-2","at":1792770005,"kind":"recording","outcome":"maintenance_verified","reason":null,"origin":{"turn":"turn-2","generation":null,"context_generation":1,"attempt":"attempt-2"},"owner":{"name":"project","id":"owner-example","db":"project"},"nodes":[],"count":0,"omitted":0,"selection_digest":null},
+    {"key":"checkpoint:attempt-3","at":1792770006,"kind":"checkpoint","outcome":"actor_reported_capture","reason":"unverified","origin":{"turn":"turn-3","generation":null,"context_generation":1,"attempt":"attempt-3"},"owner":null,"nodes":[],"count":null,"omitted":0,"selection_digest":null},
+    {"key":"admission:turn-4","at":1792770010,"kind":"recall_admission","outcome":"skipped","reason":"disabled_mode","origin":{"turn":"turn-4","generation":null,"context_generation":1,"attempt":null},"owner":null,"nodes":[],"count":null,"omitted":0,"selection_digest":null}
+  ],
+  "evicted_events": 2
+}

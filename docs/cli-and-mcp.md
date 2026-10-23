@@ -39,6 +39,7 @@ mnemed list --tag rust --limit 64
 | Browse observed tag names | `list --tags` |
 | Browse visually | `tui` |
 | Explain store configuration | `config inspect`; `tui --view config` |
+| Inspect observed session activity | `activity`; `activity --session ID --details` |
 | Review pending work | `status`, then `reconcile` or `merges` |
 
 Use `mnemed COMMAND --help` for arguments and limits. `--json` retains coverage
@@ -120,6 +121,80 @@ be current and not held by another process. Use the
 [maintenance handoff](maintenance-handoff.md) before opening a live server's store
 for offline work. Provisioning, upgrades and index replacement require explicit
 `--db`; `--remote-db NAME` is a server registry name, not a filesystem path.
+
+## Session activity
+
+Inspect retained metadata from the automatic Codex integration without contacting
+memory owners, running inference, reading note bodies or changing any files:
+
+```sh
+mnemed activity                       # chooser for this workspace
+mnemed activity --session codex:FULL_HOST_SESSION_ID
+mnemed activity --session UNIQUE_PREFIX --details
+mnemed --json activity --session codex:FULL_HOST_SESSION_ID
+mnemed activity --activity-config /absolute/config/activity.json
+```
+
+The chooser shows first/last **observed** times and session IDs. It does not guess
+that the newest session is the current one. Prefer the full host ID supplied by
+the integration; ambiguous prefixes return candidates. A partial catalog scan
+requires a full ID, even if only one candidate was found. Counts describe retained
+observations, not lifetime totals, model attention or usefulness.
+
+The human view leads with the latest recorded outcome, for example:
+
+```text
+  Startup core: 1 note prepared for project
+  Recall: skipped — disabled mode
+  Recall selection: 1 note selected for project
+  Hook output: omitted — packing limit
+  Checkpoint: capture reported by actor — unverified
+```
+
+These are independent lanes, not a reconstructed sequence. When a lane has several
+observations, it also shows the retained observation count and outcome breakdown.
+Conflicting observations in the latest timestamp remain explicitly ambiguous.
+`--details` keeps the exact event codes and provenance; JSON is unchanged by human
+wording.
+
+Core preparation, recall selection, delivery and recording are separate lanes.
+Preparing hook output is not proof of host admission; an actor's capture claim is
+not a confirmed save, and verified maintenance is not a new memory. Details add
+bounded reasons, origins and owner-qualified node IDs, never prompts, queries,
+transcripts, bodies, provider output or credentials.
+Host admission identifies the observed packet and recording job, not its exact
+selector attempt: identical packets cannot be disambiguated from missing log
+entries. Conflicting latest observations within one second are marked ambiguous.
+
+Coverage is prospective and best effort. Older sessions are not backfilled;
+retention, bounds and logging failures can leave gaps. Explicit CLI/MCP operations,
+Claude capture and other hosts are **not tracked**, not counted as zero.
+“No retained observation” does not mean “nothing happened.”
+
+The report requires an explicitly prepared `activity.json` binding; see
+[Codex activity setup](../integrations/codex/README.md#prepare-session-activity).
+Missing configuration returns `not_configured`, without discovery or a private
+global-store fallback. Scope is the nearest admitted workspace, respecting nested
+project/worktree boundaries. There is no `--global` view, remote-device aggregation
+or owner/database/profile selector for this report.
+
+MCP uses a **separate stdio-only server**:
+
+```sh
+mneme-mcp --activity-config /absolute/config/activity.json --cwd /absolute/workspace
+```
+
+Its only tool is `session_activity`, with optional `session` and `details`
+arguments. Workspace and manifest paths are startup-only; tool calls cannot widen
+scope. HTTP and owner options are refused. Ordinary owner/router/library servers
+do not expose this tool. The existing MCP `activity` graph-visualization feed is
+unchanged and is not session history.
+
+V1 supports macOS and Linux (Unix). Other platforms return
+`platform_unsupported` for this report; existing CLI/MCP modes are unaffected.
+The report itself is read-only, but asking an agent about it can still trigger
+ordinary prompt hooks, and already-running background work can finish meanwhile.
+It is not a conversation-wide pause switch.
 
 ## Standalone use without Codex
 

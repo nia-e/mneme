@@ -1,0 +1,202 @@
+{
+  "schema": "mneme.session-activity.source.v1",
+  "base_commit": "995d4141923fb6d8015cd4b5e46f558463e45fea",
+  "files": [
+    {
+      "path": "Cargo.lock",
+      "bytes": 128598,
+      "sha256": "ff0597e4763f3d8e51fafa1e0fca5ac6eb5c1d7cc6f39d2ac74a8b706ffe1022"
+    },
+    {
+      "path": "crates/mneme-app/Cargo.toml",
+      "bytes": 590,
+      "sha256": "635b9fe7106dd2edd119dea2a32bc57cfcf9280b7409e559a0a87b2ee1a4f770"
+    },
+    {
+      "path": "crates/mneme-app/src/lib.rs",
+      "bytes": 3892,
+      "sha256": "9e9ef594b75e7f21c368f9bf479533cf70e48809628c368bebc805b78aacfa33"
+    },
+    {
+      "path": "crates/mneme-app/src/session_activity/local.rs",
+      "bytes": 27607,
+      "sha256": "32f6efa4590c26a2f58a3d27e3cdf86a93326ac902cb6fd23ea60a211a0fa75a"
+    },
+    {
+      "path": "crates/mneme-app/src/session_activity/mod.rs",
+      "bytes": 29998,
+      "sha256": "a76e277458f76b285f3c4fb9c1c16efae751a0d18d55242ed85cd0c1072ce2e3"
+    },
+    {
+      "path": "crates/mneme-app/src/session_activity/tests.rs",
+      "bytes": 47877,
+      "sha256": "43f776153367a80e73e33541886914f3c4e27753759cc9ed1c115c9285b52531"
+    },
+    {
+      "path": "crates/mneme-mcp/src/http.rs",
+      "bytes": 51713,
+      "sha256": "836f626ebf6ab5992f3b71cd19a9ba6bbe152ed29bb8779841617312d4d7b027"
+    },
+    {
+      "path": "crates/mneme-mcp/src/main.rs",
+      "bytes": 172358,
+      "sha256": "277fe8e9365d662bb2a157f610c9a6c5db0649d95236cd832a13d743ce7725d8"
+    },
+    {
+      "path": "crates/mneme-mcp/src/session_activity_server.rs",
+      "bytes": 12423,
+      "sha256": "deebca15948badade3925dd7662f455d4699aaff19e0986d77bd532ef5592324"
+    },
+    {
+      "path": "crates/mneme-mcp/src/session_activity_surface_tests.rs",
+      "bytes": 12892,
+      "sha256": "18cdfe684e33eb728227dabf895ca8118b7dc4300ba68361098116f1986a93e4"
+    },
+    {
+      "path": "crates/mneme-mcp/src/startup.rs",
+      "bytes": 21816,
+      "sha256": "60ae2ed2c3e548b2c68eac5bbc52abf6aacb90a6cc37a6fc79ee1780490e2dda"
+    },
+    {
+      "path": "crates/mneme-mcp/tests/session_activity_stdio.rs",
+      "bytes": 8145,
+      "sha256": "9265942fbda1b875277b189aa99863fc4c6af4c2b11a142291f1f5d6b90fa772"
+    },
+    {
+      "path": "crates/mnemed/src/cli_activity.rs",
+      "bytes": 6898,
+      "sha256": "099fb1463be39b249f4798afd35d1ef626365c4fc5e24fc0ae3b33629b0fe8f3"
+    },
+    {
+      "path": "crates/mnemed/src/cli_config.rs",
+      "bytes": 31878,
+      "sha256": "0995c58e629448a9cee836088d667500d43c8518068b1e05b9f2ebf33ae1a173"
+    },
+    {
+      "path": "crates/mnemed/src/cli_help.rs",
+      "bytes": 7301,
+      "sha256": "258052254be3281101a3c567ade600ee035176d8ab79b28b6c4f46edc382957a"
+    },
+    {
+      "path": "crates/mnemed/src/cli_init.rs",
+      "bytes": 31249,
+      "sha256": "73f740aece99957f3dd961718d23a8d5edcfdfa3ea6fa41bc841bd5a63d17ed5"
+    },
+    {
+      "path": "crates/mnemed/src/cli_owner.rs",
+      "bytes": 23934,
+      "sha256": "13739df6a5f202ffe41adf2e0ba2082a8154bdd8d4fba12214092b6d782ba7ff"
+    },
+    {
+      "path": "crates/mnemed/src/main.rs",
+      "bytes": 200333,
+      "sha256": "9d2e0dde5291471ec91b0a32719c2062a54f2b02a7707b2317d7ae360755c599"
+    },
+    {
+      "path": "crates/mnemed/src/remote_commands.rs",
+      "bytes": 47431,
+      "sha256": "70c36e43d61e4f646a19fe9dba21de581cb1bf2326685daaa8550d7bac2eeb8a"
+    },
+    {
+      "path": "crates/mnemed/tests/cli_activity.rs",
+      "bytes": 14172,
+      "sha256": "de5430b460647df2b004dfee84b030b29944ddcf06514ccb23d9694d178e1e06"
+    },
+    {
+      "path": "docs/README.md",
+      "bytes": 3052,
+      "sha256": "2ce48747768e1f458218249b9d32628ca0afdf0d9f41a1b42833f0c29f74e451"
+    },
+    {
+      "path": "docs/cli-and-mcp.md",
+      "bytes": 33363,
+      "sha256": "7b86ca0edecec836ac9b1fd2ea600518f697cbba47b1e593f40c30e92ee193cb"
+    },
+    {
+      "path": "docs/proposals/session-activity.md",
+      "bytes": 18622,
+      "sha256": "aaade8b889f3562ca33d6736d233ed5214248292eb802564708d4fb286d211f6"
+    },
+    {
+      "path": "integrations/codex/README.md",
+      "bytes": 40122,
+      "sha256": "522db72a16572c9c3140211cacef391c4d4831277b4c4e4390a1997042a330e4"
+    },
+    {
+      "path": "integrations/codex/core_hook.py",
+      "bytes": 44561,
+      "sha256": "fcdb2d0e30b26446fe32a498e890454e993ffa1853aaf71bc8401a68df960b75"
+    },
+    {
+      "path": "integrations/codex/fixtures/session-activity.json",
+      "bytes": 2938,
+      "sha256": "f086e1138f0c2061b1ad6ebbefc6716761b20b38d6a92cbfaefa79028a24a66e"
+    },
+    {
+      "path": "integrations/codex/hook_launcher.py",
+      "bytes": 5400,
+      "sha256": "3b25401a8c2d112098dfc642c40a692032f5159ee98d0c5912d094be133be284"
+    },
+    {
+      "path": "integrations/codex/hooks.py",
+      "bytes": 102911,
+      "sha256": "40b50a74679a0bfdf5168b31b8a15d064ddeec3eb564578df0d77b7187eb3b94"
+    },
+    {
+      "path": "integrations/codex/install.py",
+      "bytes": 65181,
+      "sha256": "86c5e095b7e2de71e276dd0ad1afaad653fdae32af9f4f7cb17916d0fd0e7ed1"
+    },
+    {
+      "path": "integrations/codex/reader_worker.py",
+      "bytes": 93105,
+      "sha256": "a532a9cce74f7d9b0144fc223ebfdf6956038f7468c4b0a3d8b09c21e6c7cb09"
+    },
+    {
+      "path": "integrations/codex/recording_jobs.py",
+      "bytes": 141812,
+      "sha256": "7e14818a75322f548637dd34a5c1edae47377cb5a3b641cc356984471661c1fe"
+    },
+    {
+      "path": "integrations/codex/registry_config.py",
+      "bytes": 32595,
+      "sha256": "c71f8d22ca68a9d6abaa1d15c35b15b9e578bd066201e85f3dcfd5313d71c5ee"
+    },
+    {
+      "path": "integrations/codex/session_activity.py",
+      "bytes": 23676,
+      "sha256": "bbc08dbf372ef0c55f5e1d971e81f72c4d6a30b1c30540b57e2aebde8e6bae0a"
+    },
+    {
+      "path": "integrations/codex/test_install.py",
+      "bytes": 85845,
+      "sha256": "b10d00afdc791d9ec124e973fc9b901d119e84144b2a26315cf1217893f913b5"
+    },
+    {
+      "path": "integrations/codex/test_install_activity.py",
+      "bytes": 17022,
+      "sha256": "7c7909f4d513a564f469e512375a91f2faefacf4f1e631ea0e99c52c605c0525"
+    },
+    {
+      "path": "integrations/codex/test_session_activity.py",
+      "bytes": 27717,
+      "sha256": "b5355be813af7d2e8f07d9c6994e3cdee741268712a93d82f9ff2ee1602e46aa"
+    },
+    {
+      "path": "integrations/codex/test_session_activity_hooks.py",
+      "bytes": 18602,
+      "sha256": "8d0c85fe1e92ba199e6593c6ffce9e833540699311bd6fda6534df1699420f43"
+    },
+    {
+      "path": "integrations/codex/test_session_activity_workers.py",
+      "bytes": 21263,
+      "sha256": "50879e41b4d78a3253ed70a4466cbf3c548bd331b827042f9826bfe3b512ffeb"
+    },
+    {
+      "path": "tools/session_activity_smoke.py",
+      "bytes": 13251,
+      "sha256": "6bc50447aa0509f05f899a0ff9939f506325f158f3847539c027b061b0390093"
+    }
+  ],
+  "files_sha256": "960cbfd1b471c3dbee7f3bf36297b59bfa750b7efd46eee0249a91bc43b903b8"
+}

@@ -5,6 +5,7 @@ sources, and save useful lessons or events for later sessions. Project setup als
 enables a background reader and selective recording of completed work.
 
 [Set up a project](#ordinary-project-setup) · [Use memory](#save-a-memory) ·
+[Session activity](#session-activity) ·
 [Configure scope](#explicit-project-profile-and-library-selection) ·
 [Advanced setup](#advanced-installation) · [Disable](#persistent-off-switch)
 
@@ -174,6 +175,36 @@ The `episode` tool provides focused reads:
 Include `edition_id` when citing an exact account. Corrections create a new
 edition without replacing past references. See the [episode guide](../../docs/episodic-memory.md)
 for timelines, occurrence times, history and revision requests.
+
+## Session activity
+
+With an [explicit activity binding](#prepare-session-activity), ask “What did
+memory do this session?” or run `mnemed activity`. The default is a chooser of
+retained sessions in the admitted workspace, not an assumption that the latest
+session is yours. Use `mnemed activity --session codex:FULL_HOST_SESSION_ID` for
+the actual ID supplied by startup guidance; `--details` adds bounded reasons,
+origins and owner-qualified node IDs. Unique prefixes work only with complete
+catalog coverage.
+
+This is prospective, best-effort metadata for the automatic Codex path:
+lifecycle, startup core, background recall, context handoff and recording.
+Explicit CLI/MCP reads and writes, Claude capture and other hosts are not tracked.
+Core preparation, recall selection, output preparation, observed host admission,
+confirmed saves, maintenance and unverified capture claims remain distinct.
+No observation establishes model attention or usefulness. Missing or evicted
+observations are not evidence that nothing happened; old sessions are not
+reconstructed from transcripts or operational ledgers.
+Host admission retains the recording job identity with unknown selector
+generation: matching packet text does not identify a unique recall attempt.
+Conflicting latest observations in the same second remain explicitly ambiguous.
+
+The CLI and dedicated MCP `session_activity` tool read only local metadata. They
+do not open graph stores, contact owners, run models or repair/prune files.
+The existing MCP `activity` graph feed is unchanged. A natural-language question
+can still run the host's ordinary prompt hooks before the tool call; this report
+does not pause them or already-running workers. See the
+[CLI/MCP guide](../../docs/cli-and-mcp.md#session-activity) for selectors, scope,
+coverage and platform limits.
 
 ## Operating the configured service
 
@@ -493,8 +524,9 @@ upkeep remain separate; `background.core_cleanup = false` keeps existing core
 cleanup in the foreground without disabling non-core maintenance.
 
 The effect contract is shared by both capture frontends. Installer revisions
-32/33 added `review_contract.py`; current revisions 34/35 also ship the stable-hook
-helper. Retained plans keep their original inventories. Pending old touchstone envelopes remain readable
+32/33 added `review_contract.py`, 34/35 added the stable-hook helper, and current
+revisions 36/37 also ship `session_activity.py`. Retained plans keep their original
+inventories. Pending old touchstone envelopes remain readable
 without changing their original coverage or digests. A prior writer encountering
 a pending unknown review envelope refuses the outbox rather than discarding it;
 do not mix runtime versions or reset pending state to bypass that refusal.
@@ -574,6 +606,72 @@ with `--recording-mode off` available. Register the reviewed device hooks separa
 Admission excludes enrolled/configured projects, private/isolated profiles,
 malformed settings and excluded roots. Keep exclusions aligned with the
 [CLI misc owner record](../../docs/remote-cli.md#default-project-and-user-owners).
+
+### Prepare session activity
+
+Activity is opt-in during explicit integration setup; ordinary setup without these
+options is unchanged. Add the following to the low-level `install.py prepare`
+command [above](#advanced-installation):
+
+```sh
+--activity-root /absolute/private/session-activity --activity-device laptop
+```
+
+Review the plan's `activity` object alongside the normal installer outputs.
+`apply` creates the private diagnostic root, publishes the reviewed manifest and
+adds a separate project MCP entry named `mneme_session_activity`. It does not
+enable extra memory work. Existing valid workspace bindings are merged, not
+replaced; malformed bindings or a different existing root are refused. If the
+shared manifest changes between prepare and apply, prepare a fresh plan.
+Uninstall removes unchanged owned MCP wiring but retains the shared manifest and
+diagnostic records, including other workspaces. A partial apply can likewise
+retain those diagnostics; it must not erase shared bindings to roll back project
+wiring.
+
+For the native device workflow below, add `--activity-root PATH` and
+`--activity-mcp /absolute/bin/mneme-mcp` to `registry_config.py prepare-native`.
+`--activity-device LABEL` is optional. Its `activity` object proposes the manifest
+and separate MCP entry; preparation publishes neither. Review and publish those
+alongside the other prepared integration artifacts, creating the diagnostic root
+with owner-only permissions (`0700`) and the manifest as `0600`. Do not overwrite
+a newer shared manifest with an older proposal. This does not modify the native
+hook control schema or grant hook trust.
+
+Activity uses its own small `activity.json`, not the native v13 hook control
+configuration or `memory.toml`. The default is in the platform Mneme config
+directory: `$XDG_CONFIG_HOME/mneme/activity.json`, otherwise
+`$HOME/.config/mneme/activity.json` on macOS/Linux. Hooks use the same fixed path.
+Both preparation commands accept `--activity-config PATH` to select an explicit
+alternative. For an isolated prepared setup or test, explicitly set
+`MNEME_ACTIVITY_CONFIG` to that same path for producers and pass matching
+`--activity-config PATH` to the report. Merely preparing a nondefault path does
+not redirect running hooks. No missing binding triggers owner discovery or a
+global-memory fallback.
+
+The manifest admits only reviewed canonical workspace paths and a private,
+canonical absolute diagnostic root. It contains no owner endpoints or memory
+policy:
+
+```json
+{
+  "schema": "mneme.session-activity.config.v1",
+  "root": "/absolute/private/session-activity",
+  "workspaces": [{"path": "/absolute/workspace", "source": "codex"}],
+  "device": null
+}
+```
+
+The manifest is bounded to 64 KiB. A device label is optional; `null` means
+unknown, not a machine identity inferred from the filesystem. Retained records
+keep their historical workspace. Reports admit only the current bound workspace,
+respect nested project/worktree boundaries, and provide neither `--global` nor
+remote-device aggregation.
+
+Use a separate `mneme-mcp --activity-config PATH --cwd WORKSPACE` stdio entry for
+`session_activity`; do not add it to the graph owner's tool allowlist. This entry
+can report while owners are offline. Existing MCP `activity` remains the
+process-local graph feed. V1 diagnostics support macOS/Linux; other platforms
+return `platform_unsupported`, without changing existing integration modes.
 
 ### Stable native device hooks (POSIX)
 

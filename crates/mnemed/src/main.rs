@@ -56,6 +56,7 @@ use mneme_cozo::MemStore;
 use ulid::Ulid;
 
 mod bootstrap;
+mod cli_activity;
 mod cli_cache;
 mod cli_capture;
 mod cli_client;
@@ -196,6 +197,12 @@ fn project_db() -> std::io::Result<PathBuf> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show observed memory activity in the current workspace, without contacting owners.
+    ///
+    /// Read-only local diagnostics; no owner discovery, graph access or inference.
+    /// Missing observations do not mean nothing happened. Never selects the latest
+    /// session implicitly; omit --session for a chooser.
+    Activity(cli_activity::ActivityArgs),
     /// Inspect configuration and run native operations.
     ///
     /// Native operations are bounded and pinned to the selected stores.
@@ -918,6 +925,11 @@ impl From<KindArg> for EdgeKind {
 async fn main() -> Result<(), AnyErr> {
     let cli = Cli::parse();
     let json = cli.json;
+    // This diagnostic path must precede owner configuration and discovery. It
+    // reads only the separately configured local activity manifest and records.
+    if let Command::Activity(args) = &cli.command {
+        return cli_activity::run(args, &cli);
+    }
     // Fresh native Windows ownership is supported; offline migration/rewrites
     // still depend on Unix publication/recovery and must not create residue.
     #[cfg(windows)]
@@ -1136,7 +1148,7 @@ async fn main() -> Result<(), AnyErr> {
     }
 
     match cli.command {
-        Command::Config(_) | Command::Cache(_) | Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) | Command::TagFormatMigration(_) => {
+        Command::Activity(_) | Command::Config(_) | Command::Cache(_) | Command::Init(_) | Command::Client(_) | Command::Library(_) | Command::Tui(_) | Command::Stores(_) | Command::TagFormatMigration(_) => {
             unreachable!("library handled before connection/store admission")
         }
         Command::Snapshot { .. } => Err("snapshot create requires an existing MCP owner; omit --db and configure the owner, or select --remote URL".into()),
@@ -2399,7 +2411,11 @@ async fn dispatch(
         | Command::TagFormatMigration(_) => {
             unreachable!("handled before local store admission")
         }
-        Command::Config(_) | Command::Cache(_) | Command::Init(_) | Command::Client(_) => {
+        Command::Activity(_)
+        | Command::Config(_)
+        | Command::Cache(_)
+        | Command::Init(_)
+        | Command::Client(_) => {
             unreachable!("init/client handled before remote/store admission")
         }
         Command::BootstrapInspect(_) => unreachable!("bootstrap-inspect handled in main"),

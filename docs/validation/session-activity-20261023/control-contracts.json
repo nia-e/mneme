@@ -1,0 +1,37 @@
+[
+  {
+    "path": "integrations/codex/reader_worker.py",
+    "function": "_new",
+    "ast_identical_to_baseline": true
+  },
+  {
+    "path": "integrations/codex/reader_worker.py",
+    "function": "_valid",
+    "ast_identical_to_baseline": true
+  },
+  {
+    "path": "integrations/codex/reader_worker.py",
+    "function": "_write",
+    "ast_identical_to_baseline": true
+  },
+  {
+    "path": "integrations/codex/recording_jobs.py",
+    "function": "_new",
+    "ast_identical_to_baseline": true
+  },
+  {
+    "path": "integrations/codex/recording_jobs.py",
+    "function": "_valid",
+    "ast_identical_to_baseline": true
+  },
+  {
+    "path": "integrations/codex/recording_jobs.py",
+    "function": "_write",
+    "ast_identical_to_baseline": true
+  },
+  {
+    "path": "integrations/codex/recording_jobs.py",
+    "function": "attach_delivery",
+    "ast_identical_to_baseline": true
+  }
+]

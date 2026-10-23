@@ -192,7 +192,8 @@ pub(crate) async fn discover(
 pub(crate) fn independent(command: &Command) -> bool {
     matches!(
         command,
-        Command::Config(_)
+        Command::Activity(_)
+            | Command::Config(_)
             | Command::Cache(_)
             | Command::Init(_)
             | Command::Client(_)

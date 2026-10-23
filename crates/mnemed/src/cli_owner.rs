@@ -348,6 +348,9 @@ pub(crate) fn resolve(
     user: bool,
     db: Option<&Path>,
 ) -> Result<Option<SelectedRemote>, AnyErr> {
+    if matches!(command, Command::Activity(_)) {
+        return Err("activity is a local diagnostic and cannot resolve an owner".into());
+    }
     // Validate explicit remote/offline combinations even for independent modes.
     if let Some(remote) = options.resolve(user, db)? {
         return Ok(Some(SelectedRemote {

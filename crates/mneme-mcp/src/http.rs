@@ -74,6 +74,9 @@ pub async fn serve(
     bearer_token: Option<String>,
     cors_origin: Option<&str>,
 ) -> Result<(), AnyErr> {
+    if matches!(&server.library, Some(crate::Coordinator::Activity(_))) {
+        return Err("activity mode is stdio-only; HTTP options are not supported".into());
+    }
     let addr: SocketAddr = addr
         .parse()
         .map_err(|e| format!("--http expects a numeric IP:PORT, got {addr:?}: {e}"))?;
@@ -666,6 +669,29 @@ fn cors_headers(security: &Security, request: &HeaderMap) -> HeaderMap {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn session_activity_http_refuses_before_address_token_or_listener_work() {
+        let server = crate::Server::coordinator(crate::Coordinator::Activity(
+            crate::session_activity_server::ActivityServer::new(
+                "/nonexistent/activity.json".into(),
+                "/nonexistent/workspace".into(),
+            )
+            .unwrap(),
+        ));
+        let error = serve(
+            server,
+            "not-an-address",
+            Some(String::new()),
+            Some("invalid\norigin"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "activity mode is stdio-only; HTTP options are not supported"
+        );
+    }
+
     use super::*;
 
     #[tokio::test]

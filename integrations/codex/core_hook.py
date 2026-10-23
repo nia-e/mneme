@@ -7,6 +7,7 @@ a store, inspects a transcript, or records a prompt or journal.
 """
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -39,6 +40,25 @@ MAX_REGISTRY_OUTPUT = MAX_CONTEXT_BYTES - 2048
 MAX_REGISTRY_REQUEST = 96 * 1024
 WALL_TIMEOUT = 12.0
 SOURCES = {"startup", "resume", "clear", "compact"}
+
+
+@dataclass(frozen=True)
+class CoreObservation:
+    """Body-free evidence from the same validated result that was rendered."""
+    name: str
+    owner_id: str | None
+    db: str
+    outcome: str
+    count: int
+    omitted: int = 0
+
+
+@dataclass(frozen=True)
+class PreparedCore:
+    output: dict
+    observations: tuple[CoreObservation, ...]
+    selection_digest: str | None
+    at: int
 
 
 def _json(value):
@@ -723,7 +743,8 @@ def handle_event(event, config, timeout=WALL_TIMEOUT):
     return _context(collect_core(targets, timeout))
 
 
-def handle_selection(event, selection, timeout=WALL_TIMEOUT, *, config_guard=None, notice_state=None):
+def handle_selection(event, selection, timeout=WALL_TIMEOUT, *, config_guard=None, notice_state=None,
+                     with_activity=False):
     """Passive startup view of the same selection used by the async integration."""
     if not _eligible(event):
         return {}
@@ -731,7 +752,8 @@ def handle_selection(event, selection, timeout=WALL_TIMEOUT, *, config_guard=Non
         raise ValueError("invalid core selection timeout")
     from store_registry import native_selection_budget
     with native_selection_budget(timeout):
-        return _handle_selection(event, selection, timeout, config_guard=config_guard, notice_state=notice_state)
+        prepared = _handle_selection(event, selection, timeout, config_guard=config_guard, notice_state=notice_state)
+        return prepared if with_activity else prepared.output
 
 
 def _handle_selection(event, selection, timeout, *, config_guard, notice_state):
@@ -748,17 +770,27 @@ def _handle_selection(event, selection, timeout, *, config_guard, notice_state):
     # through selection revocation. No fallback selection is resolved here.
     _revalidate_config_guard(config_guard)
     revalidate(selection)
-    return _registry_context(selection, sections)
+    output = _registry_context(selection, sections)
+    # This is a pure projection after final revalidation, not another owner read
+    # or a journal. The outer dispatcher alone may publish diagnostics.
+    observations = tuple(
+        CoreObservation(store.name, store.db_id, store.db_alias,
+                        sections[index]["outcome"] if index < len(sections) else "omitted",
+                        len(sections[index]["cards"]) if index < len(sections) else 0,
+                        0 if index < len(sections) else 1)
+        for index, store in enumerate(selection.core))
+    return PreparedCore(output, observations, selection.digest, int(time.time()))
 
 
-def handle_hook_event(event, config, timeout=WALL_TIMEOUT):
+def handle_hook_event(event, config, timeout=WALL_TIMEOUT, *, with_activity=False):
     if not _eligible(event):
         return {}
     if not _valid_timeout(timeout):
         raise ValueError("invalid core selection timeout")
     from store_registry import native_selection_budget
     with native_selection_budget(timeout):
-        return _handle_hook_event(event, config, timeout)
+        prepared = _handle_hook_event(event, config, timeout)
+        return prepared if with_activity else prepared.output
 
 
 def _handle_hook_event(event, config, timeout):
@@ -774,7 +806,7 @@ def _handle_hook_event(event, config, timeout):
             from hooks import _valid_id
             if "state_dir" in config and _valid_id(event.get("session_id")):
                 options["notice_state"] = {"state_dir": str(config["state_dir"]), "session_id": event["session_id"]}
-        result = handle_selection(event, selected, timeout, **options)
+        result = handle_selection(event, selected, timeout, with_activity=True, **options)
         selection(config)  # Includes separately authored project-purpose pins.
         return result
     except HookError as error:
@@ -810,6 +842,7 @@ def main(argv=None):
     source.add_argument("--hook-config", type=Path, help="v12 integration config; use its exact selected core owners")
     parser.add_argument("--timeout", type=float, default=WALL_TIMEOUT)
     args = parser.parse_args(argv)
+    prepared = None
     try:
         raw = sys.stdin.buffer.read(MAX_STDIN + 1)
         if len(raw) > MAX_STDIN:
@@ -825,7 +858,8 @@ def main(argv=None):
             from store_registry import native_selection_budget
             with native_selection_budget(args.timeout):
                 config = _hook_config(args.hook_config, event)
-                result = {} if config is None else handle_hook_event(event, config, args.timeout)
+                prepared = None if config is None else handle_hook_event(event, config, args.timeout, with_activity=True)
+                result = prepared.output if isinstance(prepared, PreparedCore) else {}
         else:
             result = handle_event(event, _config(args.config), args.timeout)
     except (McpError, OSError, ValueError, KeyError, TypeError, RuntimeError):
@@ -833,6 +867,12 @@ def main(argv=None):
         # a manual user-store fallback into an isolated session.
         result = {"hookSpecificOutput": {"hookEventName": "SessionStart",
                  "additionalContext": "Mneme core selection was unavailable, changed, or invalid; no core memory was delivered. Verify the project profile and explicit configuration before using memory."}}
+    if isinstance(prepared, PreparedCore):
+        try:
+            from hooks import _activity_core
+            _activity_core(event, prepared)
+        except Exception:
+            pass
     print(_json(result))
     return 0
 

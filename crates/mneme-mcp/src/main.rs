@@ -7,7 +7,8 @@
 //! selects a separate read-only coordinator mode with no owner registry.
 //! Explicit `--router-config` selects scope-pinned forwarding to existing owners
 //! and optional read-only library snapshots, also with no owner registry.
-//! All modes use JSON-RPC over bounded stdio or Streamable HTTP transport.
+//! Activity-only mode reads local diagnostic receipts over bounded stdio only.
+//! Other modes use bounded stdio or Streamable HTTP transport.
 
 mod activity;
 mod capability;
@@ -30,6 +31,7 @@ mod router_catalog;
 mod router_response;
 mod router_server;
 mod save;
+mod session_activity_server;
 mod snapshot;
 mod startup;
 mod touchstone;
@@ -310,6 +312,7 @@ impl CapabilityPolicy {
 
 /// Explicit non-owner modes: neither constructs a persistent-store registry.
 enum Coordinator {
+    Activity(session_activity_server::ActivityServer),
     Library(library_server::LibraryServer),
     Router(router_server::RouterServer),
     Configured(configured_server::ConfiguredServer),
@@ -323,6 +326,7 @@ impl Coordinator {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, AnyErr>> + Send + 'a>>
     {
         match self {
+            Self::Activity(server) => Box::pin(server.dispatch(method, params)),
             Self::Library(server) => Box::pin(server.dispatch(method, params)),
             Self::Router(server) => Box::pin(server.dispatch(method, params)),
             Self::Configured(server) => server.dispatch(method, params),
@@ -332,7 +336,7 @@ impl Coordinator {
         match self {
             Self::Router(server) => server.close().await,
             Self::Configured(server) => server.close().await,
-            Self::Library(_) => {}
+            Self::Activity(_) | Self::Library(_) => {}
         }
     }
 }
@@ -340,7 +344,7 @@ impl Coordinator {
 /// Both transports drive the same owner or coordinator dispatch.
 struct Server {
     registry: Registry,
-    /// Present only in explicit library/router mode; owner registry is empty then.
+    /// Present only in explicit coordinator mode; owner registry is empty then.
     library: Option<Coordinator>,
     /// Keeping walk state separate means unrelated reads and writes can run
     /// concurrently instead of one slow embedding call serializing the service.
@@ -375,6 +379,12 @@ impl Server {
 async fn main() -> Result<(), AnyErr> {
     let startup = startup::parse_args()?;
     match startup.mode {
+        StartupMode::Activity { config, cwd } => {
+            let server = Server::coordinator(Coordinator::Activity(
+                session_activity_server::ActivityServer::new(config, cwd)?,
+            ));
+            serve_selected_transport(server, startup.transport, "local session activity").await
+        }
         StartupMode::Configured {
             config,
             cwd,
@@ -475,6 +485,13 @@ async fn serve_selected_transport(
     transport: Transport,
     subject: &str,
 ) -> Result<(), AnyErr> {
+    // Keep the refusal here too: future callers must not accidentally expose
+    // startup-pinned local diagnostics through an HTTP coordinator.
+    if matches!(&server.library, Some(Coordinator::Activity(_)))
+        && !matches!(&transport, Transport::Stdio)
+    {
+        return Err("activity mode is stdio-only; HTTP options are not supported".into());
+    }
     match transport {
         Transport::Http {
             addr,
@@ -4107,6 +4124,9 @@ fn tool_schemas(capability: CapabilityPolicy) -> Vec<Value> {
     apply_profile_schema_restrictions(&mut tools, capability.profile);
     tools
 }
+
+#[cfg(test)]
+mod session_activity_surface_tests;
 
 #[cfg(test)]
 mod core_notice_tests;

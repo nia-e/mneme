@@ -57,6 +57,132 @@ ID = re.compile(r"[A-Za-z0-9_:.-]{1,160}\Z")
 ULID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 
 
+class _ActivityTransaction(dict):
+    """Ephemeral outbox; never serialized into control state."""
+    def __init__(self, data):
+        super().__init__(data)
+        self.activity = []
+
+
+def _capture_activity(data, job, outcome, reason, receipt=None):
+    """Snapshot only already-retained native evidence; never infer SAVE from verified."""
+    try:
+        if not isinstance(data, _ActivityTransaction) or job.get("source_host", "codex") != "codex":
+            return
+        origin = {"turn": job["turn_id"], "generation": None, "context_generation": None,
+                  "attempt": job["key"]}
+        frozen = job.get("frozen_selection")
+        selection = frozen.get("digest") if isinstance(frozen, dict) else None
+        selection = selection if isinstance(selection, str) and re.fullmatch(r"[0-9a-f]{64}", selection) else None
+        common = {"origin": origin, "selection_digest": selection, "at": int(time.time())}
+        event = {"session_id": data["session_id"], "turn_id": job["turn_id"],
+                 "cwd": frozen.get("cwd") if isinstance(frozen, dict) else None}
+        def add(status, suffix, *, owner=None, nodes=None, why=None):
+            data.activity.append((event, "recording", status, {**common, "owner": owner,
+                "nodes": nodes or [], "count": len(nodes or []), "reason": why,
+                "key": "recording:" + job["key"] + ":" + suffix}))
+        native = receipt or job.get("save_outcome", {}).get("native")
+        operation = ({"lesson": "save_note_readback_verified", "possibility": "save_note_readback_verified",
+                      "episode": "save_episode_append_readback_verified"}.get(job.get("proposal_kind")))
+        confirmed = (operation is not None and not _is_nomination_job(job) and isinstance(native, dict)
+                     and native.get("readback_status") == "verified"
+                     and native.get("db_id") == job.get("db_id")
+                     and native.get("db") == job.get("db_alias", "project"))
+        owner_id = job.get("db_id")
+        owner = ({"name": job.get("destination", "project"), "id": owner_id,
+                  "db": job.get("db_alias", "project")}
+                 if isinstance(owner_id, str) and ULID.fullmatch(owner_id) else None)
+        if confirmed and owner is not None:
+            nodes = list(dict.fromkeys(native[k] for k in ("id", "episode_id", "edition_id")
+                                       if isinstance(native.get(k), str) and ULID.fullmatch(native[k])))
+            add("save_confirmed", "save", owner=owner, nodes=nodes, why=operation)
+        for index, item in enumerate(job.get("maintenance", [])):
+            if item.get("status") in ("applied", "unchanged") and owner is not None:
+                payload = item.get("payload", {})
+                expected = payload.get("expected", {}) if isinstance(payload, dict) else {}
+                binding = expected.get("notice", {}).get("binding", {}) if isinstance(expected, dict) else {}
+                nodes = [endpoint["id"] for endpoint in binding.get("endpoints", [])
+                         if isinstance(endpoint, dict) and isinstance(endpoint.get("id"), str)
+                         and ULID.fullmatch(endpoint["id"])]
+                add("maintenance_verified", "maintenance:" + str(index), owner=owner, nodes=nodes,
+                    why="record_finding_" + item["status"])
+        # This is a job disposition, never an additional confirmed memory.
+        allowed = {"abstained", "deferred", "cancelled", "unresolved", "verified", "unverified"}
+        known_reason = reason if reason in UNRESOLVED_REASONS | {
+            "native_verified", "receipt_omitted", "shared_budget", "job_deadline", "config_changed",
+            "interrupted_or_invalid_fence", "observation_work_cap", "no_available_destination",
+            "native_read_budget", "native_read_deadline", "maintenance_refused", "no_frozen_intent",
+            "assessment_abstained", "source_turn_not_closed", "source_prompt_pending"} else "other"
+        add(outcome if outcome in allowed else "unverified", "terminal:" + outcome,
+            why=known_reason)
+    except Exception:
+        pass
+
+
+def _emit_activity(config, observations):
+    try:
+        if capture_source.source_host(config) != "codex":
+            return
+        from session_activity import emit
+        for event, kind, outcome, projection in observations:
+            try:
+                emit(event, kind, outcome, **projection)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _capture_admission(data, job, observation):
+    """Observe the normal recorder's packet; selector origin is unavailable."""
+    try:
+        packet = job.get("delivery")
+        frozen = job.get("frozen_selection")
+        if (not isinstance(data, _ActivityTransaction) or not isinstance(packet, dict)
+                or not isinstance(frozen, dict) or not isinstance(frozen.get("cwd"), str)):
+            return  # No existing historical workspace witness means no coverage.
+        state = observation["coverage"]["memory_delivery"]
+        if state not in _DELIVERY_DIAGNOSTIC_STATES or state == "not_recorded":
+            return
+        names = {}
+        snapshot = frozen.get("snapshot") if frozen.get("schema") == "mneme.native-store-selection.v1" else None
+        for row in snapshot.get("active", []) if isinstance(snapshot, dict) else []:
+            if not isinstance(row, dict) or not isinstance(row.get("store"), dict):
+                continue
+            store = row["store"]
+            owner = store.get("owner")
+            if (not isinstance(store.get("id"), str) or not ULID.fullmatch(store["id"])
+                    or not isinstance(owner, dict) or any(not isinstance(value, str)
+                        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value)
+                        for value in (row.get("name"), owner.get("db")))):
+                continue
+            label = (row["name"], owner["db"])
+            names[store["id"]] = label if store["id"] not in names else None
+        groups = {}
+        for card in packet["displayed"]:
+            owner_id, node_id = card["db_id"], card["node_id"]
+            if (not isinstance(owner_id, str) or not ULID.fullmatch(owner_id)
+                    or not isinstance(node_id, str) or not ULID.fullmatch(node_id)):
+                continue
+            label = names.get(owner_id) or ("unknown", "unknown")
+            group = groups.setdefault(owner_id, {"owner": {"name": label[0], "id": owner_id, "db": label[1]},
+                                                 "nodes": [], "count": 0, "omitted": 0})
+            group["count"] += 1
+            if len(group["nodes"]) < 256:
+                group["nodes"].append(node_id)
+            else:
+                group["omitted"] += 1
+        event = {"session_id": data["session_id"], "turn_id": job["turn_id"], "cwd": frozen["cwd"]}
+        origin = {"turn": job["turn_id"], "generation": None, "context_generation": None,
+                  "attempt": "recording:" + job["key"]}
+        at = int(time.time())
+        for group in groups.values():
+            data.activity.append((event, "host_admission", state, {**group, "origin": origin,
+                                  "reason": "selector_origin_unavailable", "at": at}))
+    except Exception:
+        pass
+
+
 def enabled(config):
     try:
         capture_source.source_host(config)
@@ -423,6 +549,7 @@ def _transaction(config, session, mutate, *, create=False, fresh=False, lock_tim
             or not isinstance(session, str) or not ID.fullmatch(session)):
         return False, None
     fd = None
+    observations = []
     try:
         directory = _directory(config)
         if retained_registry and not _path(config, session).exists():
@@ -468,17 +595,21 @@ def _transaction(config, session, mutate, *, create=False, fresh=False, lock_tim
             data = _new(session, fresh, config)
         else:
             return True, None
+        data = _ActivityTransaction(data)
         bound = _bind_workspace(config, data)
         value, changed = mutate(data)
         if changed or bound:
             _write(path, data)
             _clean_turn_cancels(config, session, data)
+            observations = data.activity
         return True, value
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         return False, None
     finally:
         if fd is not None:
             os.close(fd)
+        # Never acquire the diagnostics lock while holding a recording lock.
+        _emit_activity(config, observations)
 
 
 def _count(data, name):
@@ -746,6 +877,7 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         if len(encoded(job)) > MAX_JOB_BYTES:
             job.pop("observation", None)
         _normalize_context_in_place(job, max_bytes=MAX_JOB_BYTES)
+        _capture_activity(data, job, outcome, reason, receipt)
         return
     data["jobs"].remove(job)
     summary = {"source_key": job["key"], "turn_id": job["turn_id"], "outcome": outcome, "reason": reason}
@@ -827,10 +959,13 @@ def _finish(data, job, outcome, reason, receipt=None, diagnostic=None, context_d
         summary["maintenance_details_omitted"] = True
     if len(encoded(summary)) > MAX_RECEIPT_BYTES - 192:
         data["receipt_omissions"] = data.get("receipt_omissions", 0) + 1
+        _capture_activity(data, {k: v for k, v in job.items() if k not in {"save_outcome", "maintenance"}},
+                          "unverified", "receipt_omitted")
         return
     if len(data["receipts"]) >= MAX_RECEIPTS:
         data["receipt_omissions"] = data.get("receipt_omissions", 0) + 1
     data["receipts"] = (data["receipts"] + [summary])[-MAX_RECEIPTS:]
+    _capture_activity(data, job, outcome, reason, receipt)
 
 
 def session_start(config, event):
@@ -992,7 +1127,6 @@ def attach_delivery(config, packet):
         return {"outcome": outcome if ok and outcome is not None else "busy_or_missing"}
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         return {"outcome": "invalid_or_unavailable"}
-
 
 def interrupt_open_turns(config, session):
     """Retire only unclosed prompts; trusted completed captures may finish later."""
@@ -1560,6 +1694,26 @@ def _publish_nomination(config, session, key):
 
 
 def step(config, session, runtime, reserve, account, *, native_write=None, native_maintenance=None):
+    """Do not let optional journal I/O spend this step's later native budget."""
+    scope = None
+    try:
+        from session_activity import defer
+        scope = defer()
+        scope.__enter__()
+    except Exception:
+        scope = None
+    try:
+        return _step(config, session, runtime, reserve, account,
+                     native_write=native_write, native_maintenance=native_maintenance)
+    finally:
+        if scope is not None:
+            try:
+                scope.__exit__(*sys.exc_info())
+            except Exception:
+                pass  # Failure to drain diagnostics never changes functional completion.
+
+
+def _step(config, session, runtime, reserve, account, *, native_write=None, native_maintenance=None):
     """One bounded worker step. Callback accounting is shared with reader usage."""
     now = time.time()
     def choose(data):
@@ -1641,6 +1795,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                 if current["phase"] != "observing" or current["polls"] != job["polls"]:
                     return False
                 current.update({k: job[k] for k in ("polls", "bytes_read", "records_parsed")})
+                _capture_admission(_data, current, observation)
                 if capture_source.assessable(observation):
                     if host == "codex":
                         current["closure_ref"] = observation["boundary"]

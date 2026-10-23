@@ -13,6 +13,7 @@ mneme-present.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json = "1"
+sha2.workspace = true
 ulid.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
@@ -20,3 +21,6 @@ tokio = { workspace = true, features = ["time"] }
 mneme-cozo.workspace = true
 mneme-embed.workspace = true
 mneme-body.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

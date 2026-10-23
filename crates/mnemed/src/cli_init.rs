@@ -525,6 +525,7 @@ mod tests {
             "claude_hooks.py",
             "review_contract.py",
             "stable_hooks.py",
+            "session_activity.py",
         ] {
             assert!(
                 inventory.contains(&format!("codex/{helper}")),
@@ -605,6 +606,31 @@ mod tests {
             std::str::from_utf8(&help)
                 .unwrap()
                 .contains("{prepare,install,select}")
+        );
+    }
+
+    #[tokio::test]
+    async fn extracted_session_activity_helper_imports_without_source_checkout() {
+        let Some(python) = discover_python(None).await else {
+            eprintln!("Python 3.11+ unavailable; activity import smoke not exercised");
+            return;
+        };
+        let bundle = unicode_bundle();
+        let codex = bundle.path.join("codex");
+        let script = "import pathlib, sys; root = pathlib.Path(sys.argv[1]); sys.path.insert(0, str(root)); import session_activity, registry_config; assert pathlib.Path(session_activity.__file__) == root / 'session_activity.py'; assert callable(session_activity.emit); assert callable(registry_config.prepare_activity); print('activity-import-ok')";
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_python_command(
+                &python,
+                &["-I", "-S", "-B", "-c", script, codex.to_str().unwrap()],
+            ),
+        )
+        .await
+        .unwrap()
+        .expect("embedded activity helper dependencies");
+        assert_eq!(
+            std::str::from_utf8(&result).unwrap().trim_end(),
+            "activity-import-ok"
         );
     }
 

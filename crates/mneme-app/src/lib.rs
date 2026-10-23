@@ -14,6 +14,7 @@ pub mod list;
 pub mod neighbors;
 pub mod query;
 pub mod save;
+pub mod session_activity;
 mod tag_vocabulary;
 pub mod touchstone;
 pub use context::{

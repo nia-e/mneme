@@ -16,13 +16,36 @@ from misc_config import validate_config
 EVENTS = hooks.HOOK_EVENTS
 
 
+def _core_event(event, config):
+    import core_hook
+    try:
+        prepared = core_hook.handle_hook_event(event, config, with_activity=True)
+    except Exception:
+        hooks._activity_emit(event, "core", "unavailable", reason="selection_unavailable",
+                             selection_digest=hooks._activity_selection_digest(config))
+        raise
+    if isinstance(prepared, core_hook.PreparedCore):
+        # Core collected/revalidated once and returned its body-free projection.
+        # Publication is deliberately outside the passive collector.
+        try:
+            hooks._activity_core(event, prepared)
+        except Exception:
+            pass
+        return prepared.output
+    return prepared
+
+
 def handle_event(event, config_path, *, reader_background=False, core=False):
     from store_registry import native_selection_budget
     # Match the existing recipe ceilings (15s core, 5s ordinary, 3s shutdown).
     # Leave room for host/state work; nested loads and replays share this bound.
     short = isinstance(event, dict) and event.get("hook_event_name") in ("Interrupt", "SessionEnd")
-    with native_selection_budget(12 if core else 1.5 if short else 3):
-        return _handle_event(event, config_path, reader_background=reader_background, core=core)
+    with hooks._defer_activity() as activity_batch:
+        with native_selection_budget(12 if core else 1.5 if short else 3):
+            result = _handle_event(event, config_path, reader_background=reader_background, core=core)
+    if not reader_background and not core:
+        result = hooks._activity_startup_marker(event, result, bool(getattr(activity_batch, "recorded_lifecycle", False)))
+    return result
 
 
 def _handle_event(event, config_path, *, reader_background=False, core=False):
@@ -39,8 +62,7 @@ def _handle_event(event, config_path, *, reader_background=False, core=False):
         # per-operation permissions come from the bounded native selection.
         config = hooks._config(Path(config_path), cwd=event.get("cwd"))
         if core:
-            import core_hook
-            return core_hook.handle_hook_event(event, config)
+            return _core_event(event, config)
         return hooks.handle_event(event, config, reader_background=reader_background)
     if isinstance(raw, dict) and raw.get("schema") == hooks.CONFIG_SCHEMA_V12:
         from registry_runtime import validate_static
@@ -54,8 +76,7 @@ def _handle_event(event, config_path, *, reader_background=False, core=False):
             return {}
         config = hooks._config(Path(config_path), workspace_binding=binding, cwd=event["cwd"])
         if core:
-            import core_hook
-            return core_hook.handle_hook_event(event, config)
+            return _core_event(event, config)
         return hooks.handle_event(event, config, reader_background=reader_background)
     if core:
         raise ValueError("core dispatcher requires explicit registry configuration")

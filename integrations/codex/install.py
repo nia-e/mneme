@@ -3,7 +3,8 @@
 
 This installer copies explicitly supplied binaries; it does not build/download,
 initialize a database, start a daemon, modify global Codex config, or grant hook
-trust. Uninstall restores only unchanged owned config outputs and keeps data.
+trust. Explicit --activity-root additionally enrolls a shared diagnostic binding.
+Uninstall restores only unchanged owned Codex outputs and keeps diagnostic data/bindings.
 """
 from __future__ import annotations
 
@@ -22,14 +23,14 @@ except ImportError:
 
 SCHEMA = "mneme.codex-install.v1"
 HOST_PLATFORM = "windows" if os.name == "nt" else "posix"
-CONFIG_REVISION = 34
-EXISTING_SERVICE_REVISION = 35
-EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, EXISTING_SERVICE_REVISION)
-SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
+CONFIG_REVISION = 36
+EXISTING_SERVICE_REVISION = 37
+EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, 35, EXISTING_SERVICE_REVISION)
+SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
 END = "# END mneme-codex-v1"
-PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py", "host_files.py", "host_process.py", "host_platform.py", "store_registry.py", "registry_config.py", "registry_runtime.py", "registry_reader.py", "registry_recording.py", "core_hook.py", "guidance.py", "touchstone_handoff.py", "assessment.py", "capture_source.py", "claude_observer.py", "claude_runtime.py", "claude_config.py", "claude_hooks.py", "review_contract.py", "stable_hooks.py")
+PROGRAMS = ("hooks.py", "mcp_client.py", "service.py", "memory.py", "launcher.py", "hook_recall.py", "profile.py", "library_launcher.py", "shadow.py", "reader_worker.py", "reader_runtime.py", "reader_contract.py", "turn_observer.py", "rollout_primitives.py", "recording_contract.py", "recording_jobs.py", "routing_memory.py", "routing_contract.py", "librarian_policy.py", "touchstone_contract.py", "target_policy.py", "misc_binding.py", "misc_config.py", "hook_launcher.py", "tag_config.py", "tag_context.py", "stewardship.py", "stewardship_contract.py", "host_files.py", "host_process.py", "host_platform.py", "store_registry.py", "registry_config.py", "registry_runtime.py", "registry_reader.py", "registry_recording.py", "core_hook.py", "guidance.py", "touchstone_handoff.py", "assessment.py", "capture_source.py", "claude_observer.py", "claude_runtime.py", "claude_config.py", "claude_hooks.py", "review_contract.py", "stable_hooks.py", "session_activity.py")
 LEGACY_TOOLS = ["recall_context", "get", "capture", "supersede", "status"]
 EPISODE_TOOLS = [*LEGACY_TOOLS, "episode"]
 SAVE_TOOLS = [*EPISODE_TOOLS, "save"]
@@ -60,7 +61,8 @@ V26_DESTINATIONS = (*V24_DESTINATIONS, ("lib/guidance.py", False))
 V28_DESTINATIONS = (*V26_DESTINATIONS, ("lib/touchstone_handoff.py", False))
 V30_DESTINATIONS = (*V28_DESTINATIONS, *(("lib/" + name, False) for name in PROGRAMS[39:45]))
 V32_DESTINATIONS = (*V30_DESTINATIONS, ("lib/review_contract.py", False))
-DESTINATIONS = (*V32_DESTINATIONS, ("lib/stable_hooks.py", False))
+V34_DESTINATIONS = (*V32_DESTINATIONS, ("lib/stable_hooks.py", False))
+DESTINATIONS = (*V34_DESTINATIONS, ("lib/session_activity.py", False))
 RECALL_MODES = ("reminder", "automatic", "shadow", "async")
 RECORDING_MODES = ("off", "automatic")
 SHADOW_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra")
@@ -396,7 +398,9 @@ def validate_plan(plan):
     validate_tag_config(plan)
     if revision >= 24 and plan.get("host_platform") not in ("windows", "posix"):
         raise ValueError("invalid planned host platform")
-    expected_destinations = (current_destinations(plan_platform(plan)) if revision >= 34 else
+    expected_destinations = (current_destinations(plan_platform(plan)) if revision >= 36 else
+                             tuple((name + ".exe" if executable and plan_platform(plan) == "windows" else name, executable)
+                                   for name, executable in V34_DESTINATIONS) if revision >= 34 else
                              tuple((name + ".exe" if executable and plan_platform(plan) == "windows" else name, executable)
                                    for name, executable in V32_DESTINATIONS) if revision >= 32 else
                              tuple((name + ".exe" if executable and plan_platform(plan) == "windows" else name, executable)
@@ -435,6 +439,12 @@ def validate_plan(plan):
         for value in expected.values()
     ):
         raise ValueError("planned config fingerprints are invalid")
+    if "activity" in plan:
+        if revision < 36:
+            raise ValueError("old install plan cannot contain activity; prepare a new plan")
+        from registry_config import validate_activity_preparation
+        validate_activity_preparation(plan["activity"], cwd=root,
+            activity_mcp=prefix / binary_destination(plan, "mneme-mcp"))
     if revision in EXISTING_SERVICE_REVISIONS:
         validate_existing_service(plan)
     return root, prefix
@@ -526,6 +536,18 @@ def config_outputs(plan, before):
         # tools this project integration actually uses are preapproved.
         block += "".join(f"[mcp_servers.{SERVER}.tools.{name}]\n"
                          "approval_mode = \"approve\"\n" for name in tools)
+    if "activity" in plan:
+        from registry_config import ACTIVITY_SERVER
+        if ACTIVITY_SERVER in parsed.get("mcp_servers", {}):
+            raise ValueError("mneme_session_activity configuration already exists; do not overwrite it")
+        activity = plan["activity"]["mcp"]
+        block += (f"[mcp_servers.{ACTIVITY_SERVER}]\n"
+                  f"command = {toml_value(activity['command'])}\n"
+                  f"args = {toml_value(activity['args'])}\n"
+                  "startup_timeout_sec = 10\n"
+                  'enabled_tools = ["session_activity"]\n'
+                  f"[mcp_servers.{ACTIVITY_SERVER}.tools.session_activity]\n"
+                  'approval_mode = "approve"\n')
     block = (block + f"{END}\n").encode()
     toml = old + block
     tomllib.loads(toml.decode())
@@ -547,9 +569,18 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
             program_root=None, library_helper=None, enroll_existing=False,
             shadow_model=None, shadow_codex=None, reader_model=None, reader_codex=None,
             recording_mode="off", librarian_effort=None, global_preferences=None,
-            store_registry=None, existing_service_config=None, tag_stewardship=None, tag_guide_id=None, memory_config=None):
+            store_registry=None, existing_service_config=None, tag_stewardship=None, tag_guide_id=None, memory_config=None,
+            activity_root=None, activity_config=None, activity_device=None):
     project_root, prefix = Path(project_root).absolute(), Path(prefix).absolute()
     native_pin = None
+    activity = None
+    if activity_root is not None:
+        from registry_config import prepare_activity
+        activity = prepare_activity(cwd=project_root, activity_root=activity_root,
+            activity_config=activity_config, activity_device=activity_device,
+            activity_mcp=prefix / ("bin/mneme-mcp.exe" if HOST_PLATFORM == "windows" else "bin/mneme-mcp"))
+    elif activity_config is not None or activity_device is not None:
+        raise ValueError("activity options require explicit --activity-root")
     if memory_config is not None:
         if (store_registry is not None or global_preferences is not None or reader_model is not None
                 or librarian_effort is not None or recording_mode != "off"
@@ -674,6 +705,11 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
                                  for name, data in before.items()},
             "authority": "project-only operator; direct feedback disabled",
             "does_not": ["initialize stores", "start service", "trust hooks", "edit global config"]}
+    if activity is not None:
+        plan["activity"] = activity
+        plan["does_not"] = ["edit global Codex config" if item == "edit global config" else item
+                            for item in plan["does_not"]]
+        plan["does_not"].append("remove shared activity bindings or diagnostic data on uninstall/failure")
     if global_preferences is not None:
         plan["global_preferences"] = global_preferences
         plan["global_preferences_service_sha256"] = preference_pin
@@ -696,6 +732,8 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
         plan["config_revision"] = EXISTING_SERVICE_REVISION
         plan["existing_service_config"] = existing_service_input(existing_service_config)
         revalidate_existing_service(plan)
+    if activity is not None:
+        plan["authority"] += "; explicit shared activity binding and private diagnostic root"
     plan["plan_sha256"] = plan_hash(plan)
     config_outputs(plan, before)  # Validate the exact merge before emitting a plan.
     return plan
@@ -800,6 +838,9 @@ def apply(plan):
         raise ValueError("install plan targets a different host platform; prepare a new plan")
     revalidate_existing_service(plan)
     revalidate_store_registry(plan)
+    if "activity" in plan:
+        from registry_config import revalidate_activity
+        revalidate_activity(plan["activity"])
     if "global_preferences" in plan:
         from target_policy import global_preferences_policy
         policy = global_preferences_policy({"schema": "mneme.codex-hooks.config.v10",
@@ -858,6 +899,12 @@ def apply(plan):
 
     private_write(prefix / "config/service.json", json_bytes(service))
     private_write(prefix / "config/hooks.json", json_bytes(hook))
+    if "activity" in plan:
+        from registry_config import publish_activity
+        # Shared enrollment is intentionally retained if later project config
+        # publication fails. The pending plan identifies it; recovery/uninstall
+        # must not erase another workspace's diagnostic binding or observations.
+        publish_activity(plan["activity"])
     config_directory(dot_codex)
     after_hashes = _output_hashes(after)
     receipt = {"schema": SCHEMA, "plan": plan,
@@ -888,6 +935,9 @@ def apply(plan):
         pending_recovery = str(prefix / "pending.json")
     result = {"status": "configured", "receipt": str(prefix / "receipt.json"),
               "hook_trust": receipt["hook_trust"], "service": receipt["service"], "store": receipt["store"]}
+    if "activity" in plan:
+        result["activity_config"] = plan["activity"]["config_path"]
+        result["activity_root"] = plan["activity"]["manifest"]["root"]
     if pending_recovery is not None:
         result["pending_recovery"] = pending_recovery
     return result
@@ -907,7 +957,7 @@ def uninstall(receipt_path):
     if after_hashes not in _supported_output_hashes(plan, originals):
         raise ValueError("receipt installed hashes do not match the prepared configuration")
     _restore_known_outputs(dot_codex, originals, after_hashes)
-    return {"status": "configuration removed", "preserved": ["all memory stores", "runtime", "hook state"],
+    return {"status": "configuration removed", "preserved": ["all memory stores", "runtime", "hook state", "shared activity bindings and diagnostic data"],
             "service": "not stopped; stop explicitly using service.py"}
 
 
@@ -936,7 +986,7 @@ def recover(pending_path):
         _restore_known_outputs(dot_codex, originals, after_hashes)
         receipt_path.unlink()
         pending_path.unlink()
-        return {"status": "aborted", "preserved": ["all memory stores", "runtime", "hook state"],
+        return {"status": "aborted", "preserved": ["all memory stores", "runtime", "hook state", "shared activity bindings and diagnostic data"],
                 "prefix": str(prefix)}
     live_hashes = {name: fingerprint(dot_codex / name) for name in CONFIG_NAMES}
     candidates = [hashes for hashes in supported_hashes
@@ -947,7 +997,7 @@ def recover(pending_path):
         raise ValueError("pending configuration is neither original nor a known installed image")
     _restore_known_outputs(dot_codex, originals, candidates[0])
     pending_path.unlink()
-    return {"status": "aborted", "preserved": ["all memory stores", "runtime", "hook state"],
+    return {"status": "aborted", "preserved": ["all memory stores", "runtime", "hook state", "shared activity bindings and diagnostic data"],
             "prefix": str(prefix)}
 
 
@@ -987,6 +1037,11 @@ def main():
                       help="optional reviewed integrations/library/library.py source to pin")
     prep.add_argument("--enroll-existing", action="store_true",
                       help="explicitly authorize descriptor enrollment for an existing store")
+    prep.add_argument("--activity-root", type=Path,
+                      help="explicitly enroll shared activity manifest/private root and separate project activity MCP entry")
+    prep.add_argument("--activity-config", type=Path,
+                      help="activity manifest override; defaults to platform Mneme config directory/activity.json")
+    prep.add_argument("--activity-device", help="optional activity device display label")
     ap = commands.add_parser("apply")
     ap.add_argument("--plan", type=Path, required=True)
     remove = commands.add_parser("uninstall")
@@ -1006,6 +1061,8 @@ def main():
                            tag_stewardship=args.tag_stewardship, tag_guide_id=args.tag_guide_id,
                            existing_service_config=args.existing_service_config,
                            store_registry=args.store_registry, memory_config=args.memory_config,
+                           activity_root=args.activity_root, activity_config=args.activity_config,
+                           activity_device=args.activity_device,
                            global_preferences=(global_preferences_input(args.global_preferences)
                                                if args.global_preferences is not None else None))
             args.output.parent.mkdir(parents=True, exist_ok=True)

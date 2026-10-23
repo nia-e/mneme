@@ -1,0 +1,720 @@
+{
+  "declared_classes": [
+    "public-interface",
+    "capability",
+    "transport-package"
+  ],
+  "downstream_routing": [],
+  "errors": [],
+  "omissions": [],
+  "path_attestations": [
+    {
+      "path": "crates/mneme-app/src/lib.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-app/src/session_activity/local.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-app/src/session_activity/mod.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-app/src/session_activity/tests.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-mcp/src/main.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-mcp/src/session_activity_server.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-mcp/src/session_activity_surface_tests.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-mcp/src/startup.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mneme-mcp/tests/session_activity_stdio.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/src/cli_activity.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/src/cli_config.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/src/cli_help.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/src/cli_init.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/src/cli_owner.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/src/main.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/src/remote_commands.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "crates/mnemed/tests/cli_activity.rs",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "docs/README.md",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "docs/cli-and-mcp.md",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "docs/proposals/session-activity.md",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/README.md",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/change-gates.json",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/control-contracts.json",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/polished-change-gates.json",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/polished-source-files.json",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/smoke-default.json",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/smoke-polished.json",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "docs/validation/session-activity-20261023/source-files.json",
+      "rationale": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes."
+    },
+    {
+      "path": "integrations/codex/README.md",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/core_hook.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/fixtures/session-activity.json",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/hook_launcher.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/hooks.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/install.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/reader_worker.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/recording_jobs.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/registry_config.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/session_activity.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/test_install.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/test_install_activity.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/test_session_activity.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/test_session_activity_hooks.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "integrations/codex/test_session_activity_workers.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    },
+    {
+      "path": "tools/session_activity_smoke.py",
+      "rationale": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication."
+    }
+  ],
+  "path_validation": [
+    {
+      "attestation": null,
+      "attestation_required": false,
+      "path": "Cargo.lock",
+      "requirements": [
+        {
+          "classes": [
+            "transport-package"
+          ],
+          "declaration": "all",
+          "reason": "the lockfile defines shipped dependency resolution"
+        }
+      ]
+    },
+    {
+      "attestation": null,
+      "attestation_required": false,
+      "path": "crates/mneme-app/Cargo.toml",
+      "requirements": [
+        {
+          "classes": [
+            "transport-package"
+          ],
+          "declaration": "all",
+          "reason": "crate manifests define features and packaged artifacts"
+        }
+      ]
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-app/src/lib.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-app/src/session_activity/local.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-app/src/session_activity/mod.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-app/src/session_activity/tests.rs",
+      "requirements": []
+    },
+    {
+      "attestation": null,
+      "attestation_required": false,
+      "path": "crates/mneme-mcp/src/http.rs",
+      "requirements": [
+        {
+          "classes": [
+            "transport-package"
+          ],
+          "declaration": "all",
+          "reason": "the Streamable HTTP implementation is a transport boundary"
+        }
+      ]
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-mcp/src/main.rs",
+      "requirements": [
+        {
+          "classes": [
+            "public-interface",
+            "capability",
+            "transport-package",
+            "storage-admission",
+            "storage-publication",
+            "stale-writer-compatibility"
+          ],
+          "declaration": "any",
+          "reason": "the MCP entry point multiplexes several semantic boundaries"
+        }
+      ]
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-mcp/src/session_activity_server.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-mcp/src/session_activity_surface_tests.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-mcp/src/startup.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mneme-mcp/tests/session_activity_stdio.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/src/cli_activity.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/src/cli_config.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/src/cli_help.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/src/cli_init.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/src/cli_owner.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/src/main.rs",
+      "requirements": [
+        {
+          "classes": [
+            "public-interface",
+            "storage-admission",
+            "storage-publication",
+            "stale-writer-compatibility"
+          ],
+          "declaration": "any",
+          "reason": "the CLI entry point multiplexes public and storage boundaries"
+        }
+      ]
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/src/remote_commands.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "crates/mnemed/tests/cli_activity.rs",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "docs/README.md",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "docs/cli-and-mcp.md",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "docs/proposals/session-activity.md",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/README.md",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/change-gates.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/control-contracts.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/polished-change-gates.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/polished-source-files.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/smoke-default.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/smoke-polished.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Portable validation evidence for session-activity interfaces, capability isolation and packaging; no graph storage or control-ledger format changes.",
+      "attestation_required": true,
+      "path": "docs/validation/session-activity-20261023/source-files.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/README.md",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/core_hook.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/fixtures/session-activity.json",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/hook_launcher.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/hooks.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/install.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/reader_worker.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/recording_jobs.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/registry_config.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/session_activity.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/test_install.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/test_install_activity.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/test_session_activity.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/test_session_activity_hooks.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "integrations/codex/test_session_activity_workers.py",
+      "requirements": []
+    },
+    {
+      "attestation": "Session activity public reports, local read-only authority, metadata-only producers and package/test/evidence wiring. No graph-store or existing control-ledger format change; independent diagnostic scratch is not graph publication.",
+      "attestation_required": true,
+      "path": "tools/session_activity_smoke.py",
+      "requirements": []
+    }
+  ],
+  "pending_attestations": [],
+  "required_evidence_floor": "installed_artifact",
+  "required_gates": [
+    {
+      "id": "API-01",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-02",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-03",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-04",
+      "pack": "public-interface"
+    },
+    {
+      "id": "API-05",
+      "pack": "public-interface"
+    },
+    {
+      "id": "CAP-01",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-02",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-03",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-04",
+      "pack": "capability"
+    },
+    {
+      "id": "CAP-05",
+      "pack": "capability"
+    },
+    {
+      "id": "DIST-01",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-02",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-03",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-04",
+      "pack": "transport-package"
+    },
+    {
+      "id": "DIST-05",
+      "pack": "transport-package"
+    }
+  ],
+  "schema": "mneme.change-gates.v1",
+  "selected_packs": [
+    {
+      "downstream_routing": [],
+      "operation_class": "public-interface",
+      "reference": ".agents/skills/mneme-change-gates/references/public-interface.md",
+      "required_evidence_floor": "component_test",
+      "required_gates": [
+        "API-01",
+        "API-02",
+        "API-03",
+        "API-04",
+        "API-05"
+      ]
+    },
+    {
+      "downstream_routing": [],
+      "operation_class": "capability",
+      "reference": ".agents/skills/mneme-change-gates/references/capability.md",
+      "required_evidence_floor": "component_test",
+      "required_gates": [
+        "CAP-01",
+        "CAP-02",
+        "CAP-03",
+        "CAP-04",
+        "CAP-05"
+      ]
+    },
+    {
+      "downstream_routing": [],
+      "operation_class": "transport-package",
+      "reference": ".agents/skills/mneme-change-gates/references/transport-package.md",
+      "required_evidence_floor": "installed_artifact",
+      "required_gates": [
+        "DIST-01",
+        "DIST-02",
+        "DIST-03",
+        "DIST-04",
+        "DIST-05"
+      ]
+    }
+  ],
+  "status": "selected",
+  "touched_paths": [
+    "Cargo.lock",
+    "crates/mneme-app/Cargo.toml",
+    "crates/mneme-app/src/lib.rs",
+    "crates/mneme-app/src/session_activity/local.rs",
+    "crates/mneme-app/src/session_activity/mod.rs",
+    "crates/mneme-app/src/session_activity/tests.rs",
+    "crates/mneme-mcp/src/http.rs",
+    "crates/mneme-mcp/src/main.rs",
+    "crates/mneme-mcp/src/session_activity_server.rs",
+    "crates/mneme-mcp/src/session_activity_surface_tests.rs",
+    "crates/mneme-mcp/src/startup.rs",
+    "crates/mneme-mcp/tests/session_activity_stdio.rs",
+    "crates/mnemed/src/cli_activity.rs",
+    "crates/mnemed/src/cli_config.rs",
+    "crates/mnemed/src/cli_help.rs",
+    "crates/mnemed/src/cli_init.rs",
+    "crates/mnemed/src/cli_owner.rs",
+    "crates/mnemed/src/main.rs",
+    "crates/mnemed/src/remote_commands.rs",
+    "crates/mnemed/tests/cli_activity.rs",
+    "docs/README.md",
+    "docs/cli-and-mcp.md",
+    "docs/proposals/session-activity.md",
+    "docs/validation/session-activity-20261023/README.md",
+    "docs/validation/session-activity-20261023/change-gates.json",
+    "docs/validation/session-activity-20261023/control-contracts.json",
+    "docs/validation/session-activity-20261023/polished-change-gates.json",
+    "docs/validation/session-activity-20261023/polished-source-files.json",
+    "docs/validation/session-activity-20261023/smoke-default.json",
+    "docs/validation/session-activity-20261023/smoke-polished.json",
+    "docs/validation/session-activity-20261023/source-files.json",
+    "integrations/codex/README.md",
+    "integrations/codex/core_hook.py",
+    "integrations/codex/fixtures/session-activity.json",
+    "integrations/codex/hook_launcher.py",
+    "integrations/codex/hooks.py",
+    "integrations/codex/install.py",
+    "integrations/codex/reader_worker.py",
+    "integrations/codex/recording_jobs.py",
+    "integrations/codex/registry_config.py",
+    "integrations/codex/session_activity.py",
+    "integrations/codex/test_install.py",
+    "integrations/codex/test_install_activity.py",
+    "integrations/codex/test_session_activity.py",
+    "integrations/codex/test_session_activity_hooks.py",
+    "integrations/codex/test_session_activity_workers.py",
+    "tools/session_activity_smoke.py"
+  ],
+  "unclassified_paths": [
+    "crates/mneme-app/src/lib.rs",
+    "crates/mneme-app/src/session_activity/local.rs",
+    "crates/mneme-app/src/session_activity/mod.rs",
+    "crates/mneme-app/src/session_activity/tests.rs",
+    "crates/mneme-mcp/src/session_activity_server.rs",
+    "crates/mneme-mcp/src/session_activity_surface_tests.rs",
+    "crates/mneme-mcp/src/startup.rs",
+    "crates/mneme-mcp/tests/session_activity_stdio.rs",
+    "crates/mnemed/src/cli_activity.rs",
+    "crates/mnemed/src/cli_config.rs",
+    "crates/mnemed/src/cli_help.rs",
+    "crates/mnemed/src/cli_init.rs",
+    "crates/mnemed/src/cli_owner.rs",
+    "crates/mnemed/src/remote_commands.rs",
+    "crates/mnemed/tests/cli_activity.rs",
+    "docs/README.md",
+    "docs/cli-and-mcp.md",
+    "docs/proposals/session-activity.md",
+    "docs/validation/session-activity-20261023/README.md",
+    "docs/validation/session-activity-20261023/change-gates.json",
+    "docs/validation/session-activity-20261023/control-contracts.json",
+    "docs/validation/session-activity-20261023/polished-change-gates.json",
+    "docs/validation/session-activity-20261023/polished-source-files.json",
+    "docs/validation/session-activity-20261023/smoke-default.json",
+    "docs/validation/session-activity-20261023/smoke-polished.json",
+    "docs/validation/session-activity-20261023/source-files.json",
+    "integrations/codex/README.md",
+    "integrations/codex/core_hook.py",
+    "integrations/codex/fixtures/session-activity.json",
+    "integrations/codex/hook_launcher.py",
+    "integrations/codex/hooks.py",
+    "integrations/codex/install.py",
+    "integrations/codex/reader_worker.py",
+    "integrations/codex/recording_jobs.py",
+    "integrations/codex/registry_config.py",
+    "integrations/codex/session_activity.py",
+    "integrations/codex/test_install.py",
+    "integrations/codex/test_install_activity.py",
+    "integrations/codex/test_session_activity.py",
+    "integrations/codex/test_session_activity_hooks.py",
+    "integrations/codex/test_session_activity_workers.py",
+    "tools/session_activity_smoke.py"
+  ]
+}
