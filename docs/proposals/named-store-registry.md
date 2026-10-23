@@ -237,14 +237,21 @@ assessment; it does not silently retarget it. Removed entries revoke queued work
 Already-submitted writes retain unknown-outcome evidence and their exact replay
 identity rather than becoming fresh saves under the new config.
 
-Use one root-session allowance across project and configured stores, plus the
-existing owner-wide maintenance accounting keyed by stable identity rather than
-display name. Bound registry bytes, total purpose bytes, candidate selection,
+Use one durable allowance per accepted packet across project and configured
+stores, not a lifetime root-session cap. Routing and reader selection share the
+accepted user-message packet; recording uses a separate turn-end packet. Paid
+idle maintenance uses the last eligible turn-end packet and the existing
+owner/day accounting keyed by stable identity rather than display name; an idle
+wake-up creates no allowance. Retain lifetime usage as aggregate telemetry.
+Bound registry bytes, total purpose bytes, candidate selection,
 connections, pages, queued jobs, retries, context and inference before work. Read
 and maintenance fairness must not multiply the aggregate envelope by the number
 of entries. Report partial coverage rather than quietly dropping sources.
-Renaming a store, changing purpose, reloading config or restarting the worker does
-not reset spending, unknown-usage fences, cadence or existing native receipts.
+Renaming a store, changing purpose, reloading config, restarting the worker,
+compacting or retrying a packet does not reset packet spending or its unknown-usage
+fence, owner cadence or existing native receipts. Unknown usage belongs to the
+packet that incurred it, not every later packet; owner/day maintenance fences
+remain separate.
 
 Publish a complete validated registry atomically. Workers must observe a coherent
 old or new snapshot, not half old service settings and half new purposes. Do not

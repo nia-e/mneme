@@ -167,7 +167,7 @@ class NominationJobsTests(unittest.TestCase, RecordingFixture):
         self.assertEqual(entry["status"], "emitted")
         self.assertNotIn("envelope", entry)
         self.assertEqual(self.outbox()["emitted"], 1)
-        ok, state = reader._state(self.config, SESSION, lambda value: (copy.deepcopy(value), False), create=False)
+        ok, state = reader._state(self.config, SESSION, lambda value: (copy.deepcopy({key: item for key, item in value.items() if key != "_accounting"}), False), create=False)
         self.assertTrue(ok)
         self.assertEqual(state["active"]["turn"], "turn-2")
         self.assertFalse(state["active"]["closed"])
@@ -207,7 +207,7 @@ class NominationJobsTests(unittest.TestCase, RecordingFixture):
         with patch.object(jobs, "_publish_nomination"):
             _, runtime = self.run_one(reserve=reserve, account=account)
         self.run_one(runtime, reserve=reserve, account=account)
-        ok, accounting = reader._state(self.config, SESSION, lambda data: (copy.deepcopy(data), False), create=False)
+        ok, accounting = reader._state(self.config, SESSION, lambda data: (copy.deepcopy({key: item for key, item in data.items() if key != "_accounting"}), False), create=False)
         self.assertTrue(ok)
         self.assertEqual((accounting["attempts"], accounting["input_tokens"], accounting["output_tokens"]), (1, 20, 5))
         self.assertFalse(accounting["unknown_usage"])

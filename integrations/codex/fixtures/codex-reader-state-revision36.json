@@ -1,0 +1,39 @@
+{
+  "schema": "mneme.reader-state-fixture.v1",
+  "source_commit": "6983606a89449c719192f96691acaf4a8b4f01d5",
+  "source_path": "integrations/codex/reader_worker.py",
+  "source_sha256": "a532a9cce74f7d9b0144fc223ebfdf6956038f7468c4b0a3d8b09c21e6c7cb09",
+  "generation": "Historical _new() with fixed token_hex/time and nonempty lifetime telemetry; no live state.",
+  "state": {
+    "schema": "mneme.codex-reader.state.v2",
+    "generation": "11111111111111111111111111111111",
+    "epoch": 0,
+    "context_generation": 0,
+    "active": null,
+    "pending": null,
+    "inflight": null,
+    "reservation": null,
+    "ready": null,
+    "fence": "",
+    "prior": "",
+    "emitted": [],
+    "attempts": 71,
+    "input_tokens": 350000,
+    "output_tokens": 25000,
+    "cached_input_tokens": 50000,
+    "reasoning_output_tokens": 12000,
+    "unknown_usage": true,
+    "worker_pid": null,
+    "worker_identity": null,
+    "counts": {
+      "selected": 0,
+      "ready": 0,
+      "emitted": 0,
+      "dropped": 0,
+      "failed": 0,
+      "abstained": 0,
+      "capacity": 0
+    },
+    "touched": 1720000000.0
+  }
+}

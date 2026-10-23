@@ -137,8 +137,18 @@ class NativeHookConfigTests(unittest.TestCase):
             registry_runtime.admit_session(config, event)
             ledger = hooks._state_path(self.root / "state", "session-1")
             old_ledger = ledger.read_bytes()
-            ok, _ = reader_worker._state(config, "session-1", lambda data: (data.update(
-                attempts=3, input_tokens=21, output_tokens=4, reservation={"paid": "original-intent"}), True))
+            def paid_original_intent(data):
+                accounting = data["_accounting"]
+                packet, _ = accounting.bind("user_message", "original-intent",
+                    hashlib.sha256(b"original intent").hexdigest())
+                for index in range(3):
+                    call = f"fixture-original-intent-{index}"
+                    self.assertTrue(accounting.reserve(packet, call, {"paid": "original-intent"}, reader_worker.resolve(config)))
+                    if index < 2:
+                        self.assertTrue(accounting.settle(call, {"provider_attempt": index == 0,
+                            "usage": {"input_tokens": 21, "output_tokens": 4}}))
+                return None, True
+            ok, _ = reader_worker._state(config, "session-1", paid_original_intent)
             self.assertTrue(ok)
             self.assertEqual(registry_recording.validate_payload(config, job).record.intent, "cross-workspace")
             changed = copy.deepcopy(value)

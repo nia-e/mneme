@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import secrets
+import sqlite3
+from contextlib import closing
 import host_files
 import os
 from pathlib import Path
@@ -22,6 +26,43 @@ CARD_A = {"id": "01K123456789ABCDEFGHJKMNPQ", "summary": "A surprising link",
 CARD_B = {"id": "01K123456789ABCDEFGHJKMNPR", "summary": "A contradiction",
           "status": "active", "source": "test", "fingerprint": "b"}
 PROJECT_DB = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
+def seed_accounting(data, mutate):
+    """Test-only fixture writer. Production intentionally ignores JSON spend edits.
+
+    Legacy tests describe a near-limit/paid state by mutating the familiar view;
+    materialize that fixture in the canonical DB, not a writable JSON mirror.
+    """
+    ledger = data["_accounting"]
+    fields = reader.packet_accounting.FIELDS
+    before = {key: data.get(key) for key in (*fields, "reservation")}
+    mutate(data)
+    changes = {key: data.get(key) for key in fields if data.get(key) != before[key]}
+    reservation_changed = data.get("reservation") != before["reservation"]
+    if not changes and not reservation_changed:
+        return
+    active = data.get("active") or {}
+    kind = "turn_end" if active.get("closed") else "user_message"
+    packet, _ = ledger.bind(kind, active.get("turn", "fixture"),
+                           active.get("request", hashlib.sha256(b"fixture").hexdigest()))
+    if changes:
+        aggregate, routing = ledger._totals()
+        aggregate.update(changes)
+        ledger._save_totals(aggregate, routing)
+        usage = ledger.usage(packet)
+        usage.update(changes)
+        ledger.db.execute("UPDATE packets SET usage=? WHERE id=?", (json.dumps(usage), packet))
+    if reservation_changed:
+        ledger.db.execute("DELETE FROM calls WHERE status='reserved'")
+        payload = data.get("reservation")
+        if payload is not None:
+            call_id = ("recording:" + payload["recording"] if "recording" in payload
+                       else "fixture:" + secrets.token_hex(16))
+            stage = "routing" if "routing" in payload else "recording" if "recording" in payload else "selector"
+            ledger.db.execute("INSERT INTO calls VALUES (?,?,?,?, 'reserved',NULL)",
+                              (call_id, packet, stage, json.dumps(payload)))
+    ledger.dirty = True
 
 
 class FakeRuntime:
@@ -59,12 +100,12 @@ class ReaderStateTests(unittest.TestCase):
     def test_stewardship_preserves_selector_room_and_pending_priority(self):
         reader.notice(self.config,self.event(),True)
         self.assertFalse(reader._stewardship_reserve(self.config,"s1","stewardship:first"))
-        reader._state(self.config,"s1",lambda data:(data.update(pending=None,inflight=None),True),create=False)
+        reader.close_turn(self.config, "s1", "t1")
         self.assertTrue(reader._stewardship_reserve(self.config,"s1","stewardship:second"))
         self.assertTrue(reader._recording_account(self.config,"s1","stewardship:second",
             {"provider_attempt":True,"usage":{"input_tokens":50,"output_tokens":5}}))
         budget=reader.resolve(self.config)
-        reader._state(self.config,"s1",lambda data:(data.update(attempts=budget.attempts-1),True),create=False)
+        self.set_state(lambda data: data.update(attempts=budget.attempts-1))
         self.assertFalse(reader._stewardship_reserve(self.config,"s1","stewardship:third"))
 
     def test_stewardship_snapshot_is_fenced_by_reset_and_trivial_prompt(self):
@@ -130,8 +171,8 @@ class ReaderStateTests(unittest.TestCase):
         path, _ = reader._paths(self.config, "s1")
         return json.loads(path.read_text())
 
-    def set_state(self, mutate):
-        ok, _ = reader._state(self.config, "s1", lambda data: (mutate(data), True))
+    def set_state(self, mutate, config=None):
+        ok, _ = reader._state(config or self.config, "s1", lambda data: (seed_accounting(data, mutate), True))
         self.assertTrue(ok)
 
     def test_v7_rebound_discards_optional_views_but_preserves_paid_identity_and_usage(self):
@@ -140,12 +181,11 @@ class ReaderStateTests(unittest.TestCase):
         old = {**self.config, "_config_path": hook}
         reader.notice(old, self.event(), True)
         pending = self.state()["pending"]
-        ok, _ = reader._state(old, "s1", lambda data: (data.update(
+        self.set_state(lambda data: data.update(
             reservation=pending, inflight=pending, ready={**pending, "cards": [CARD_A], "fence": data["fence"]},
             prior="old task context", emitted=[[CARD_A["id"], CARD_A["fingerprint"]]],
             attempts=3, input_tokens=11, output_tokens=2, cached_input_tokens=5,
-            reasoning_output_tokens=1), True))
-        self.assertTrue(ok)
+            reasoning_output_tokens=1), config=old)
         before = self.state()
         hook.write_text(json.dumps({"schema": "mneme.codex-hooks.config.v8"}))
         current = {**old}
@@ -206,9 +246,9 @@ class ReaderStateTests(unittest.TestCase):
                     owner.assertFalse(state["unknown_usage"])
                     owner.assertEqual((state["attempts"],state["input_tokens"],state["output_tokens"]),(2,20,4))
                 else:
-                    native.assert_not_called()
+                    self.assertTrue(native.called)
                     owner.assertTrue(state["unknown_usage"])
-                    owner.assertEqual(state["attempts"],1)
+                    owner.assertEqual((state["attempts"], state["input_tokens"], state["output_tokens"]), (2,10,2))
                 # Independent session ledger for the second subcase.
                 for path in reader._directory(self.config).glob("*"):
                     if path.is_file(): path.unlink()
@@ -390,7 +430,7 @@ class ReaderStateTests(unittest.TestCase):
                     self.assertIsNone(state['ready'])
                     self.assertEqual(state['counts']['dropped'], 1)
 
-    def test_unknown_usage_soft_stops_future_work(self):
+    def test_unknown_usage_blocks_only_original_packet(self):
         reader.notice(self.config, self.event(), True)
         FakeRuntime.result = {"selected_ids": [CARD_A["id"]], "reason": "selected",
                               "usage": None, "provider_attempt": True, "elapsed_ms": 1}
@@ -398,9 +438,10 @@ class ReaderStateTests(unittest.TestCase):
             reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=0.15)
         self.assertEqual(reader.consume(self.config, self.event())["cards"], [])
         self.assertTrue(self.state()["unknown_usage"])
-        self.assertEqual(reader.notice(self.config, self.event("t2"), True)["outcome"], "budget")
+        self.assertEqual(reader.notice(self.config, self.event("t2"), True)["outcome"], "queued")
         reader.reset(self.config, "s1")
-        self.assertEqual(reader.notice(self.config, self.event("t3"), True)["outcome"], "budget")
+        self.assertEqual(reader.notice(self.config, self.event(), True)["outcome"], "replay")
+        self.assertEqual(reader.notice(self.config, self.event("t3"), True)["outcome"], "queued")
 
     def test_stale_completion_discarded(self):
         from hook_recall import _unknown_discovery
@@ -422,7 +463,7 @@ class ReaderStateTests(unittest.TestCase):
         self.assertEqual((self.state()["input_tokens"], self.state()["output_tokens"]), (20, 4))
         self.assertEqual(self.state()["last_selection"]["discovery"], discovery)
 
-    def test_restart_after_reserved_call_halts_admission(self):
+    def test_restart_after_reserved_call_halts_only_original_packet(self):
         reader.notice(self.config, self.event(), True)
         def crashed(data):
             data["inflight"] = data["pending"]
@@ -430,12 +471,14 @@ class ReaderStateTests(unittest.TestCase):
             data["attempts"] = 1
         self.set_state(crashed)
         reader.notice(self.config, self.event("t2", "new work"), True)
-        with patch("hook_recall.collect_reader") as native:
-            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=0.05)
-        native.assert_not_called()
+        with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}) as native:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=0.15)
+        native.assert_called_once()
         self.assertTrue(self.state()["unknown_usage"])
-        self.assertEqual(self.state()["attempts"], 1)
-        self.assertEqual(reader.notice(self.config, self.event("t3"), True)["outcome"], "budget")
+        self.assertEqual((self.state()["attempts"], self.state()["input_tokens"]), (2, 10))
+        self.assertEqual(self.state()["last_selection"]["origin"]["turn"], "t2")
+        self.assertEqual(reader.notice(self.config, self.event(), True)["outcome"], "replay")
+        self.assertEqual(reader.notice(self.config, self.event("t3"), True)["outcome"], "queued")
 
     def test_more_than_eight_candidates_reach_selector(self):
         cards = [{**CARD_A, "id":"01ARZ3NDEKTSV4RRFFQ69G5FA" + str(i)} for i in range(10)]
@@ -785,12 +828,13 @@ class ReaderStateTests(unittest.TestCase):
 
     def test_recording_uses_shared_reservation_and_settles_only_once(self):
         reader.notice(self.config, self.event(), False)
+        reader.close_turn(self.config, "s1", "t1")
         self.assertTrue(reader._recording_reserve(self.config, "s1", "job"))
         self.assertFalse(reader._recording_reserve(self.config, "s1", "second"))
         result = {"provider_attempt": True, "usage": {"input_tokens": 9, "output_tokens": 3,
                   "cached_input_tokens": 7, "reasoning_output_tokens": 2}}
         self.assertTrue(reader._recording_account(self.config, "s1", "job", result))
-        self.assertFalse(reader._recording_account(self.config, "s1", "job", result))
+        self.assertTrue(reader._recording_account(self.config, "s1", "job", result))  # Durable duplicate receipt.
         self.assertEqual((self.state()["attempts"], self.state()["input_tokens"], self.state()["output_tokens"]), (1, 9, 3))
         self.assertEqual((self.state()["cached_input_tokens"], self.state()["reasoning_output_tokens"]), (7, 2))
         self.assertTrue(reader._recording_reserve(self.config, "s1", "unknown"))
@@ -802,6 +846,7 @@ class ReaderStateTests(unittest.TestCase):
 
     def test_breakdown_missing_invalid_or_historical_unknown_never_becomes_zero(self):
         reader.notice(self.config, self.event(), False)
+        reader.close_turn(self.config, "s1", "t1")
         self.assertEqual((self.state()["cached_input_tokens"], self.state()["reasoning_output_tokens"]), (0, 0))
         for index, fields in enumerate(({}, {"cached_input_tokens": True, "reasoning_output_tokens": 5},
                                       {"cached_input_tokens": 11, "reasoning_output_tokens": -1},
@@ -1058,9 +1103,9 @@ class ReaderStateTests(unittest.TestCase):
         reader.notice(config, self.event(), False)
         pending = [True]
         seen = []
-        def step(_config, session, runtime, reserve, account):
+        def step(_config, session, runtime, reserve, account, *, reserve_packet):
             self.assertEqual(session, "s1")
-            self.assertTrue(reserve("closed-job"))
+            self.assertTrue(reserve_packet("closed-job", {"turn": "t1", "request": hashlib.sha256(self.event()["prompt"].encode()).hexdigest()}))
             self.assertTrue(account("closed-job", {"provider_attempt": True,
                            "usage": {"input_tokens": 12, "output_tokens": 2}}))
             seen.append(runtime)
@@ -1126,13 +1171,302 @@ class ReaderStateTests(unittest.TestCase):
                     self.assertFalse(worker.is_alive())
                 data = json.loads(reader._paths(config, "s1")[0].read_text())
                 self.assertEqual(len(handoffs), 1)
-                self.assertEqual(data["attempts"], 1 if unknown else 2)
-                self.assertEqual(data["input_tokens"], 0 if unknown else 20)
+                self.assertEqual(data["attempts"], 2)
+                self.assertEqual(data["input_tokens"], 10 if unknown else 20)
                 self.assertEqual(data["unknown_usage"], unknown)
                 self.assertEqual(data["cached_input_tokens"], None if unknown else 14)
                 self.assertEqual(data["reasoning_output_tokens"], None if unknown else 2)
                 if data["ready"] is not None:
                     self.assertEqual(data["ready"]["turn"], "t2")
+
+
+class PacketAccountingIntegrationTests(unittest.TestCase):
+    setUp = ReaderStateTests.setUp
+    event = ReaderStateTests.event
+    state = ReaderStateTests.state
+    set_state = ReaderStateTests.set_state
+
+    def test_exhausted_user_packet_does_not_block_end_or_next_user_packet(self):
+        reader.notice(self.config, self.event(), True)
+        limit = reader.resolve(self.config).attempts
+        self.set_state(lambda data: data.update(attempts=limit))
+        with patch("hook_recall.collect_reader") as collect:
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.01)
+        collect.assert_not_called()
+        reader.close_turn(self.config, "s1", "t1")
+        self.assertTrue(reader._recording_reserve(self.config, "s1", "end-a"))
+        self.assertTrue(reader._recording_account(self.config, "s1", "end-a", {
+            "provider_attempt": True, "usage": {"input_tokens": 3, "output_tokens": 1}}))
+        self.assertEqual(reader.notice(self.config, self.event("t2"), True)["outcome"], "queued")
+        with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}):
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.05)
+        self.assertEqual((self.state()["attempts"], self.state()["input_tokens"], self.state()["output_tokens"]),
+                         (limit + 2, 13, 3))
+        self.assertEqual(self.state()["last_selection"]["origin"]["turn"], "t2")
+
+    def test_historical_replay_survives_history_eviction_reset_and_policy_reload(self):
+        for index in range(260):
+            self.assertEqual(reader.notice(self.config, self.event("packet-" + str(index)), False)["outcome"], "skipped")
+        current = {**self.config, "librarian_effort": "high"}
+        current.pop("_reader_config_pin", None)
+        reader.reset(current, "s1")
+        self.assertEqual(reader.notice(current, self.event("packet-0"), True)["outcome"], "replay")
+        self.assertEqual(reader.notice(current, self.event("packet-0", "different prompt"), True)["outcome"], "invalid_identity")
+        self.assertEqual(reader.notice(current, self.event("new"), True)["outcome"], "queued")
+        before = self.state()
+        fence = reader._fence(current, "s1")
+        self.assertEqual(reader.notice(current, self.event("packet-0"), True)["outcome"], "replay")
+        self.assertEqual(self.state()["pending"], before["pending"])
+        self.assertEqual(reader._fence(current, "s1"), fence)
+        reader.end_session(current, "s1")
+        reader.reset(current, "s1")
+        self.assertEqual(reader.notice(current, self.event("packet-0"), True)["outcome"], "replay")
+        ok, count = reader._state(current, "s1", lambda data: (
+            data["_accounting"].db.execute("SELECT count(*) FROM packets WHERE kind='user_message'").fetchone()[0], False))
+        self.assertTrue(ok)
+        self.assertEqual(count, 261)
+
+    def test_turnless_lifecycle_does_not_create_paid_maintenance_allowance(self):
+        reader.notice(self.config, self.event(), False)
+        reader.close_turn(self.config, "s1", None)
+        reader.end_session(self.config, "s1")
+        reader.reset(self.config, "s1")
+        self.assertFalse(reader._stewardship_reserve(self.config, "s1", "idle-without-end"))
+        self.assertFalse(reader._recording_reserve(self.config, "s1", "no-bound-source"))
+        ok, count = reader._state(self.config, "s1", lambda data: (
+            data["_accounting"].db.execute("SELECT count(*) FROM packets WHERE kind='turn_end'").fetchone()[0], False))
+        self.assertTrue(ok)
+        self.assertEqual(count, 0)
+
+    def test_old_end_replay_and_recording_settlement_do_not_rewind_latest_packet(self):
+        digest = hashlib.sha256(self.event()["prompt"].encode()).hexdigest()
+        reader.notice(self.config, self.event(), False)
+        reader.close_turn(self.config, "s1", "t1")
+        self.assertTrue(reader._recording_reserve(self.config, "s1", "old-recording"))
+        reader.notice(self.config, self.event("t2"), False)
+        reader.close_turn(self.config, "s1", "t2")
+        result = {"provider_attempt": True, "usage": {"input_tokens": 9, "output_tokens": 3}}
+        self.assertTrue(reader._recording_account(self.config, "s1", "old-recording", result))
+        self.assertTrue(reader._recording_account(self.config, "s1", "old-recording", result))
+        reader.close_turn(self.config, "s1", "t1")
+        def inspect(data):
+            ledger = data["_accounting"]
+            old = ledger.lookup("turn_end", "t1", digest)
+            new = ledger.lookup("turn_end", "t2", digest)
+            return (ledger.usage(old), ledger.usage(new), ledger.latest_end() == new), False
+        ok, (old, new, latest) = reader._state(self.config, "s1", inspect)
+        self.assertTrue(ok)
+        self.assertEqual((old["attempts"], old["input_tokens"]), (1, 9))
+        self.assertEqual((new["attempts"], new["input_tokens"]), (0, 0))
+        self.assertTrue(latest)
+        self.assertEqual((self.state()["attempts"], self.state()["input_tokens"]), (1, 9))
+
+    def test_json_publication_failure_after_reservation_never_invokes_provider(self):
+        reader.notice(self.config, self.event(), True)
+        original_write = reader._write
+        durable = []
+        def fail_reserved(path, data):
+            if data.get("reservation") is not None and not durable:
+                with closing(sqlite3.connect(path.with_suffix(".accounting.sqlite3"))) as db:
+                    durable.append(db.execute("SELECT count(*) FROM calls WHERE status='reserved'").fetchone()[0])
+                self.assertIsNone(json.loads(path.read_bytes())["reservation"])
+                raise OSError("injected JSON publication failure after durable reservation")
+            return original_write(path, data)
+        with patch.object(reader, "_write", side_effect=fail_reserved), \
+             patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}):
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.05)
+        self.assertEqual(durable, [1])
+        self.assertEqual(sum(len(runtime.calls) for runtime in FakeRuntime.instances), 0)
+        self.assertEqual(self.state()["attempts"], 1)
+        self.assertEqual(reader.notice(self.config, self.event(), True)["outcome"], "replay")
+
+    def test_db_accounting_repair_never_resurrects_old_delivery_state(self):
+        reader.notice(self.config, self.event(), False)
+        reader.close_turn(self.config, "s1", "t1")
+        with patch.object(reader, "_write", side_effect=OSError("lost JSON publication")):
+            self.assertFalse(reader._recording_reserve(self.config, "s1", "durable"))
+        path, _ = reader._paths(self.config, "s1")
+        state = json.loads(path.read_bytes())
+        state.update(active=None, pending=None, ready=None, inflight=None)
+        path.write_text(json.dumps(state))
+        self.assertTrue(reader._state(self.config, "s1", lambda data: (None, False))[0])
+        repaired = self.state()
+        self.assertEqual(repaired["reservation"], {"recording": "durable"})
+        self.assertEqual(repaired["attempts"], 1)
+        for key in ("active", "pending", "ready", "inflight"):
+            self.assertIsNone(repaired[key])
+        self.assertTrue(reader._recording_account(self.config, "s1", "durable", {"provider_attempt": False}))
+
+    def legacy(self, config=None, *, active=False, **changes):
+        config = config or self.config
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "codex-reader-state-revision36.json").read_bytes())
+        data = fixture["state"]
+        if reader.capture_source.source_host(config) == "claude_code":
+            data["schema"] = "mneme.claude-reader.state.v1"
+        if active:
+            data["active"] = {"turn": "old", "request": hashlib.sha256(b"old prompt").hexdigest(),
+                              "epoch": 0, "cue": "old prompt", "closed": False}
+        data.update(changes)
+        path, _ = reader._paths(config, "s1")
+        host_files.ensure_state_directory(path.parent)
+        raw = json.dumps(data, indent=2).encode() + b"\n"
+        path.write_bytes(raw)
+        return path, raw
+
+    def test_legacy_migration_crash_requires_exact_preimage_and_tombstones_active(self):
+        for host in ("codex", "claude_code"):
+            with self.subTest(host=host):
+                config = ({**self.config, "source_host": host, "schema": "mneme.claude-hooks.config.v1"}
+                          if host == "claude_code" else dict(self.config))
+                config.pop("_reader_config_pin", None)
+                path, raw = self.legacy(config, active=True)
+                with patch.object(reader, "_write", side_effect=OSError("after DB commit")):
+                    self.assertFalse(reader._state(config, "s1", lambda data: (None, False))[0])
+                self.assertEqual(path.read_bytes(), raw)
+                db_path = path.with_suffix(".accounting.sqlite3")
+                self.assertTrue(db_path.is_file())
+                path.write_bytes(raw + b" ")
+                self.assertFalse(reader._state(config, "s1", lambda data: (None, False))[0])
+                self.assertEqual(path.read_bytes(), raw + b" ")
+                path.write_bytes(raw)
+                self.assertTrue(reader._state(config, "s1", lambda data: (None, False))[0])
+                state = json.loads(path.read_bytes())
+                self.assertEqual(state["schema"], reader.capture_source.schema(config, reader.SCHEMA, "reader"))
+                self.assertEqual((state["attempts"], state["input_tokens"], state["unknown_usage"]), (71, 350000, True))
+                with closing(sqlite3.connect(db_path)) as db:
+                    self.assertEqual(db.execute("SELECT legacy_hash,legacy_raw FROM meta").fetchone(),
+                                     (hashlib.sha256(raw).hexdigest(), raw))
+                self.assertEqual(reader.notice(config, self.event("old", "old prompt"), True)["outcome"], "replay")
+                ok, allowed = reader._state(config, "s1", lambda data: (data["_accounting"].allowed(
+                    data["_accounting"].lookup("user_message", "old", hashlib.sha256(b"old prompt").hexdigest()),
+                    reader.resolve(config)), False))
+                self.assertTrue(ok)
+                self.assertFalse(allowed)
+
+    def test_legacy_migration_holds_worker_lease_and_refuses_outstanding_work(self):
+        path, raw = self.legacy()
+        with path.with_suffix(".worker.lock").open("a+b") as lease:
+            host_files.lock_file(lease)
+            self.assertFalse(reader._state(self.config, "s1", lambda data: (None, False))[0])
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertFalse(path.with_suffix(".accounting.sqlite3").exists())
+        for index, changes in enumerate(({"inflight": {"turn": "old"}},
+                {"reservation": {"recording": "old"}}, {"worker_pid": os.getpid()},
+                {"worker_identity": {"ambiguous": True}})):
+            config = {**self.config, "state_dir": self.root / ("legacy-" + str(index))}
+            with self.subTest(changes=changes):
+                refused, before = self.legacy(config, **changes)
+                self.assertFalse(reader._state(config, "s1", lambda data: (None, False))[0])
+                self.assertEqual(refused.read_bytes(), before)
+                self.assertFalse(refused.with_suffix(".accounting.sqlite3").exists())
+        self.assertTrue(reader._state(self.config, "s1", lambda data: (None, False))[0])
+
+    def test_direct_serve_migrates_quiescent_legacy_before_claiming_worker_lease(self):
+        path, raw = self.legacy()
+        # Existing reader states have the original session lock sibling; serve
+        # is existing-only and does not invent a missing parent lock.
+        path.with_suffix(".lock").touch(mode=0o600)
+        reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.01)
+        state = json.loads(path.read_bytes())
+        self.assertEqual(state["schema"], reader.SCHEMA)
+        self.assertEqual(state["attempts"], 71)
+        self.assertEqual(FakeRuntime.instances, [])
+        with closing(sqlite3.connect(path.with_suffix(".accounting.sqlite3"))) as db:
+            self.assertEqual(db.execute("SELECT legacy_raw FROM meta").fetchone()[0], raw)
+        with path.with_suffix(".worker.lock").open("rb+") as lease:
+            host_files.lock_file(lease, blocking=False)
+
+    def test_retained_closed_legacy_end_cannot_gain_new_maintenance_budget(self):
+        path, raw = self.legacy(active=True)
+        legacy = json.loads(raw)
+        legacy["active"]["closed"] = True
+        path.write_text(json.dumps(legacy))
+        self.assertTrue(reader._state(self.config, "s1", lambda data: (None, False))[0])
+        reader.close_turn(self.config, "s1", "old")
+        self.assertFalse(reader._stewardship_reserve(self.config, "s1", "old-end-upkeep"))
+        self.assertFalse(reader._recording_reserve(self.config, "s1", "old-source", {
+            "turn": "old", "request": hashlib.sha256(b"old prompt").hexdigest()}))
+        self.assertEqual(self.state()["attempts"], 71)
+
+    def test_ended_session_abandons_orphan_user_call_before_reserving_end_work(self):
+        self.config["recording_mode"] = "automatic"
+        reader.notice(self.config, self.event(), True)
+        self.set_state(lambda data: data.update(inflight=data["pending"], reservation=data["pending"], attempts=1))
+        pending = [True]
+        calls = []
+        def step(config, session, runtime, reserve, account, *, reserve_packet):
+            self.assertTrue(reserve_packet("end-after-orphan", {
+                "turn": "t1", "request": hashlib.sha256(self.event()["prompt"].encode()).hexdigest()}))
+            self.assertTrue(account("end-after-orphan", {
+                "provider_attempt": True, "usage": {"input_tokens": 7, "output_tokens": 2}}))
+            pending[0] = False
+            calls.append(True)
+            return True
+        with patch("recording_jobs.close_turn"), \
+             patch("recording_jobs.has_work", side_effect=lambda *_: pending[0]), \
+             patch("recording_jobs.step", side_effect=step):
+            reader.end_session(self.config, "s1")
+            reader.serve(self.config, "s1", runtime_factory=FakeRuntime, idle_seconds=.2)
+        self.assertEqual(calls, [True])
+        self.assertEqual((self.state()["attempts"], self.state()["input_tokens"]), (2, 7))
+        self.assertTrue(self.state()["unknown_usage"])
+        self.assertIsNone(self.state()["reservation"])
+
+    def test_current_reader_missing_db_and_unknown_schema_refuse_both_hosts(self):
+        for host in ("codex", "claude_code"):
+            config = ({**self.config, "source_host": host, "schema": "mneme.claude-hooks.config.v1"}
+                      if host == "claude_code" else dict(self.config))
+            config.pop("_reader_config_pin", None)
+            with self.subTest(host=host):
+                self.assertTrue(reader._state(config, "s1", lambda data: (None, True))[0])
+                path, _ = reader._paths(config, "s1")
+                before = path.read_bytes()
+                path.with_suffix(".accounting.sqlite3").unlink()
+                self.assertFalse(reader._state(config, "s1", lambda data: (None, True))[0])
+                self.assertEqual(path.read_bytes(), before)
+                self.assertFalse(path.with_suffix(".accounting.sqlite3").exists())
+                state = json.loads(before)
+                state["schema"] = "mneme.unknown-reader.state.v999"
+                unknown = json.dumps(state).encode()
+                path.write_bytes(unknown)
+                self.assertFalse(reader._state(config, "s1", lambda data: (None, True))[0])
+                self.assertEqual(path.read_bytes(), unknown)
+                self.assertFalse(path.with_suffix(".accounting.sqlite3").exists())
+
+    def test_halted_runtime_is_replaced_only_for_new_packet(self):
+        owner = self
+        calls = []
+        class HaltingRuntime(FakeRuntime):
+            def __init__(self, config, scratch_dir):
+                super().__init__(config, scratch_dir)
+                self._halted = False
+            def select(self, dialogue, cards):
+                owner.assertFalse(self._halted)
+                calls.append(self)
+                if len(calls) == 1:
+                    self._halted = True
+                    reader.notice(owner.config, owner.event("t2"), True)
+                    return {"selected_ids": [], "reason": "usage_unknown", "provider_attempt": True, "usage": None}
+                return dict(FakeRuntime.result)
+        reader.notice(self.config, self.event(), True)
+        with patch("hook_recall.collect_reader", return_value={"outcome": "ok", "cards": [CARD_A]}):
+            reader.serve(self.config, "s1", runtime_factory=HaltingRuntime, idle_seconds=.1)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNot(calls[0], calls[1])
+        self.assertTrue(calls[0]._halted)
+        self.assertTrue(calls[0].closed)
+        self.assertTrue(self.state()["unknown_usage"])
+        self.assertEqual(self.state()["last_selection"]["origin"]["turn"], "t2")
+        probe = reader._PacketRuntime(HaltingRuntime, self.config, self.root)
+        self.assertTrue(probe.bind("same"))
+        probe.runtime._halted = True
+        original = probe.runtime
+        self.assertFalse(probe.bind("same"))
+        self.assertIs(probe.runtime, original)
+        self.assertTrue(original._halted)
+        self.assertTrue(probe.bind("different"))
+        self.assertIsNot(probe.runtime, original)
+        probe.close()
 
 
 class ReaderWakeTests(unittest.TestCase):
@@ -1193,10 +1527,10 @@ class ReaderWakeTests(unittest.TestCase):
                 self.assertEqual(reader.notice(self.config, self.event("t2"), True), {"outcome": "busy"})
             self.assertEqual(lock.call_args.kwargs, {"timeout": 0})
         self.assertEqual(self.state(), before)
-        # The skipped prompt still invalidates old output, but does not acquire
-        # admission later after a Stop or newer prompt may have passed it.
-        self.assertNotEqual(reader._fence(self.config, "s1"), before["fence"])
-        self.assertEqual(reader.consume(self.config, self.event("t1"))["outcome"], "stale")
+        # Without the identity lock this may be an ancient replay: it must not
+        # invalidate the current packet or acquire admission later.
+        self.assertEqual(reader._fence(self.config, "s1"), before["fence"])
+        self.assertEqual(reader.consume(self.config, self.event("t1"))["outcome"], "empty")
         self.assertEqual(self.state()["attempts"], 0)
 
     def test_waiting_state_refuses_config_changed_while_lock_was_held(self):
@@ -1224,11 +1558,9 @@ class ReaderWakeTests(unittest.TestCase):
         self.set_state(lambda data: data.update(attempts=1, reservation={"recording": "paid"}))
         def settle(data):
             self.assertEqual(data["reservation"], {"recording": "paid"})
-            data["reservation"] = None
-            result = {"usage": {"input_tokens": 7, "output_tokens": 2,
+            result = {"provider_attempt": True, "usage": {"input_tokens": 7, "output_tokens": 2,
                                 "cached_input_tokens": 3, "reasoning_output_tokens": 1}}
-            reader._settle_usage(data, result, (7, 2))
-            return True, True
+            return data["_accounting"].settle("recording:paid", result), True
         result = self.after_short_contention(lambda: reader._state(self.config, "s1", settle,
             allow_stale=True, lock_timeout=reader.STATE_LOCK_SECONDS),
             while_locked=lambda: self.config["service_config"].write_text('{"changed":true}'))
@@ -1316,12 +1648,12 @@ class ReaderWakeTests(unittest.TestCase):
         self.assertEqual(self.state()["attempts"], 0)
 
     def test_idle_pending_without_allowance_or_with_paid_work_does_not_renew(self):
-        for change in ({"unknown_usage": True}, {"attempts": reader.resolve(self.config).attempts},
-                       {"reservation": {"recording": "paid"}}, {"ended": True}):
+        for index, change in enumerate(({"unknown_usage": True}, {"attempts": reader.resolve(self.config).attempts},
+                       {"reservation": {"recording": "paid"}}, {"ended": True})):
             with self.subTest(change=change):
                 reader.reset(self.config, "s1")
                 self.set_state(lambda data: data.update(unknown_usage=False, attempts=0, reservation=None))
-                reader.notice(self.config, self.event(), True)
+                reader.notice(self.config, self.event(turn="idle-" + str(index)), True)
                 self.set_state(lambda data: data.update(change))
                 before = self.state()
                 with patch.object(reader, "background") as wake:
@@ -1683,8 +2015,8 @@ class MiscReaderWorkerTests(unittest.TestCase):
 
     def test_root_rebind_refuses_state_and_preserves_paid_identity(self):
         reader.notice(self.config, {"session_id": "s1", "turn_id": "t1", "prompt": "Investigate"}, True)
-        reader._state(self.config, "s1", lambda d: (d.update(attempts=3, input_tokens=21,
-            output_tokens=4, reservation={"paid": "original workspace"}), True))
+        reader._state(self.config, "s1", lambda d: (seed_accounting(d, lambda value: value.update(attempts=3, input_tokens=21,
+            output_tokens=4, reservation={"paid": "original workspace"})), True))
         path, _ = reader._paths(self.config, "s1")
         before = path.read_bytes()
         other = self.root / "other"
@@ -1697,8 +2029,8 @@ class MiscReaderWorkerTests(unittest.TestCase):
 
     def test_same_origin_config_drift_never_refunds_paid_usage(self):
         reader.notice(self.config, {"session_id": "s1", "turn_id": "t1", "prompt": "Investigate"}, True)
-        reader._state(self.config, "s1", lambda d: (d.update(attempts=3, input_tokens=21,
-            output_tokens=4, reservation={"paid": "original workspace"}), True))
+        reader._state(self.config, "s1", lambda d: (seed_accounting(d, lambda value: value.update(attempts=3, input_tokens=21,
+            output_tokens=4, reservation={"paid": "original workspace"})), True))
         self.static["librarian_effort"] = "high"
         self.hook.write_text(json.dumps(self.static))
         from hooks import _config

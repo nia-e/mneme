@@ -1693,7 +1693,7 @@ def _publish_nomination(config, session, key):
     _update(config, session, key, publish)
 
 
-def step(config, session, runtime, reserve, account, *, native_write=None, native_maintenance=None):
+def step(config, session, runtime, reserve, account, *, native_write=None, native_maintenance=None, reserve_packet=None):
     """Do not let optional journal I/O spend this step's later native budget."""
     scope = None
     try:
@@ -1704,7 +1704,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
         scope = None
     try:
         return _step(config, session, runtime, reserve, account,
-                     native_write=native_write, native_maintenance=native_maintenance)
+                     native_write=native_write, native_maintenance=native_maintenance, reserve_packet=reserve_packet)
     finally:
         if scope is not None:
             try:
@@ -1713,7 +1713,7 @@ def step(config, session, runtime, reserve, account, *, native_write=None, nativ
                 pass  # Failure to drain diagnostics never changes functional completion.
 
 
-def _step(config, session, runtime, reserve, account, *, native_write=None, native_maintenance=None):
+def _step(config, session, runtime, reserve, account, *, native_write=None, native_maintenance=None, reserve_packet=None):
     """One bounded worker step. Callback accounting is shared with reader usage."""
     now = time.time()
     def choose(data):
@@ -1953,7 +1953,10 @@ def _step(config, session, runtime, reserve, account, *, native_write=None, nati
             ok, claimed = _update(config, session, key, assessment_intent)
             if not ok or not claimed:
                 return True
-            if not reserve(key):
+            admitted = (reserve_packet(key, {"turn": job["turn_id"],
+                         "request": job["admission"]["expected_prompt_sha256"]})
+                        if reserve_packet is not None else reserve(key))
+            if not admitted:
                 finish("deferred", "shared_budget"); return True
             if (_cancelled(config, session, job)
                     or not _unchanged(config, job)):

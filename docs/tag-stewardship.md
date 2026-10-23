@@ -144,12 +144,18 @@ recording-off configurations do not run maintenance. Follow the
 [installation and update guide](../integrations/codex/README.md) when preparing a
 new runtime. Do not edit a live bundle or reset usage ledgers to enable this work.
 
-Maintenance shares the parent session budget, protects foreground recall, and
-also accounts inference against one device-local owner allowance per UTC day.
-Multiple sessions using the same database must not multiply that allowance.
-Native reads, context bytes, inference and retries are bounded. Unknown provider usage retains
-conservative spending evidence and fences model admission for that owner-day and
-the parent session; a new UTC day does not clear the session's uncertainty.
+Paid maintenance charges the last eligible turn-end packet, protects foreground
+recall, and also accounts inference against the unchanged device-local owner
+allowance per UTC day. Without an eligible packet it cannot spend; idle wake-ups
+do not mint allowances. Multiple sessions using the same database must not
+multiply the owner/day allowance. Packet replay, restart, configuration changes
+and compaction do not refill a packet. Lifetime session counters remain telemetry,
+not admission limits.
+
+Native reads, context bytes, inference and retries are bounded. Unknown provider
+usage retains conservative spending evidence and fences model admission for that
+owner-day and its owning packet. A new UTC day does not clear that packet's
+uncertainty, and a new packet does not clear the owner-day fence.
 The worker runs opportunistically through the existing lifecycle, not as an
 always-running scheduler. A bounded connection, catalog validation and owner-identity
 exchange precedes maintenance admission. Content batches then share a durable
@@ -168,10 +174,12 @@ inference and edits, but another eligible session can still make bounded
 scan-only progress. Inference retains the runtime's separate 45-second deadline;
 the native I/O window does not shorten it.
 
-These are admission and accounting limits, not hard provider billing caps. Prompt
-and answer bytes, attempts and deadlines are bounded; the provider can use more
-reasoning or output tokens than reserved for the final admitted call. Missing usage
-fences further model spending rather than being counted as free work.
+These are admission and accounting limits, not hard provider billing caps. The
+per-packet low/medium/high thresholds remain 24/48/96 attempts, 125k/250k/500k input
+tokens and 10k/20k/40k output tokens. Prompt and answer bytes, per-call bounds and
+deadlines are unchanged; the provider can use more reasoning or output tokens than
+reserved for the final admitted call. Missing usage fences further model spending
+for the affected packet and owner-day rather than being counted as free work.
 
 The auxiliary journal is indexed SQLite under
 `$XDG_STATE_HOME/mneme/codex-stewardship/DB_ID.sqlite3` (default:

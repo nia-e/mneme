@@ -518,6 +518,7 @@ mod tests {
             "registry_recording.py",
             "core_hook.py",
             "assessment.py",
+            "packet_accounting.py",
             "capture_source.py",
             "claude_observer.py",
             "claude_runtime.py",

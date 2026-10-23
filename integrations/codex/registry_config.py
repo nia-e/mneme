@@ -413,12 +413,13 @@ def quiescence(state_dir):
 
     Probe existing files only, without creating/removing locks or editing paid
     accounting. This is not a lock held across migration and cannot prevent a
-    still-enabled old hook from spawning a later worker.
+    still-enabled old hook from spawning a later worker. Historical state is
+    recognized only for liveness inspection, not accounting or migration admission.
     """
     import host_files
     import host_process
     import time
-    from reader_worker import _valid as valid_ledger
+    from reader_worker import _valid as valid_ledger, valid_legacy_state
     from hooks import _bounded_json, MAX_STATE, HookError
     root = canonical_path(state_dir)
     directory = root / "reader"
@@ -465,7 +466,9 @@ def quiescence(state_dir):
                 if decoded_bytes > 8 * 1024 * 1024:
                     result["coverage"] = "ledger byte limit"
                     return result
-                if (not valid_ledger(data) or "worker_pid" not in data
+                # Historical shape recognition is inspection-only: old worker state
+                # must remain visible without reopening legacy writer admission.
+                if (not (valid_ledger(data) or valid_legacy_state(data)) or "worker_pid" not in data
                         or data["worker_pid"] is not None and (type(data["worker_pid"]) is not int or data["worker_pid"] <= 0)
                         or data.get("worker_identity") is not None and not isinstance(data["worker_identity"], dict)):
                     raise ValueError("unrecognized worker ledger")

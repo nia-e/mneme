@@ -86,15 +86,16 @@ class InstallTests(unittest.TestCase):
         shared = ("assessment.py", "capture_source.py", "claude_observer.py", "claude_runtime.py",
                   "claude_config.py", "claude_hooks.py")
         self.assertEqual(install.PROGRAMS[39:45], shared)
-        self.assertEqual(install.PROGRAMS[45:], ("review_contract.py", "stable_hooks.py", "session_activity.py"))
+        self.assertEqual(install.PROGRAMS[45:], ("review_contract.py", "stable_hooks.py", "session_activity.py", "packet_accounting.py"))
         self.assertEqual(len(install.PROGRAMS), len(set(install.PROGRAMS)))
         self.assertEqual(install.V30_DESTINATIONS,
                          (*install.V28_DESTINATIONS, *(("lib/" + name, False) for name in shared)))
         self.assertEqual(install.V32_DESTINATIONS, (*install.V30_DESTINATIONS, ("lib/review_contract.py", False)))
         self.assertEqual(install.V34_DESTINATIONS, (*install.V32_DESTINATIONS, ("lib/stable_hooks.py", False)))
-        self.assertEqual(install.DESTINATIONS, (*install.V34_DESTINATIONS, ("lib/session_activity.py", False)))
-        self.assertEqual(install.CONFIG_REVISION, 36)
-        self.assertEqual(install.EXISTING_SERVICE_REVISION, 37)
+        self.assertEqual(install.V36_DESTINATIONS, (*install.V34_DESTINATIONS, ("lib/session_activity.py", False)))
+        self.assertEqual(install.DESTINATIONS, (*install.V36_DESTINATIONS, ("lib/packet_accounting.py", False)))
+        self.assertEqual(install.CONFIG_REVISION, 38)
+        self.assertEqual(install.EXISTING_SERVICE_REVISION, 39)
 
     def test_genuine_revision30_inventory_and_old_plans_do_not_gain_review_module(self):
         fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
@@ -146,6 +147,59 @@ class InstallTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "installation files are incomplete"):
                             install.validate_plan(invalid)
 
+    def test_genuine_revision36_inventory_and_platform_plans_stay_exact(self):
+        fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
+            "codex-install-inventory-revision36.json").read_text())
+        self.assertEqual(fixture["schema"], "mneme.installer-inventory-fixture.v1")
+        self.assertEqual((fixture["config_revision"], fixture["existing_service_revision"]), (36, 37))
+        self.assertTrue(fixture["source_commit"].startswith("6983606a8944"))
+        self.assertEqual(list(install.PROGRAMS[:48]), fixture["programs"])
+        self.assertEqual(install.V36_DESTINATIONS,
+                         (("bin/mnemed", True), ("bin/mneme-mcp", True),
+                          *(("lib/" + name, False) for name in fixture["programs"])))
+        owner, _ = self.existing_owner()
+        for platform in ("posix", "windows"):
+            for revision in (36, 37):
+                with self.subTest(platform=platform, revision=revision), \
+                        patch("install.HOST_PLATFORM", platform), \
+                        patch("install.sys.executable", str(self.sources / "python.exe")
+                              if platform == "windows" else sys.executable):
+                    current = self.existing_plan(owner) if revision == 37 else self.plan()
+                    install.validate_plan(current)
+                    old = copy.deepcopy(current)
+                    old["config_revision"] = revision
+                    old["files"] = old["files"][:len(install.V36_DESTINATIONS)]
+                    old["plan_sha256"] = install.plan_hash(old)
+                    install.validate_plan(old)
+                    self.assertNotIn("lib/packet_accounting.py", [row["destination"] for row in old["files"]])
+                    self.assertEqual(old["files"][0]["destination"],
+                                     "bin/mnemed.exe" if platform == "windows" else "bin/mnemed")
+                    for candidate, wrong_files in ((old, current["files"]), (current, old["files"])):
+                        invalid = copy.deepcopy(candidate)
+                        invalid["files"] = wrong_files
+                        invalid["plan_sha256"] = install.plan_hash(invalid)
+                        with self.assertRaisesRegex(ValueError, "installation files are incomplete"):
+                            install.validate_plan(invalid)
+
+    def test_current_copied_packet_accounting_imports_without_source_tree(self):
+        plan = install.prepare(self.project, self.prefix, self.sources / "mnemed",
+                               self.sources / "mneme-mcp", 18765,
+                               program_root=Path(install.__file__).parent)
+        install.apply(plan)
+        helper = self.prefix / "lib/packet_accounting.py"
+        row = next(row for row in plan["files"] if row["destination"] == "lib/packet_accounting.py")
+        self.assertEqual(install.digest(helper.read_bytes()), row["sha256"])
+        result = subprocess.run([sys.executable, "-E", "-S", "-B", "-c",
+            "import pathlib, sys; root = pathlib.Path(sys.argv[1]); sys.path[:] = [str(root), "
+            "*[entry for entry in sys.path if entry and entry != sys.argv[2]]]; "
+            "import packet_accounting, reader_worker; "
+            "assert pathlib.Path(packet_accounting.__file__) == root / 'packet_accounting.py'; "
+            "assert pathlib.Path(reader_worker.__file__) == root / 'reader_worker.py'",
+            str(helper.parent), str(Path(install.__file__).parent)],
+            cwd=self.base, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.project / ".mneme").exists())
+
     def test_copied_stable_hook_helper_has_standalone_cli(self):
         plan = install.prepare(self.project, self.prefix, self.sources / "mnemed",
                                self.sources / "mneme-mcp", 18765,
@@ -164,7 +218,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result["service"], "not started")
         self.assertEqual(result["store"], "not initialized")
 
-    def test_revision26_through33_receipts_preserve_outputs_uninstall_and_recovery(self):
+    def test_revision26_through37_receipts_preserve_outputs_uninstall_and_recovery(self):
         config_dir = self.project / ".codex"
         config_dir.mkdir()
         originals = {"config.toml": b'model = "fixture"\n',
@@ -173,9 +227,10 @@ class InstallTests(unittest.TestCase):
             (config_dir / name).write_bytes(data)
         owner, _ = self.existing_owner()
         plans = {revision: self.existing_plan(owner) if revision % 2 else self.plan()
-                 for revision in range(26, 34)}
+                 for revision in range(26, 38)}
         inventories = {26: install.V26_DESTINATIONS, 28: install.V28_DESTINATIONS,
-                       30: install.V30_DESTINATIONS, 32: install.V32_DESTINATIONS}
+                       30: install.V30_DESTINATIONS, 32: install.V32_DESTINATIONS,
+                       34: install.V34_DESTINATIONS, 36: install.V36_DESTINATIONS}
         # Old plans must not acquire a dependency on a newly packaged helper.
         new_helpers = {name: (self.sources / name).read_bytes() for name in install.PROGRAMS[38:]}
         for name in new_helpers:
@@ -200,7 +255,9 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual((prefix / "lib/touchstone_handoff.py").exists(), revision >= 28)
                 self.assertEqual((prefix / "lib/assessment.py").exists(), revision >= 30)
                 self.assertEqual((prefix / "lib/review_contract.py").exists(), revision >= 32)
-                self.assertFalse((prefix / "lib/stable_hooks.py").exists())
+                self.assertEqual((prefix / "lib/stable_hooks.py").exists(), revision >= 34)
+                self.assertEqual((prefix / "lib/session_activity.py").exists(), revision >= 36)
+                self.assertFalse((prefix / "lib/packet_accounting.py").exists())
                 receipt_path = Path(result["receipt"])
                 receipt_bytes = receipt_path.read_bytes()
                 import hook_trust
@@ -718,7 +775,8 @@ class InstallTests(unittest.TestCase):
         self.assertIn('lib/target_policy.py', [row['destination'] for row in plan['files']])
         self.assertEqual(plan['files'][len(install.V28_DESTINATIONS)-1]['destination'], 'lib/touchstone_handoff.py')
         self.assertEqual(plan['files'][len(install.V32_DESTINATIONS)-1]['destination'], 'lib/review_contract.py')
-        self.assertEqual(plan['files'][-1]['destination'], 'lib/session_activity.py')
+        self.assertEqual(plan['files'][len(install.V36_DESTINATIONS)-1]['destination'], 'lib/session_activity.py')
+        self.assertEqual(plan['files'][-1]['destination'], 'lib/packet_accounting.py')
         for effort in ('low', 'medium', 'high'):
             altered = copy.deepcopy(plan); altered['librarian_effort'] = effort
             altered['plan_sha256'] = install.plan_hash(altered)
@@ -877,7 +935,7 @@ class InstallTests(unittest.TestCase):
                  'misc_binding.py', 'misc_config.py', 'hook_launcher.py', 'tag_config.py',
                  'tag_context.py', 'stewardship.py', 'stewardship_contract.py', 'host_files.py', 'host_process.py', 'host_platform.py',
                  'store_registry.py', 'registry_config.py', 'registry_runtime.py', 'registry_reader.py', 'registry_recording.py', 'core_hook.py', 'guidance.py', 'touchstone_handoff.py',
-                 'assessment.py', 'capture_source.py', 'claude_observer.py', 'claude_runtime.py', 'claude_config.py', 'claude_hooks.py', 'review_contract.py', 'stable_hooks.py', 'session_activity.py')
+                 'assessment.py', 'capture_source.py', 'claude_observer.py', 'claude_runtime.py', 'claude_config.py', 'claude_hooks.py', 'review_contract.py', 'stable_hooks.py', 'session_activity.py', 'packet_accounting.py')
         self.assertEqual([row['destination'] for row in plan['files'][-len(names):]],
                          ['lib/' + name for name in names])
         result = install.apply(plan)

@@ -263,8 +263,17 @@ class NamedReaderTests(unittest.TestCase):
     def test_same_session_config_change_preserves_spending_and_cursors(self):
         event = {"session_id": "s", "turn_id": "t", "prompt": "Investigate owner configuration"}
         reader_worker.notice(self.config, event, True)
-        reader_worker._state(self.config, "s", lambda data: (data.update(attempts=3, input_tokens=123,
-            output_tokens=17, read_cursor=OWNERS[0], maintenance_cursor=OWNERS[2]), True), create=False)
+        def paid_original_packet(data):
+            accounting = data["_accounting"]
+            packet = reader_worker._packet(data, data["active"])
+            for index in range(3):
+                call = f"fixture-original-packet-{index}"
+                self.assertTrue(accounting.reserve(packet, call, {}, reader_worker.resolve(self.config)))
+                self.assertTrue(accounting.settle(call, {"provider_attempt": index == 0,
+                    "usage": {"input_tokens": 123, "output_tokens": 17}}))
+            data.update(read_cursor=OWNERS[0], maintenance_cursor=OWNERS[2])
+            return None, True
+        self.assertTrue(reader_worker._state(self.config, "s", paid_original_packet, create=False)[0])
         self.entries[1]["purpose"] = "Revised description is not a new session allowance."
         self.freeze()
         reader_worker.notice(self.config, {**event, "turn_id": "t2"}, True)

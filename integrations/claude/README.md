@@ -129,10 +129,14 @@ API key. That environment policy is not proof of actual subscription billing.
 Do not use it where a managed-policy-free process is required.
 
 Whole-call model usage includes uncached input, cache reads and cache writes;
-reasoning usage is unknown, not free. Missing/ambiguous usage halts paid work
-without automatic retry. Receipts omit raw reasoning, prompts, stderr and
-credentials. Selected public transcript evidence can still reach the configured
-provider: enabling capture is not a promise that material remains on-device.
+reasoning usage is unknown, not free. Missing/ambiguous usage halts paid work for
+its owning turn-end packet, not the whole session, without automatic retry.
+Later packets do not clear that retained uncertainty. Packet accounting leaves
+the per-call `CLAUDE_CODE_MAX_OUTPUT_TOKENS` setting unchanged (10k/20k/40k by
+effort), along with prompt/answer bounds and deadlines. Receipts omit raw
+reasoning, prompts, stderr and credentials. Selected public transcript evidence
+can still reach the configured provider: enabling capture is not a promise that
+material remains on-device.
 
 ## Meaning is not approval
 

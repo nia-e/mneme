@@ -46,9 +46,9 @@ def directory(config, lane):
 def schema(config, codex_schema, lane):
     if source_host(config) == CODEX:
         return codex_schema
-    # A v1 reader must refuse snapshot jobs rather than re-observe their growing
-    # transcript under the old whole-turn contract. Other lanes are unchanged.
-    return f"mneme.claude-{lane}.state.v{2 if lane == 'recording' else 1}"
+    # Recording v2 fences the old whole-turn observer; reader v2 fences the old
+    # lifetime accounting writer. Other lanes retain their existing schemas.
+    return f"mneme.claude-{lane}.state.v{2 if lane in ('recording', 'reader') else 1}"
 
 
 def _observer(config):

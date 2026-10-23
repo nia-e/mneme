@@ -1,7 +1,8 @@
 """One immutable, explicit host policy for the async librarian's three roles.
 
-These uncalibrated admission/work presets are not relevance quotas or guaranteed
-provider/backend spending caps. Actual usage remains in the parent session ledger.
+These uncalibrated per-packet admission/work presets are not relevance quotas or
+guaranteed provider/backend spending caps. Lifetime usage remains aggregate
+telemetry; paid idle maintenance also retains its separate owner/day allowance.
 """
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -15,8 +16,9 @@ IDLE_SECONDS = 300
 # This is a ceiling, not a target or model context allowance. Native transport
 # and bridge decoding both count; effort still governs prompts, time and tokens.
 NATIVE_READ_BYTES = 512 * 1024
-# selector prompt/answer, background latency seconds/read bytes, shared attempts,
-# input/output tokens, ordinary-selector room before optional matcher work.
+# selector prompt/answer, background latency seconds/read bytes, packet attempts,
+# packet input/output tokens, ordinary-selector room before optional matcher work.
+# Per-call bounds (including Claude's output-token setting) remain unchanged.
 _PRESETS = (
     (8192, 2048, 10.0, NATIVE_READ_BYTES, 24, 125000, 10000, 8192, 2048),
     (12288, 4096, 15.0, NATIVE_READ_BYTES, 48, 250000, 20000, 16384, 4096),

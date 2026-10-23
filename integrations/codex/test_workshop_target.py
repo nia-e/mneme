@@ -238,8 +238,17 @@ class WorkshopTargetTests(unittest.TestCase):
     def test_target_rebind_does_not_replenish_paid_reader_accounting(self):
         event = {"session_id": "fixture", "turn_id": "turn", "prompt": "Recall our shared decision"}
         reader_worker.notice(self.config, event, True)
-        ok, _ = reader_worker._state(self.config, "fixture", lambda data: (data.update(
-            attempts=3, input_tokens=11, output_tokens=2, reservation={"paid": "identity"}), True))
+        def paid_original_identity(data):
+            accounting = data["_accounting"]
+            packet = reader_worker._packet(data, data["active"])
+            for index in range(3):
+                call = f"fixture-original-identity-{index}"
+                self.assertTrue(accounting.reserve(packet, call, {"paid": "identity"}, reader_worker.resolve(self.config)))
+                if index < 2:
+                    self.assertTrue(accounting.settle(call, {"provider_attempt": index == 0,
+                        "usage": {"input_tokens": 11, "output_tokens": 2}}))
+            return None, True
+        ok, _ = reader_worker._state(self.config, "fixture", paid_original_identity)
         self.assertTrue(ok)
         path, _ = reader_worker._paths(self.config, "fixture")
         self.config["store_target"]["db_id"] = OTHER

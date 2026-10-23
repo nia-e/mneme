@@ -265,6 +265,36 @@ class RegistryLifecycleTests(unittest.TestCase):
                 (directory / "fixture.json").write_text(text)
                 self.assertFalse(registry_config.quiescence(directory.parent)["quiescent_snapshot"])
 
+    def test_quiescence_inspects_historical_state_without_migration_or_refill(self):
+        import reader_worker
+        fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
+            "codex-reader-state-revision36.json").read_text())
+        self.assertEqual(fixture["schema"], "mneme.reader-state-fixture.v1")
+        self.assertTrue(fixture["source_commit"].startswith("6983606a8944"))
+        value = fixture["state"]
+        self.assertEqual(value["schema"], "mneme.codex-reader.state.v2")
+        self.assertFalse(reader_worker._valid(value))
+        self.assertTrue(reader_worker.valid_legacy_state(value))
+        directory = self.base / "state/reader"
+        directory.mkdir(parents=True)
+        ledger = directory / "retained.json"
+        raw = json.dumps(value, indent=2).encode()
+        ledger.write_bytes(raw)
+        inventory = sorted(path.name for path in directory.iterdir())
+        with patch("reader_worker._state", side_effect=AssertionError("inspection must not migrate")):
+            report = registry_config.quiescence(directory.parent)
+        self.assertTrue(report["quiescent_snapshot"])
+        self.assertEqual(report["ledgers_checked"], 1)
+        self.assertEqual(ledger.read_bytes(), raw)
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), inventory)
+        # Historical recognition must still reject live ownership and unknown schemas.
+        for changes in ({"worker_pid": os.getpid()}, {"schema": "mneme.codex-reader.state.v999"}):
+            with self.subTest(changes=changes):
+                changed = json.dumps({**value, **changes}).encode()
+                ledger.write_bytes(changed)
+                self.assertFalse(registry_config.quiescence(directory.parent)["quiescent_snapshot"])
+                self.assertEqual(ledger.read_bytes(), changed)
+
     def test_quiescence_malformed_identity_is_not_proof_of_pid_reuse(self):
         import os
         from reader_worker import _new

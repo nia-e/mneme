@@ -416,18 +416,29 @@ The reader selects source-backed context from the configured store and delivers
 it at eligible tool boundaries. Late results are discarded; no-tool turns may
 receive no automatic context. Manual recall remains available.
 
-`low`, `medium`, and `high` select resource presets, not relevance quotas or
-billing caps. Medium admits up to 48 attempts / 250k input / 20k output tokens
-per session; low halves and high doubles these thresholds. The final admitted
-call can overshoot. Reader, routing and recording share accounting; missing usage
-halts further model admission. There is no automatic provider retry or escalation.
+`low`, `medium`, and `high` select per-packet admission thresholds, not relevance
+quotas or guaranteed billing caps:
+
+| Effort | Attempts | Input tokens | Output tokens |
+| --- | ---: | ---: | ---: |
+| Low | 24 | 125k | 10k |
+| Medium | 48 | 250k | 20k |
+| High | 96 | 500k | 40k |
+
+The final admitted call can overshoot. An accepted user message owns one packet
+shared by routing and reader selection; completed-turn recording owns a separate
+turn-end packet. Retries, worker restarts, configuration changes and compaction do
+not refill either packet. Lifetime usage counters remain aggregate telemetry,
+not admission limits. Missing usage blocks further model admission for its owning
+packet, not later packets; a later eligible packet can use a fresh runtime without
+clearing the earlier uncertainty. There is no automatic provider retry or escalation.
 
 Each native read round has a **512 KiB decoded-work ceiling**, shared across its
 selected owners at every effort. It counts both native transport and bridge
 decoding; it is not the model's context window or a target to fill. Prompt sizes,
 native deadlines (10/15/20 seconds) and model token/attempt allowances still follow
 the effort preset. The shared ceiling also applies to recorder and maintenance
-read batches; their cadence, model allowance and permissions are unchanged.
+read batches; their per-call limits, cadence and permissions are unchanged.
 
 The reader stops fetching when its retained context packet first fills; it does
 not spend the remaining allowance hunting for smaller cards or additional owners.
@@ -450,8 +461,9 @@ Recording does not automatically merge memories, forget nodes or edit core.
 Fresh preparations with automatic recording also enable `tag_stewardship`.
 The existing assessor can propose ordinary topic tags using bounded native
 vocabulary context. Idle work revisits changed and older notes, applying only
-content-guarded tag edits. It shares session accounting and a device-local owner
-allowance; it does not run inference on reads.
+content-guarded tag edits. Paid idle work charges the last eligible turn-end packet
+and the existing device-local owner/day allowance; idle wake-ups never mint an
+allowance. It does not run inference on reads.
 
 Use `--no-tag-stewardship` to leave this off, or `--tag-guide-id ID` to select a
 same-owner guide whose complete canonical summary is at most 2 KiB. A guide body
@@ -785,10 +797,23 @@ a failed write; a lost acknowledgement can still mean the write committed.
 The new runtime upgrades the recognized project/workshop v1 checkpoint ledger
 under its existing lock. It saves the exact preimage beside the ledger and changes
 only the schema: checkpoint outcomes, deferred work and session identity survive.
-Reader/recording usage ledgers are not reset or replayed. Ordinary event handling
-still applies its normal retention and context-reset rules afterward. Unknown,
-malformed or legacy misc state requires inspection; it is not silently replaced.
-Store upgrades are separate offline operations with paired database/body backups.
+Ordinary event handling still applies its normal retention and context-reset rules
+afterward. Unknown, malformed or legacy misc state requires inspection; it is not
+silently replaced.
+
+Reader accounting upgrades Codex v2 to v3 and Claude v1 to v2 separately. The exact
+legacy state and aggregate usage are retained, not reset or replayed. Migration
+requires quiescent workers and no outstanding reservation or in-flight work;
+unrecognized or mismatched state is refused. Migration blocks replay of the retained
+active user-message identity; it cannot reconstruct already-pruned legacy packet
+identities. Packet accounting is canonical in a private per-session SQLite ledger
+beside the reader JSON, with the same hashed-session basename and an
+`.accounting.sqlite3` suffix. It retains the exact legacy JSON bytes and their
+SHA-256; reader JSON mirrors aggregate usage for existing diagnostics. Back up
+and retain both together with their matching runtime and configuration. After new
+accounting writes, selecting an old runtime or changing only the JSON schema is
+not a rollback. Store upgrades remain separate offline operations with paired
+database/body backups.
 
 ### Hook input omissions are not owner failures
 

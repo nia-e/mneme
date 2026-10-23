@@ -62,12 +62,18 @@ class ReaderActivityTests(unittest.TestCase):
         self.assertEqual(reader.notice(self.config, self.event, False)["outcome"], "skipped")
         self.assertEqual(self.events[-1][3]["reason"], "non_substantive")
         second = {**self.event, "turn_id": "turn-2"}
-        reader._state(self.config, self.event["session_id"], lambda d: (d.update(unknown_usage=True), True))
-        self.assertEqual(reader.notice(self.config, second, True)["outcome"], "budget")
-        self.assertEqual(self.events[-1][3]["reason"], "unknown_accounting")
+        def poison_original(data):
+            ledger = data["_accounting"]
+            packet = reader._packet(data, data["active"])
+            ledger.reserve(packet, "unknown-first", {}, reader.resolve(self.config))
+            ledger.settle("unknown-first", {"provider_attempt": True, "usage": None})
+            return None, True
+        reader._state(self.config, self.event["session_id"], poison_original)
+        self.assertEqual(reader.notice(self.config, second, True)["outcome"], "queued")
+        self.assertEqual(self.events[-1][2], "queued")
         with patch("session_activity.emit", side_effect=RuntimeError("PRIVATE PROVIDER FAILURE")):
             third = {**self.event, "turn_id": "turn-3"}
-            self.assertEqual(reader.notice(self.config, third, True)["outcome"], "budget")
+            self.assertEqual(reader.notice(self.config, third, True)["outcome"], "queued")
 
     def test_consumption_is_not_output_and_keeps_exact_origin(self):
         self.ready()

@@ -57,7 +57,12 @@ assert data['ended'] and data['worker_pid'] is None, 'empty lifecycle created wo
 assert not marker.exists(), 'provider invoked by empty lifecycle'
 def seed(data):
     token=hashlib.sha256(b'').hexdigest()
-    data.update(attempts=1,input_tokens=17,output_tokens=3)
+    ledger=data['_accounting']
+    packet,_=ledger.bind('user_message','fixture',token)
+    # Synthetic fixture usage, not a provider invocation. The JSON totals are
+    # read-only mirrors of this canonical reservation and settlement.
+    assert ledger.reserve(packet,'smoke:ended-fixture',{'fixture':'ended-marker'},reader_worker.resolve(config)), 'fixture reservation refused'
+    assert ledger.settle('smoke:ended-fixture',{'provider_attempt':True,'usage':{'input_tokens':17,'output_tokens':3}}), 'fixture settlement failed'
     data['active']={'turn':'fixture','request':token,'epoch':data['epoch'],'cue':'','closed':False}
     data['pending']={'turn':'fixture','request':token,'epoch':data['epoch']}
     return None,True

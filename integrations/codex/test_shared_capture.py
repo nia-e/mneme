@@ -350,7 +350,8 @@ print(json.dumps({"old_schema": old["schema"], "old_accepts_old": bool(prior._va
         with self._native_reads():
             return jobs.step(self.claude, "s", runtime,
                 lambda key: reader._recording_reserve(self.claude, "s", key),
-                lambda key, result: reader._recording_account(self.claude, "s", key, result), **kwargs)
+                lambda key, result: reader._recording_account(self.claude, "s", key, result),
+                reserve_packet=lambda key, packet: reader._recording_reserve(self.claude, "s", key, packet), **kwargs)
 
     def _proposal_result(self, observed):
         _, context = contract.prepare(observed)

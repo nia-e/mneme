@@ -805,6 +805,25 @@ class RecordingJobsTests(unittest.TestCase, RecordingFixture):
         self.assertEqual(self.writes, [])
         self.assertEqual(self.state()["counts"]["deferred"], 1)
 
+    def test_packet_callback_receives_immutable_job_turn_not_later_active_turn(self):
+        original = self.closed()
+        runtime = FakeRuntime(self)
+        bindings = []
+        def reserve_packet(key, packet):
+            bindings.append((key, packet))
+            return self.reserve(key)
+        self.assertTrue(jobs.step(self.config, SESSION, runtime,
+            lambda key: self.fail("legacy callback must not select packet identity"), self.account,
+            reserve_packet=reserve_packet, native_write=self.native_write))
+        self.assertEqual(bindings, [(original["key"], {"turn": "turn-1",
+            "request": original["admission"]["expected_prompt_sha256"]})])
+        self.assertEqual(len(runtime.calls), 1)
+        # The original recording receipt/one-shot identity remains unchanged.
+        self.assertEqual(self.accounts[0][0], original["key"])
+        self.assertFalse(jobs.step(self.config, SESSION, runtime, self.reserve, self.account,
+                                  reserve_packet=reserve_packet, native_write=self.native_write))
+        self.assertEqual(len(bindings), 1)
+
     def test_account_failure_preserves_ambiguity_and_prohibits_native_write(self):
         self.closed()
         _, runtime = self.step(account=lambda key, result: False)

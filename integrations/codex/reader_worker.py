@@ -15,12 +15,14 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import sqlite3
 import sys
 import time
 from typing import Any
 import host_files
 import host_process
 import capture_source
+import packet_accounting
 from rollout_primitives import read_regular
 from reader_contract import plan as reader_plan, prepare as reader_prepare
 from librarian_policy import resolve, LibrarianBudget, IDLE_SECONDS
@@ -28,7 +30,7 @@ from touchstone_contract import delivery_cache_fingerprint
 from target_policy import (target_kwargs, global_preferences_policy,
                            GLOBAL_PREFERENCE_CUE)
 
-SCHEMA = "mneme.codex-reader.state.v2"
+SCHEMA = "mneme.codex-reader.state.v3"
 ID = re.compile(r"^[A-Za-z0-9_:.-]{1,160}$")
 MAX_STATE = 18_000
 MAX_SELECTION_BYTES = 4096
@@ -161,8 +163,18 @@ def _new(config=None) -> dict[str, Any]:
             "touched": time.time()}
 
 
+def valid_legacy_state(data: Any, config=None) -> bool:
+    """Read-only historical shape check; NOT migration or writer admission."""
+    host = "codex" if config is None else capture_source.source_host(config)
+    return _valid_shape(data, "mneme.codex-reader.state.v2" if host == "codex" else "mneme.claude-reader.state.v1")
+
+
 def _valid(data: Any, config=None) -> bool:
     expected = SCHEMA if config is None else capture_source.schema(config, SCHEMA, "reader")
+    return _valid_shape(data, expected)
+
+
+def _valid_shape(data: Any, expected: str) -> bool:
     return (isinstance(data, dict) and data.get("schema") == expected
             and isinstance(data.get("generation"), str) and len(data["generation"]) == 32
             and isinstance(data.get("epoch"), int) and data["epoch"] >= 0
@@ -282,23 +294,6 @@ def _rotate_context(config: dict[str, Any], session_id: str) -> bool:
         return False
 
 
-def _looks_replayed(config: dict[str, Any], session_id: str, turn: str, digest: str) -> bool:
-    """A bounded unlocked hint; the locked notice still decides identity."""
-    try:
-        path, _ = _paths(config, session_id)
-        if not path.is_file() or path.stat().st_size > MAX_STATE:
-            return False
-        raw = read_regular(path, MAX_STATE)
-        if len(raw) > MAX_STATE:
-            return False
-        data = json.loads(raw)
-        active = (data.get("active") if _valid(data, config) and
-                  data.get("config_pin") == _config_current(config) else None)
-        return isinstance(active, dict) and active.get("turn") == turn and active.get("request") == digest
-    except (OSError, ValueError, UnicodeError, TypeError):
-        return False
-
-
 def _config_current(config):
     """Production hooks capture this at load; direct offline callers capture once."""
     from recording_jobs import _config_digest
@@ -314,6 +309,7 @@ def _config_current(config):
 def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = True,
            allow_stale: bool = False, lock_timeout: float = 0):
     """Return (success, result); retry only lock contention within this allowance."""
+    migration_lease = None
     try:
         pin = None if allow_stale else _config_current(config)
         if not allow_stale and pin is None:
@@ -325,7 +321,9 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
         fd = host_files.open_regular(lock, os.O_RDWR | (os.O_CREAT if create else 0))
         with os.fdopen(fd, "rb+") as stream:
             host_files.lock_file_bounded(stream, timeout=lock_timeout)
-            if path.exists():
+            legacy_raw = None
+            fresh = not os.path.lexists(path)
+            if not fresh:
                 if path.is_symlink() or path.stat().st_size > MAX_STATE:
                     return False, None
                 raw = read_regular(path, MAX_STATE)
@@ -333,7 +331,22 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
                     return False, None
                 data = json.loads(raw)
                 if not _valid(data, config):
-                    return False, None
+                    if not valid_legacy_state(data, config):
+                        return False, None
+                    # Hold the same worker lease old workers use through DB and
+                    # schema publication. A PID snapshot alone cannot fence them.
+                    migration_lease = os.fdopen(host_files.open_regular(
+                        path.with_suffix(".worker.lock"), os.O_RDWR | os.O_CREAT), "rb+")
+                    host_files.lock_file(migration_lease, blocking=False)
+                    # Ordinary access cannot declare an old actor retired. The
+                    # upgrader must first establish quiescence; no paid recovery
+                    # or lifetime-budget reset is smuggled into migration.
+                    if (data.get("reservation") is not None or data.get("inflight") is not None
+                            or data.get("worker_pid") is not None and _alive(data.get("worker_pid"), data.get("worker_identity"))
+                            or data.get("worker_pid") is None and data.get("worker_identity") is not None):
+                        return False, None
+                    legacy_raw = raw
+                    data["schema"] = capture_source.schema(config, SCHEMA, "reader")
             elif create:
                 data = _new(config)
             else:
@@ -348,26 +361,58 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
                     return False, None
             from recording_jobs import _bind_workspace
             bound = _bind_workspace(config, data)
-            if rebound:
-                # Invalidate payload/history, NOT outstanding paid-call identities or totals.
-                data.update(config_pin=pin, generation=secrets.token_hex(16),
-                            context_generation=data["context_generation"] + 1,
-                            epoch=data["epoch"] + 1, active=None, pending=None, ready=None,
-                            prior="", emitted=[])
-                if data.get("reservation") is None:
-                    data["inflight"] = None  # Unpaid obsolete native work needs no settlement.
-                data.pop("last_selection", None)
-            result, changed = mutate(data)
-            if changed or rebound or bound:
-                data["touched"] = time.time()
-                _write(path, data)
-            return True, result
-    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+            ledger = packet_accounting.Ledger(path.with_suffix(".accounting.sqlite3"),
+                capture_source.source_host(config), session_id, data, legacy_raw=legacy_raw, fresh=fresh)
+            try:
+                mirrored_keys = (*packet_accounting.FIELDS, "routing_usage", "reservation", "reservation_call_id")
+                before_accounting = {key: data.get(key) for key in mirrored_keys}
+                ledger.mirror(data)
+                repaired = before_accounting != {key: data.get(key) for key in mirrored_keys}
+                if rebound:
+                    # Invalidate payload/history, NOT outstanding paid-call identities or totals.
+                    data.update(config_pin=pin, generation=secrets.token_hex(16),
+                                context_generation=data["context_generation"] + 1,
+                                epoch=data["epoch"] + 1, active=None, pending=None, ready=None,
+                                prior="", emitted=[])
+                    if data.get("reservation") is None:
+                        data["inflight"] = None  # Unpaid obsolete native work needs no settlement.
+                    data.pop("last_selection", None)
+                data["_accounting"] = ledger
+                result, changed = mutate(data)
+                data.pop("_accounting", None)
+                ledger.mirror(data)
+                publish = changed or rebound or bound or repaired or ledger.dirty or legacy_raw is not None
+                ledger.commit()
+                if publish:
+                    data["touched"] = time.time()
+                    _write(path, data)
+                # DB commit without JSON acknowledgement never authorizes a call.
+                return True, result
+            finally:
+                ledger.close()
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, sqlite3.Error):
         return False, None
+    finally:
+        if migration_lease is not None:
+            migration_lease.close()
+
+
+def _packet(data, pending, kind="user_message"):
+    if not isinstance(pending, dict):
+        return None
+    return data["_accounting"].lookup(kind, pending.get("turn"), pending.get("request"))
+
+
+def _packet_allowed(data, pending, config):
+    return data["_accounting"].allowed(_packet(data, pending), resolve(config))
 
 
 def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> dict[str, Any]:
-    """Invalidate old ready work on *every* prompt, even a trivial one."""
+    """Invalidate ready work on each newly admitted prompt, including trivial ones.
+
+    Resolve durable replay identity under the lock before changing delivery fences;
+    an old replay (or lock-busy notice) cannot invalidate a newer accepted turn.
+    """
     if _config_current(config) is None:
         _activity_emit(config, event, "recall_admission", "busy", reason="configuration_unavailable")
         return {"outcome": "busy"}
@@ -378,16 +423,21 @@ def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> 
     session, turn = identity
     prompt = event["prompt"]
     digest = hashlib.sha256(prompt.encode()).hexdigest()
-    if not _looks_replayed(config, session, turn, digest) and not _invalidate(config, session):
-        _activity_emit(config, event, "recall_admission", "busy", reason="state_unavailable")
-        return {"outcome": "busy"}
     observation = {}
     def mark(data):
         def done(outcome, changed, reason=None):
             observation.update(origin=_activity_origin(data, {"turn": turn, "request": digest, "epoch": data["epoch"]}),
                                selection_digest=_activity_digest(config), at=int(time.time()), reason=reason)
             return outcome, changed
+        try:
+            packet, fresh_packet = data["_accounting"].bind("user_message", turn, digest)
+        except ValueError:
+            return done("invalid_identity", False, "identity_conflict")
         active = data["active"]
+        if not fresh_packet:
+            return done("replay", False, "duplicate")
+        if not _invalidate(config, session):
+            raise ValueError("reader_fence_unavailable")
         if isinstance(active, dict) and active.get("turn") == turn and active.get("request") == digest:
             return done("replay", False, "duplicate")
         if isinstance(active, dict) and active.get("turn") == turn:
@@ -406,8 +456,8 @@ def notice(config: dict[str, Any], event: dict[str, Any], substantive: bool) -> 
         if capture_source.source_host(config) != "codex" or not substantive or not prompt.strip() or config.get("schema") == "mneme.codex-hooks.config.v13" and config.get("recall_mode") != "automatic":
             return done("skipped", True, "disabled" if config.get("schema") == "mneme.codex-hooks.config.v13" and config.get("recall_mode") != "automatic" else "non_substantive")
         data["prior"] = _fragment(prompt)
-        if data["unknown_usage"] or data["attempts"] >= resolve(config).attempts or data["input_tokens"] >= resolve(config).input_tokens or data["output_tokens"] >= resolve(config).output_tokens:
-            return done("budget", True, "unknown_accounting" if data["unknown_usage"] else "budget")
+        if not data["_accounting"].allowed(packet, budget):
+            return done("budget", True, "packet_budget")
         data["pending"] = {"turn": turn, "request": digest, "epoch": data["epoch"]}
         return done("queued", True)
     # Prompt admission remains best effort: retrying it could reorder an old
@@ -559,9 +609,16 @@ def close_turn(config: dict[str, Any], session_id: str, turn_id: str) -> None:
         return
     def close(data):
         active = data["active"]
-        if not isinstance(active, dict) or active.get("turn") != turn_id:
+        ledger = data["_accounting"]
+        # Idle retirement discards delivery state, not the latest observed user
+        # identity. An explicit matching Stop may still close that exact packet.
+        latest = ledger.latest_user(turn_id)
+        if latest is None:
             return None, False
-        active["closed"] = True
+        packet, _ = ledger.bind("turn_end", turn_id, latest[1], publish_end=False)
+        ledger.publish_end(packet)
+        if isinstance(active, dict) and active.get("turn") == turn_id:
+            active["closed"] = True
         data["pending"] = None
         if data["ready"] is not None:
             _count(data, "dropped")
@@ -608,14 +665,12 @@ def _alive(pid: Any, identity=None) -> bool:
 def _runnable_pending(config, session_id, data):
     """Only actual unsettled reader work can renew an ordinary retiring worker."""
     pending, active = data.get("pending"), data.get("active")
-    budget = resolve(config)
     marker = _fence(config, session_id)
     return (not data.get("ended") and isinstance(pending, dict) and isinstance(active, dict)
             and not active.get("closed")
             and all(active.get(k) == pending.get(k) for k in ("turn", "request", "epoch"))
             and data.get("inflight") is None and data.get("reservation") is None
-            and not data["unknown_usage"] and data["attempts"] < budget.attempts
-            and data["input_tokens"] < budget.input_tokens and data["output_tokens"] < budget.output_tokens
+            and _packet_allowed(data, pending, config)
             and marker is not None and data["fence"] == marker)
 
 
@@ -1102,63 +1157,45 @@ def _usage(result: dict[str, Any]) -> tuple[int, int] | None:
     return in_tokens, out_tokens
 
 
-def _recording_reserve(config, session_id, key):
+def _recording_reserve(config, session_id, key, packet=None, runtime=None):
+    owner = None
     def reserve(data):
-        if (data["unknown_usage"] or data.get("reservation") is not None
-                or data["attempts"] >= resolve(config).attempts or data["input_tokens"] >= resolve(config).input_tokens
-                or data["output_tokens"] >= resolve(config).output_tokens):
+        nonlocal owner
+        ledger = data["_accounting"]
+        if packet is not None:
+            owner, _ = ledger.bind("turn_end", packet.get("turn"), packet.get("request"), publish_end=False)
+        else:
+            owner = ledger.latest_end()
+        if runtime is not None and not runtime.accepts(owner):
             return False, False
-        data["attempts"] += 1
-        data["reservation"] = {"recording": key}
-        return True, True
+        admitted = ledger.reserve(owner, "recording:" + key, {"recording": key}, resolve(config), stage="recording")
+        return admitted, admitted
     ok, value = _state(config, session_id, reserve, create=False)
-    return bool(ok and value)
-
-
-def _settle_usage(data, result, usage):
-    """Only call for a matching durable reservation; missing breakdown stays unknown."""
-    data["input_tokens"] += usage[0]
-    data["output_tokens"] += usage[1]
-    value = result["usage"]
-    for name, maximum in (("cached_input_tokens", usage[0]), ("reasoning_output_tokens", usage[1])):
-        previous, amount = data.get(name), value.get(name)
-        data[name] = (previous + amount
-                      if type(previous) is int and type(amount) is int and 0 <= amount <= maximum
-                      else None)
-
-
-def _unknown_usage(data):
-    data.update(unknown_usage=True, cached_input_tokens=None, reasoning_output_tokens=None)
+    return bool(ok and value and (runtime is None or runtime.bind(owner)))
 
 
 def _recording_account(config, session_id, key, result):
     def account(data):
-        usage = _usage(result) if result.get("provider_attempt") else None
-        matched = data.get("reservation") == {"recording": key}
-        if matched:
-            data["reservation"] = None
-        if result.get("provider_attempt"):
-            if usage is None:
-                _unknown_usage(data)
-            elif matched:
-                _settle_usage(data, result, usage)
-        return matched or not result.get("provider_attempt"), True
+        settled = data["_accounting"].settle("recording:" + key, result)
+        return settled, settled
     ok, settled = _state(config, session_id, account, create=False, allow_stale=True)
     return bool(ok and settled)
 
 
 def _stewardship_matches(config, session_id, data, expected=None):
-    current = (data["generation"], data["context_generation"], data["epoch"], data["fence"])
+    current = (data["generation"], data["context_generation"], data["epoch"], data["fence"],
+               data["_accounting"].latest_end())
     return (expected is None or current == expected) and _fence(config, session_id) == data["fence"]
 
 
 def _stewardship_snapshot(config, session_id):
     def snapshot(data):
         if (data.get("pending") is not None or data.get("inflight") is not None
-                or data.get("reservation") is not None or data["unknown_usage"]
+                or data.get("reservation") is not None
                 or not _stewardship_matches(config, session_id, data)):
             return None, False
-        return (data["generation"], data["context_generation"], data["epoch"], data["fence"]), False
+        return (data["generation"], data["context_generation"], data["epoch"], data["fence"],
+                data["_accounting"].latest_end()), False
     ok, value = _state(config, session_id, snapshot, create=False)
     return value if ok else None
 
@@ -1169,21 +1206,29 @@ def _stewardship_idle(config, session_id, expected=None):
     return current is not None and (expected is None or current == expected)
 
 
-def _stewardship_reserve(config, session_id, key, expected=None):
+def _stewardship_reserve(config, session_id, key, expected=None, runtime=None):
+    owner = None
     def reserve(data):
+        nonlocal owner
         budget = resolve(config)
         if (data.get("pending") is not None or data.get("inflight") is not None
-                or data.get("reservation") is not None or data["unknown_usage"]
-                or not _stewardship_matches(config, session_id, data, expected)
-                or data["attempts"] + 2 > budget.attempts
-                or data["input_tokens"] + budget.stewardship_prompt_bytes > budget.input_tokens - budget.selector_room_input_tokens
-                or data["output_tokens"] + budget.stewardship_answer_bytes > budget.output_tokens - budget.selector_room_output_tokens):
+                or data.get("reservation") is not None
+                or not _stewardship_matches(config, session_id, data, expected)):
             return False, False
-        data["attempts"] += 1
-        data["reservation"] = {"recording": key}
-        return True, True
+        ledger = data["_accounting"]
+        owner = ledger.latest_end()
+        if runtime is not None and not runtime.accepts(owner):
+            return False, False
+        usage = ledger.usage(owner)
+        if (usage is None
+                or usage["input_tokens"] + budget.stewardship_prompt_bytes > budget.input_tokens - budget.selector_room_input_tokens
+                or usage["output_tokens"] + budget.stewardship_answer_bytes > budget.output_tokens - budget.selector_room_output_tokens):
+            return False, False
+        admitted = ledger.reserve(owner, "recording:" + key, {"recording": key}, budget,
+                                  stage="stewardship", calls=2)
+        return admitted, admitted
     ok, admitted = _state(config, session_id, reserve, create=False)
-    return bool(ok and admitted)
+    return bool(ok and admitted and (runtime is None or runtime.bind(owner)))
 
 
 def _registry_read_start(config, session_id):
@@ -1229,9 +1274,42 @@ def _maintenance_config(config, session_id):
         return None
 
 
+class _PacketRuntime:
+    """Reuse a healthy assessor; a poisoned one may resume only a new packet."""
+    def __init__(self, factory, config, scratch):
+        self.factory, self.config, self.scratch = factory, config, scratch
+        self.runtime = factory(config, scratch)
+        self.packet = None
+
+    def accepts(self, packet):
+        return packet is not None and (not getattr(self.runtime, "_halted", False) or packet != self.packet)
+
+    def bind(self, packet):
+        if not self.accepts(packet):
+            return False
+        if getattr(self.runtime, "_halted", False):
+            self.runtime.close()
+            self.runtime = self.factory(self.config, self.scratch)
+        self.packet = packet
+        return True
+
+    def close(self):
+        self.runtime.close()
+
+    def __getattr__(self, name):
+        return getattr(self.runtime, name)
+
+
 def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle_seconds: float = IDLE_SECONDS) -> None:
     """Worker loop. Tests inject a fake runtime; production imports it lazily."""
     if not isinstance(session_id, str) or not ID.fullmatch(session_id):
+        return
+    # Migrate (if necessary) before taking our long-lived worker lease. The
+    # migration itself holds that lease through publication; taking it twice
+    # would self-deadlock/refuse on flock hosts. No recovery runs in this pass.
+    admitted, _ = _state(config, session_id, lambda data: (None, False), create=False,
+                         lock_timeout=STATE_LOCK_SECONDS)
+    if not admitted:
         return
     path, _ = _paths(config, session_id)
     lease = path.with_suffix(".worker.lock")
@@ -1278,6 +1356,18 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     generation = data["generation"]
                 if data["generation"] != generation:
                     return "rotated", False
+                if data.get("reservation") is not None or data.get("inflight") is not None:
+                    # This process owns the worker lease; only here may a prior
+                    # unresolved reservation be abandoned. Charge its packet,
+                    # never whichever turn happens to be active now.
+                    data["_accounting"].abandon()
+                    if data.get("pending") == data.get("inflight"):
+                        data["pending"] = None
+                    data["reservation"] = None
+                    data["inflight"] = None
+                    data["ready"] = None
+                    _count(data, "failed")
+                    return None, True
                 if data.get("ended"):
                     return "end", False
                 marker = _fence(config, session_id)
@@ -1285,20 +1375,6 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     if data["ready"] is not None:
                         _count(data, "dropped")
                     data.update(active=None, pending=None, ready=None, prior="", fence=marker or "")
-                    return None, True
-                if data.get("reservation") is not None or data.get("inflight") is not None:
-                    # A prior process died after reserving a provider call. We
-                    # cannot reconstruct usage from a PID or retry safely.
-                    _unknown_usage(data)
-                    if (isinstance(data.get("reservation"), dict)
-                            and "routing" in data["reservation"]
-                            and isinstance(data.get("routing_usage"), dict)):
-                        _unknown_usage(data["routing_usage"])
-                    data["reservation"] = None
-                    data["inflight"] = None
-                    data["pending"] = None
-                    data["ready"] = None
-                    _count(data, "failed")
                     return None, True
                 pending = data["pending"]
                 if capture_source.source_host(config) != "codex":
@@ -1311,7 +1387,7 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                 data["pending"] = None
                 if not isinstance(active, dict) or active.get("closed") or any(active.get(k) != pending.get(k) for k in ("turn", "request", "epoch")):
                     return None, True
-                if data["unknown_usage"] or data["attempts"] >= resolve(config).attempts or data["input_tokens"] >= resolve(config).input_tokens or data["output_tokens"] >= resolve(config).output_tokens:
+                if not _packet_allowed(data, pending, config):
                     return None, True
                 context_token = _context_token(config, session_id)
                 if context_token is None:
@@ -1335,10 +1411,11 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     if recording_jobs.has_work(config, session_id):
                         if runtime is None:
                             scratch = _directory(config) / ("scratch-" + hashlib.sha256(session_id.encode()).hexdigest()[:16])
-                            runtime = runtime_factory(config, scratch)
+                            runtime = _PacketRuntime(runtime_factory, config, scratch)
                         worked = recording_jobs.step(config, session_id, runtime,
                             lambda key: _recording_reserve(config, session_id, key),
-                            lambda key, result: _recording_account(config, session_id, key, result))
+                            lambda key, result: _recording_account(config, session_id, key, result),
+                            reserve_packet=lambda key, packet: _recording_reserve(config, session_id, key, packet, runtime))
                         if worked:
                             last_activity = time.monotonic()
                         if job == "end" and recording_jobs.has_work(config, session_id):
@@ -1352,11 +1429,11 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                     if maintenance_config is not None and stewardship.enabled(maintenance_config) and maintenance_fence is not None:
                         if runtime is None:
                             scratch = _directory(config) / ("scratch-" + hashlib.sha256(session_id.encode()).hexdigest()[:16])
-                            runtime = runtime_factory(config, scratch)
+                            runtime = _PacketRuntime(runtime_factory, config, scratch)
                         # Opportunistic existing lifecycle only; no daemon and
                         # maintenance does not extend the worker's idle lifetime.
                         stewardship.step(maintenance_config, session_id, runtime,
-                            lambda key: _stewardship_reserve(config, session_id, key, maintenance_fence),
+                            lambda key: _stewardship_reserve(config, session_id, key, maintenance_fence, runtime),
                             lambda key, result: _recording_account(config, session_id, key, result),
                             allowed=lambda: _stewardship_idle(config, session_id, maintenance_fence))
                 if job == "end":
@@ -1374,54 +1451,39 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
                 runtime = None
             if runtime is None:
                 scratch = _directory(config) / ("scratch-" + hashlib.sha256(session_id.encode()).hexdigest()[:16])
-                runtime = runtime_factory(config, scratch)
+                runtime = _PacketRuntime(runtime_factory, config, scratch)
                 runtime_context = context_generation
+            call_ids = {stage: secrets.token_hex(24) for stage in ("selector", "routing")}
             def reserve(*, stage="selector"):
+                owner = None
                 def admit(data):
+                    nonlocal owner
                     active = data.get("active")
-                    # Matching is optional. Prefer the ordinary selector when
-                    # near a quota, without claiming a provider-wrapper bound.
                     matching = stage == "routing"
-                    required_calls = 2 if matching else 1
                     if (data.get("generation") != generation or data.get("inflight") != pending
                             or not isinstance(active, dict) or active.get("closed")
                             or any(active.get(k) != pending.get(k) for k in ("turn", "request", "epoch"))
-                            or data.get("pending") is not None or data["unknown_usage"]
-                            or data.get("reservation") is not None
-                            or data.get("fence") != marker or _fence(config, session_id) != marker
-                            or data["attempts"] + required_calls > resolve(config).attempts
-                            or data["input_tokens"] >= resolve(config).input_tokens - (resolve(config).selector_room_input_tokens if matching else 0)
-                            or data["output_tokens"] >= resolve(config).output_tokens - (resolve(config).selector_room_output_tokens if matching else 0)):
+                            or data.get("pending") is not None or data.get("reservation") is not None
+                            or data.get("fence") != marker or _fence(config, session_id) != marker):
                         return False, False
-                    # Conservative pre-call reservation: process death cannot buy an
-                    # uncounted retry, and rotation does not reset the parent ledger.
-                    data["attempts"] += 1
-                    data["reservation"] = {"routing": pending, "generation": generation} if matching else pending
-                    if matching:
-                        usage = data.setdefault("routing_usage", {"attempts": 0, "input_tokens": 0,
-                            "output_tokens": 0, "cached_input_tokens": 0, "reasoning_output_tokens": 0,
-                            "unknown_usage": False})
-                        usage["attempts"] += 1
-                    return True, True
+                    budget = resolve(config)
+                    payload = {"routing": pending, "generation": generation} if matching else pending
+                    owner = _packet(data, pending)
+                    if not runtime.accepts(owner):
+                        return False, False
+                    admitted = data["_accounting"].reserve(owner, call_ids[stage], payload, budget,
+                        stage=stage, calls=2 if matching else 1,
+                        input_room=budget.selector_room_input_tokens if matching else 0,
+                        output_room=budget.selector_room_output_tokens if matching else 0)
+                    return admitted, admitted
                 ok, admitted = _state(config, session_id, admit, create=False)
-                return bool(ok and admitted)
+                return bool(ok and admitted and runtime.bind(owner))
             def account_routing(result):
                 def settle(data):
-                    matched = data.get("reservation") == {"routing": pending, "generation": generation}
-                    if not matched:
-                        return False, False
-                    data["reservation"] = None
-                    if data.get("generation") != generation and data.get("inflight") == pending:
-                        data["inflight"] = None  # Retire only this stale call, never B's pending turn.
-                    if result.get("provider_attempt"):
-                        usage = _usage(result)
-                        if usage is None:
-                            _unknown_usage(data)
-                            _unknown_usage(data["routing_usage"])
-                        else:
-                            _settle_usage(data, result, usage)
-                            _settle_usage(data["routing_usage"], result, usage)
-                    return True, True
+                    settled = data["_accounting"].settle(call_ids["routing"], result)
+                    if settled and data.get("generation") != generation and data.get("inflight") == pending:
+                        data["inflight"] = None
+                    return settled, settled
                 ok, settled = _state(config, session_id, settle, create=False, allow_stale=True)
                 return bool(ok and settled)
             routing = None
@@ -1440,17 +1502,10 @@ def serve(config: dict[str, Any], session_id: str, *, runtime_factory=None, idle
             selection_at = int(time.time())
             usage = _usage(result) if result.get("provider_attempt") else None
             def settle_selector(data):
-                matched = data.get("reservation") == pending
-                if matched:
-                    data["reservation"] = None
-                    if data.get("generation") != generation and data.get("inflight") == pending:
-                        data["inflight"] = None
-                if result.get("provider_attempt"):
-                    if usage is None:
-                        _unknown_usage(data)
-                    elif matched:
-                        _settle_usage(data, result, usage)
-                return matched and usage is not None, matched or result.get("provider_attempt") is True
+                settled = data["_accounting"].settle(call_ids["selector"], result)
+                if settled and data.get("generation") != generation and data.get("inflight") == pending:
+                    data["inflight"] = None
+                return settled and usage is not None, settled
             settled_ok, settled = _state(config, session_id, settle_selector, create=False, allow_stale=True)
             def concern_current():
                 def check(data):
