@@ -1,5 +1,7 @@
 """One session actor and honest owner-qualified delivery for registry hooks."""
 import copy
+from contextlib import redirect_stdout
+import io
 import hashlib
 import json
 import os
@@ -204,6 +206,28 @@ class RegistryLifecycleTests(unittest.TestCase):
             self.assertIn("systemMessage", hooks.handle_event(event, replacement))
             lifecycle.assert_not_called()
         self.assertEqual(path.read_bytes(), raw)
+
+    def test_prepare_device_defaults_to_symbolic_reader_without_lookup(self):
+        with patch('shutil.which', side_effect=AssertionError('reader resolved during preparation')):
+            prepared = registry_config.prepare(store_registry=self.registry, state_dir=self.base / 'device-state',
+                hooks_program=Path(hook_launcher.__file__), hook_config_path=self.base / 'device.json')
+        config = prepared['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+        self.assertEqual(config['recording_mode'], 'off')
+        self.assertFalse((self.base / 'device-state').exists())
+        self.assertFalse((self.base / 'device.json').exists())
+
+    def test_prepare_device_cli_defaults_to_symbolic_reader(self):
+        output = io.StringIO()
+        with redirect_stdout(output), patch('shutil.which', side_effect=AssertionError('reader resolved during preparation')):
+            registry_config.main(['prepare', '--store-registry', str(self.registry),
+                '--state-dir', str(self.base / 'device-state'), '--hooks-program', str(Path(hook_launcher.__file__)),
+                '--hook-config-path', str(self.base / 'device.json')])
+        config = json.loads(output.getvalue())['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+        self.assertFalse((self.base / 'device.json').exists())
 
     def test_prepare_device_is_review_only_and_recording_is_off_by_default(self):
         prepared = registry_config.prepare(store_registry=self.registry, state_dir=self.base / "device-state",

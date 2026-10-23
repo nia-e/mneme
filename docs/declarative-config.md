@@ -306,23 +306,31 @@ contact a database:
 python3 /runtime/lib/registry_config.py prepare-native \
   --memory-config /absolute/memory.toml --native-cli /runtime/bin/mnemed \
   --cwd /absolute/project --state-dir /absolute/retained-device-state \
-  --reader-codex /absolute/pinned/codex --hooks-program /runtime/lib/hook_launcher.py \
+  --reader-codex codex --hooks-program /runtime/lib/hook_launcher.py \
   --hook-config-path /absolute/generated-hooks.json
 ```
 
-The resulting hook adapter holds only native config/executable paths, retained
-state directories and pinned Codex binaries/auth paths. `--workspace-adapters`
-accepts an explicit JSON list of `{root,state_dir,reader_codex}` machinery bindings;
-preparation pins the reader hashes. This preserves project-specific reader versions
-and existing ledgers under one device actor. It does not select stores or grant
-background authority. Core and asynchronous lifecycle recipes are emitted
+The resulting hook adapter holds native config/executable paths and retained
+state directories. The background reader defaults to `"reader_codex": "codex"`, with
+no `reader_codex_sha256`: each fresh reader process resolves `codex` from the hook
+process's `PATH`. Updating that launcher does not change the adapter or refill
+packet budgets; an already-running reader process keeps its existing executable.
+Preparing this configuration does not require `codex` to be installed.
+
+`--workspace-adapters` accepts an explicit JSON list of
+`{root,state_dir,reader_codex}` machinery bindings. Use `"codex"` for the same dynamic
+lookup, or an explicit absolute path to retain the legacy path/hash binding.
+Existing pinned configurations remain supported and are not rewritten implicitly.
+These machinery bindings preserve existing ledgers; they do not select stores or
+grant background authority. Core and asynchronous lifecycle recipes are emitted
 independently and consult native configuration when invoked.
 
 An optional project-scoped migration/package route,
 `install.py prepare --memory-config PATH`, stages the
 configured MCP registration and emits **no project hooks**. Supply the explicit
-native binaries, project root, absent immutable prefix and reader executable; do
-not also supply old registry/model/recording policy flags. An explicitly pinned
+native binaries, project root and absent immutable prefix; the reader defaults to
+launch-time `PATH` lookup. Do not also supply old registry/model/recording policy
+flags. An explicitly pinned
 `--existing-service-config` preserves the old owner's configuration/state and binary
 without invoking it. Staged configured MCP and retained owner binaries may differ;
 both are independently pinned. Install preparation/apply never re-enrolls owners.

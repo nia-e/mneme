@@ -268,8 +268,10 @@ def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_
         raise HookError("legacy async reader configuration requires repreparation for schema v8; quiesce old workers and start a fresh session before switching hooks")
     elif data.get("schema") in (CONFIG_SCHEMA_V8, CONFIG_SCHEMA_V9, CONFIG_SCHEMA_V10, CONFIG_SCHEMA_V11):
         expected = {"schema", "project_root", "state_dir", "service_config",
-                    "memory_mode", "reader_model", "reader_codex", "reader_codex_sha256",
+                    "memory_mode", "reader_model", "reader_codex",
                     "librarian_effort", "recording_mode"}
+        if "reader_codex_sha256" in data:
+            expected.add("reader_codex_sha256")
         if data["schema"] == CONFIG_SCHEMA_V9:
             expected |= {"memory_scope", "store_target"}
         if data["schema"] == CONFIG_SCHEMA_V10:
@@ -291,12 +293,11 @@ def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_
             resolve(data)
         except ValueError as error:
             raise HookError(str(error)) from error
-        codex = data.get("reader_codex")
-        if not isinstance(codex, str) or not Path(codex).is_absolute():
-            raise HookError("reader_codex must be an absolute path")
-        digest = data.get("reader_codex_sha256")
-        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-            raise HookError("invalid reader_codex_sha256")
+        from host_platform import validate_reader_codex
+        try:
+            validate_reader_codex(data)
+        except ValueError as error:
+            raise HookError(str(error)) from error
         auth = data.get("reader_auth")
         if auth is not None and (not isinstance(auth, str) or not Path(auth).is_absolute()):
             raise HookError("reader_auth must be an absolute path")
@@ -335,7 +336,8 @@ def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_
     if data["schema"] == CONFIG_SCHEMA_V3:
         data["shadow_codex"] = Path(data["shadow_codex"]).resolve()
     if data["schema"] in (CONFIG_SCHEMA_V8, CONFIG_SCHEMA_V9, CONFIG_SCHEMA_V10, CONFIG_SCHEMA_V11):
-        data["reader_codex"] = Path(data["reader_codex"]).resolve()
+        if data["reader_codex"] != "codex":
+            data["reader_codex"] = Path(data["reader_codex"]).resolve()
         if "reader_auth" in data:
             data["reader_auth"] = Path(data["reader_auth"]).resolve()
     data["recall_mode"] = mode

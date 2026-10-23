@@ -1,5 +1,7 @@
 """Offline native-config adapter preparation and fenced disposable installation."""
 import copy
+from contextlib import redirect_stdout
+import io
 import json
 import os
 import shlex
@@ -296,6 +298,55 @@ class NativeInstallTests(unittest.TestCase):
         legacy["files"] = legacy["files"][:len(install.V24_DESTINATIONS)]
         legacy["plan_sha256"] = install.plan_hash(legacy)
         install.validate_plan(legacy)
+
+    def test_native_install_default_keeps_symbolic_reader_without_lookup(self):
+        with patch('shutil.which', side_effect=AssertionError('reader resolved during installation')):
+            plan = self.fixture.prepare(memory_config=self.memory)
+            self.assertEqual(plan['reader_codex'], 'codex')
+            _, hook = install.runtime_configs(plan)
+            self.assertEqual(hook['reader_codex'], 'codex')
+            self.assertNotIn('reader_codex_sha256', hook)
+            result = install.apply(plan)
+        self.assertEqual(json.loads((self.fixture.prefix / 'config/hooks.json').read_text()), hook)
+        self.assertEqual(install.uninstall(result['receipt'])['status'], 'configuration removed')
+
+    def test_native_prepare_cli_defaults_to_symbolic_reader(self):
+        args = self.device_prepare_args()
+        args.pop('reader_codex')
+        argv = ['prepare-native']
+        for name, value in args.items():
+            argv.extend(['--' + name.replace('_', '-'), str(value)])
+        output = io.StringIO()
+        with redirect_stdout(output), patch('shutil.which', side_effect=AssertionError('reader resolved during preparation')):
+            registry_config.main(argv)
+        config = json.loads(output.getvalue())['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+        self.assertFalse(Path(args['hook_config_path']).exists())
+
+    def test_native_device_and_workspace_adapter_preserve_path_choices(self):
+        args = self.device_prepare_args()
+        args.pop('reader_codex')
+        nested = self.fixture.project / 'nested'
+        nested.mkdir()
+        args['workspace_adapters'] = [
+            {'root': str(self.fixture.project), 'state_dir': str(self.fixture.base / 'path-state'),
+             'reader_codex': 'codex'},
+            {'root': str(nested), 'state_dir': str(self.fixture.base / 'pinned-state'),
+             'reader_codex': str(self.fixture.native('codex'))}]
+        with patch('shutil.which', side_effect=AssertionError('reader resolved during preparation')):
+            prepared = registry_config.prepare_native(**args)
+        config = prepared['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+        symbolic, pinned = config['workspace_adapters']
+        self.assertEqual(symbolic['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', symbolic)
+        self.assertEqual(pinned['reader_codex'], str(self.fixture.native('codex')))
+        self.assertEqual(pinned['reader_codex_sha256'], install.digest(self.fixture.native('codex').read_bytes()))
+        self.assertNotIn('recording_mode', config)
+        self.assertFalse(Path(args['state_dir']).exists())
+        self.assertFalse(Path(args['hook_config_path']).exists())
 
     def test_device_plan_keeps_core_and_async_independent_and_adapter_is_machine_only(self):
         adapters = [{"root": str(self.fixture.project), "state_dir": str(self.fixture.project / ".mneme/retained"),

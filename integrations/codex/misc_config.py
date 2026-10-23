@@ -3,10 +3,9 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import re
 import sys
 
-from host_platform import hook_command, is_executable
+from host_platform import hook_command, is_executable, prepare_reader_codex, validate_reader_codex
 from tag_config import FIELDS as TAG_FIELDS, prepared_fields, validate as validate_tag_config
 from librarian_policy import resolve
 from misc_binding import canonical_path, validate_excluded_roots
@@ -14,27 +13,29 @@ from service import load_config, server_database_path
 from target_policy import MISC_SCHEMA, ULID
 
 FIELDS = {"schema", "state_dir", "service_config", "memory_scope", "memory_mode", "reader_model",
-          "librarian_effort", "recording_mode", "reader_codex", "reader_codex_sha256", "store_target",
+          "librarian_effort", "recording_mode", "reader_codex", "store_target",
           "excluded_roots"}
 MAX_STATIC_CONFIG_BYTES = 8000  # hooks.MAX_CONFIG; no larger authoring envelope.
 
 
 def validate_config(value):
     """Validate the static device contract, without binding or contacting a workspace."""
-    if (not isinstance(value, dict) or set(value) - TAG_FIELDS not in (FIELDS, FIELDS | {"reader_auth"})
+    if (not isinstance(value, dict) or set(value) - TAG_FIELDS - {"reader_auth", "reader_codex_sha256"} != FIELDS
             or value.get("schema") != MISC_SCHEMA or value.get("memory_scope") != "misc"
             or value.get("memory_mode") != "async" or value.get("recording_mode") not in ("off", "automatic")):
         raise ValueError("misc requires static v11 async configuration without project_root")
     validate_tag_config(value)
     resolve(value)
-    for field in ("state_dir", "service_config", "reader_codex", "reader_auth"):
+    for field in ("state_dir", "service_config", "reader_auth"):
         if field in value:
             if not isinstance(value[field], str):
                 raise ValueError("misc configuration paths must be strings")
             canonical_path(value[field])
-    if (not isinstance(value.get("reader_codex_sha256"), str)
-            or re.fullmatch(r"[0-9a-f]{64}", value["reader_codex_sha256"]) is None):
-        raise ValueError("invalid reader_codex_sha256")
+    if not isinstance(value["reader_codex"], str):
+        raise ValueError("misc reader command must be a string")
+    validate_reader_codex(value)
+    if value["reader_codex"] != "codex":
+        canonical_path(value["reader_codex"])
     if not isinstance(value["excluded_roots"], list):
         raise ValueError("excluded_roots must be a JSON array")
     validate_excluded_roots(value["excluded_roots"])
@@ -49,11 +50,11 @@ def validate_config(value):
     return dict(value)
 
 
-def prepare(*, state_dir, service_config, database_path, db_id, reader_codex,
+def prepare(*, state_dir, service_config, database_path, db_id, reader_codex="codex",
             hooks_program, hook_config_path, excluded_roots=(), python=sys.executable,
             librarian_effort="medium", recording_mode="automatic", reader_auth=None, tag_stewardship=None, tag_guide_id=None):
     service = canonical_path(service_config)
-    reader = canonical_path(Path(reader_codex).resolve(strict=True))
+    reader = prepare_reader_codex(reader_codex)
     program = canonical_path(Path(hooks_program).resolve(strict=True))
     # Python installations commonly expose their executable via a symlink.
     # Pin the executable itself; workspace bindings separately retain lexical
@@ -61,13 +62,12 @@ def prepare(*, state_dir, service_config, database_path, db_id, reader_codex,
     interpreter = canonical_path(Path(python).resolve(strict=True))
     state = canonical_path(state_dir)
     destination = canonical_path(hook_config_path)
-    if (not service.is_file() or not is_executable(reader)
-            or not program.is_file() or not is_executable(interpreter)):
-        raise ValueError("misc preparation requires existing service, hook program, executable reader and Python")
+    if not service.is_file() or not program.is_file() or not is_executable(interpreter):
+        raise ValueError("misc preparation requires existing service, hook program and Python")
     config = {"schema": MISC_SCHEMA, "state_dir": str(state), "service_config": str(service),
               "memory_scope": "misc", "memory_mode": "async", "reader_model": "gpt-6.1-sol",
               "librarian_effort": librarian_effort, "recording_mode": recording_mode,
-              "reader_codex": str(reader), "reader_codex_sha256": hashlib.sha256(reader.read_bytes()).hexdigest(),
+              **reader,
               "store_target": {"db_alias": "project", "database_path": database_path, "db_id": db_id},
               "excluded_roots": list(excluded_roots),
               **prepared_fields(recording_mode, tag_stewardship, tag_guide_id)}
@@ -95,9 +95,11 @@ def prepare(*, state_dir, service_config, database_path, db_id, reader_codex,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for flag in ("state-dir", "service-config", "database-path", "db-id", "reader-codex",
+    for flag in ("state-dir", "service-config", "database-path", "db-id",
                  "hooks-program", "hook-config-path"):
         parser.add_argument("--" + flag, required=True)
+    parser.add_argument("--reader-codex", default="codex",
+                        help="codex from PATH (default), or an absolute executable to hash-pin")
     parser.add_argument("--excluded-root", action="append", default=[], dest="excluded_roots")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--librarian-effort", choices=("low", "medium", "high"), default="medium")

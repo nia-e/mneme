@@ -609,6 +609,24 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.async_config(reader_auth="/tmp/isolated-test-auth")["reader_auth"],
                          Path("/tmp/isolated-test-auth").resolve())
 
+    def test_async_path_reader_stays_symbolic_and_rejects_hash_combinations(self):
+        from recording_jobs import _config_digest
+        self.async_config()
+        raw = json.loads(self.config_path.read_text())
+        raw["reader_codex"] = "codex"
+        del raw["reader_codex_sha256"]
+        self.config_path.write_text(json.dumps(raw))
+        with patch("host_platform.shutil.which") as lookup:
+            config = hooks._config(self.config_path)
+            self.assertEqual(config["reader_codex"], "codex")
+            self.assertNotIn("reader_codex_sha256", config)
+            self.assertEqual(config["_reader_config_pin"], _config_digest(config))
+            lookup.assert_not_called()
+        for digest in (None, "a" * 64):
+            self.config_path.write_text(json.dumps({**raw, "reader_codex_sha256": digest}))
+            with self.subTest(digest=digest), self.assertRaisesRegex(hooks.HookError, "must omit"):
+                hooks._config(self.config_path)
+
     def test_async_guidance_avoids_routine_duplicate_recall_but_keeps_fallback(self):
         config = self.async_config()
         worker = SimpleNamespace(reset=lambda *_: None, notice=lambda *_: None)

@@ -1,5 +1,7 @@
 """Disposable setup tests; never run inference, services or touch enrolled stores."""
 import argparse
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -161,7 +163,78 @@ class ProjectSetupTests(unittest.TestCase):
                 path.unlink()
         self.native.assert_not_called()
 
-    def test_missing_codex_has_no_store_or_configuration_residue(self):
+    def run_cli(self, codex):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = setup.main(['--root', str(self.root), '--mnemed', str(self.args.mnemed),
+                '--library-helper', str(self.args.library_helper), '--mcp-binary', str(self.args.mcp_binary),
+                '--port', str(self.args.port), '--no-trust-hooks', '--json', '--codex-binary', codex])
+        return status, json.loads(output.getvalue())
+
+    def test_cli_rejects_relative_reader_spellings_without_normalizing_to_path_command(self):
+        for reader in ('./codex', 'codex/'):
+            with self.subTest(reader=reader):
+                status, result = self.run_cli(reader)
+                self.assertEqual(status, 1)
+                self.assertIn("reader_codex must be 'codex' or an absolute path", result['error'])
+                self.assertFalse((self.root / '.mneme').exists())
+                self.assertFalse((self.root / '.codex').exists())
+        self.native.assert_not_called()
+        self.ready.assert_not_called()
+        self.trust.assert_not_called()
+
+    def test_cli_literal_codex_remains_symbolic(self):
+        status, result = self.run_cli('codex')
+        self.assertEqual(status, 0, result)
+        hook = json.loads((self.root / '.mneme/codex-integration/config/hooks.json').read_text())
+        self.assertEqual(hook['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', hook)
+
+    def test_cli_absolute_reader_remains_pinned(self):
+        reader = self.bin / 'codex'
+        status, result = self.run_cli(str(reader))
+        self.assertEqual(status, 0, result)
+        hook = json.loads((self.root / '.mneme/codex-integration/config/hooks.json').read_text())
+        self.assertEqual(hook['reader_codex'], str(reader))
+        self.assertEqual(hook['reader_codex_sha256'], setup.install.digest(reader.read_bytes()))
+
+    def test_default_reader_stays_symbolic_while_trust_resolves_current_path(self):
+        self.args.codex_binary = None
+        for name in ('codex', 'codex-updated'):
+            binary = self.bin / name
+            if not binary.exists():
+                binary.write_text('#!/bin/sh\nexit 1\n')
+                binary.chmod(0o700)
+            self.trust.reset_mock()
+            with patch.object(setup.shutil, 'which', return_value=str(binary)) as which:
+                result = self.run_setup()
+            which.assert_called_once_with(setup.executable_name('codex'))
+            self.assertEqual(self.trust.call_args.args[0], binary)
+            self.assertEqual(result['hook_trust']['status'], 'trusted')
+            hook = json.loads((self.root / '.mneme/codex-integration/config/hooks.json').read_text())
+            self.assertEqual(hook['reader_codex'], 'codex')
+            self.assertNotIn('reader_codex_sha256', hook)
+
+    def test_default_missing_codex_leaves_setup_configured_and_trust_pending(self):
+        self.args.codex_binary = None
+        with patch.object(setup.shutil, 'which', return_value=None):
+            result = self.run_setup()
+        self.assertEqual(result['status'], 'configured')
+        self.assertEqual(result['hook_trust'], {'status': 'pending', 'trusted': 0, 'reason': 'codex_unavailable'})
+        self.trust.assert_not_called()
+        hook = json.loads((self.root / '.mneme/codex-integration/config/hooks.json').read_text())
+        self.assertEqual(hook['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', hook)
+
+    def test_default_no_trust_needs_no_codex_lookup(self):
+        self.args.codex_binary = None
+        self.args.no_trust_hooks = True
+        with patch.object(setup.shutil, 'which', side_effect=AssertionError('unneeded Codex lookup')):
+            result = self.run_setup()
+        self.assertEqual(result['status'], 'configured')
+        self.trust.assert_not_called()
+
+    def test_explicit_missing_codex_has_no_store_or_configuration_residue(self):
         self.args.codex_binary = self.bin / "absent"
         with self.assertRaises(FileNotFoundError):
             self.run_setup()

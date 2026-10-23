@@ -69,7 +69,7 @@ RECORDING_MODES = ("off", "automatic")
 SHADOW_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra")
 LEGACY_READER_MODELS = ("gpt-5.6-sol",)
 from host_files import atomic_write, ensure_private_directory, open_directory, open_regular
-from host_platform import hook_command, is_executable
+from host_platform import hook_command, is_executable, prepare_reader_codex, validate_reader_codex
 from librarian_policy import MODEL, EFFORTS, resolve as resolve_policy
 READER_MODELS = (MODEL,)
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -307,12 +307,7 @@ def validate_plan(plan):
         if plan["recall_mode"] == "async":
             if type(reader_model) is not str or reader_model not in (READER_MODELS if revision >= 14 else LEGACY_READER_MODELS):
                 raise ValueError("async mode requires an explicit supported reader model")
-            if (not isinstance(reader_codex, dict) or set(reader_codex) != {"source", "sha256"}
-                or not isinstance(reader_codex["source"], str)
-                or not Path(reader_codex["source"]).is_absolute()
-                or not isinstance(reader_codex["sha256"], str)
-                or not HEX_SHA256.fullmatch(reader_codex["sha256"])):
-                raise ValueError("async mode requires an absolute pinned Codex executable")
+            planned_reader_config(reader_codex)
         elif reader_model is not None or reader_codex is not None:
             raise ValueError("reader options require async recall mode")
     elif "reader_model" in plan or "reader_codex" in plan:
@@ -650,12 +645,9 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder",
             raise ValueError("async mode requires --reader-model gpt-6.1-sol")
         librarian_effort = "medium" if librarian_effort is None else librarian_effort
         resolve_policy({"reader_model":reader_model,"librarian_effort":librarian_effort})
-        if reader_codex is None or not Path(reader_codex).is_absolute():
-            raise ValueError("async mode requires absolute --reader-codex")
-        codex_source = Path(reader_codex).resolve(strict=True)
-        if not is_executable(codex_source):
-            raise ValueError("reader Codex executable is not usable")
-        reader_pin = {"source": str(codex_source), "sha256": digest(codex_source.read_bytes())}
+        reader = prepare_reader_codex("codex" if reader_codex is None else reader_codex)
+        reader_pin = ("codex" if reader["reader_codex"] == "codex" else
+                      {"source": reader["reader_codex"], "sha256": reader["reader_codex_sha256"]})
     elif reader_model is not None or reader_codex is not None or librarian_effort is not None:
         raise ValueError("--reader-model, --reader-codex and --librarian-effort require --recall-mode async")
     if enroll_existing and library_helper is None:
@@ -791,6 +783,19 @@ def _restore_known_outputs(dot_codex, originals, after_hashes):
             private_write(dot_codex / name, data)
 
 
+def planned_reader_config(reader):
+    """Translate a reviewed symbolic command or retained explicit pin without I/O."""
+    if reader == "codex":
+        config = {"reader_codex": "codex"}
+    elif (isinstance(reader, dict) and set(reader) == {"source", "sha256"}
+          and isinstance(reader["source"], str)):
+        config = {"reader_codex": reader["source"], "reader_codex_sha256": reader["sha256"]}
+    else:
+        raise ValueError("async mode requires codex from PATH or an absolute pinned Codex executable")
+    validate_reader_codex(config)
+    return config
+
+
 def runtime_configs(plan):
     """Pure installer-owned runtime outputs; also binds exact hook-review scope."""
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
@@ -813,9 +818,7 @@ def runtime_configs(plan):
         hook.pop("recall_mode")
         hook.update(schema="mneme.codex-hooks.config.v8", memory_mode="async",
                     librarian_effort=plan["librarian_effort"], recording_mode=plan["recording_mode"],
-                    reader_model=plan["reader_model"],
-                    reader_codex=reader_codex["source"],
-                    reader_codex_sha256=reader_codex["sha256"])
+                    reader_model=plan["reader_model"], **planned_reader_config(reader_codex))
         for field in ("tag_stewardship", "tag_guide_id"):
             if field in plan:
                 hook[field] = plan[field]
@@ -829,7 +832,7 @@ def runtime_configs(plan):
         hook = {"schema": "mneme.codex-hooks.config.v13", "memory_config": plan["memory_config"]["path"],
                 "native_cli": str(prefix / binary_destination(plan, "mnemed")),
                 "state_dir": str(root / ".mneme/codex-hook-state"),
-                "reader_codex": reader_codex["source"], "reader_codex_sha256": reader_codex["sha256"]}
+                **planned_reader_config(reader_codex)}
     return service, hook
 
 
@@ -869,7 +872,7 @@ def apply(plan):
     if shadow_codex is not None and digest(Path(shadow_codex["source"]).read_bytes()) != shadow_codex["sha256"]:
         raise ValueError("shadow Codex executable changed; prepare a new plan")
     reader_codex = plan["reader_codex"]
-    if reader_codex is not None and digest(Path(reader_codex["source"]).read_bytes()) != reader_codex["sha256"]:
+    if isinstance(reader_codex, dict) and digest(Path(reader_codex["source"]).read_bytes()) != reader_codex["sha256"]:
         raise ValueError("reader Codex executable changed; prepare a new plan")
     db_exists = (root / ".mneme/codex-memory.db").exists()
     if plan["library_enrollment"] == "fresh" and db_exists:
@@ -1028,8 +1031,8 @@ def main():
                       help="required with --recall-mode async; explicitly selected librarian model")
     prep.add_argument("--librarian-effort", choices=EFFORTS,
                       help="async low/medium/high resource preset; default medium (not a spending cap)")
-    prep.add_argument("--reader-codex", type=Path,
-                      help="required absolute Codex executable for the async reader; its hash is pinned")
+    prep.add_argument("--reader-codex",
+                      help="async reader command: codex from PATH (default), or an absolute executable to hash-pin")
     prep.add_argument("--memory-config", type=Path,
                       help="native memory.toml policy; installs configured MCP only; device hooks prepared separately")
     prep.add_argument("--store-registry", type=Path,

@@ -2,6 +2,8 @@
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch, Mock
@@ -69,6 +71,28 @@ class WorkshopTargetTests(unittest.TestCase):
                 if name == "get": return owner.node
                 raise AssertionError(name)
         return Client()
+
+    def test_prepare_default_reader_keeps_symbolic_choice(self):
+        with patch('shutil.which', side_effect=AssertionError('reader resolved during preparation')):
+            prepared = workshop_config.prepare(workspace_root=self.root, state_dir=self.root / 'new-state',
+                service_config=self.service, database_path=str(self.store), db_id=DB)
+        config = prepared['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+        self.hook.write_text(json.dumps(config))
+        self.assertEqual(hooks._config(self.hook)['reader_codex'], 'codex')
+        self.assertFalse((self.root / 'new-state').exists())
+
+    def test_prepare_cli_defaults_to_symbolic_reader(self):
+        command = [sys.executable, workshop_config.__file__, '--workspace-root', str(self.root),
+            '--state-dir', str(self.root / 'new-state'), '--service-config', str(self.service),
+            '--database-path', str(self.store), '--db-id', DB]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+        self.assertFalse((self.root / 'new-state').exists())
 
     def test_prepare_is_explicit_reviewed_and_v8_remains_project_only(self):
         self.assertEqual(self.prepared["installation"], "not performed")

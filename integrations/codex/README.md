@@ -56,10 +56,16 @@ Useful options:
 | Option | Purpose |
 | --- | --- |
 | `--root PATH` | Select a project other than the current directory. |
-| `--mcp-binary PATH`, `--codex-binary PATH`, `--python PATH` | Select installed prerequisites explicitly. |
+| `--mcp-binary PATH`, `--python PATH` | Select installed prerequisites explicitly. |
+| `--codex-binary PATH` | Optional absolute Codex path for hook trust and a legacy pinned background reader. |
 | `--port PORT` | Choose the local owner port for new setup. |
 | `--library-config PATH` | Select and retain a device-local library config. |
 | `--no-trust-hooks` | Leave generated hooks pending manual review. |
+
+The background reader defaults to launch-time `codex` lookup from the hook
+process's `PATH`, rather than retaining the executable found during setup.
+Setup uses the current PATH executable for hook trust if available; otherwise
+trust remains pending and setup can continue.
 
 By default, init trusts only its exact generated, enabled project hooks through
 Codex's native config API. Missing APIs leave trust pending rather than bypassing
@@ -409,12 +415,22 @@ Add these options to `prepare` for background task-shaped recall:
 
 ```sh
 --recall-mode async --reader-model gpt-6.1-sol \
---librarian-effort medium --reader-codex /absolute/bin/codex
+--librarian-effort medium
 ```
+
+The reader defaults to `codex` on the hook process's `PATH`, resolved whenever a
+fresh reader process starts. The generated adapter keeps `"reader_codex": "codex"`
+and omits `reader_codex_sha256`; replacing the PATH launcher does not invalidate
+session bindings or reset accounting. An already-running process keeps its
+existing executable. Preparing this configuration does not require `codex` to be
+installed. Existing explicit absolute-path/hash configurations remain supported;
+pass an absolute `--reader-codex` only when that fixed binding is wanted.
 
 The reader selects source-backed context from the configured store and delivers
 it at eligible tool boundaries. Late results are discarded; no-tool turns may
-receive no automatic context. Manual recall remains available.
+receive no automatic context. A missing or failing Codex executable is a background
+reader failure, not a reason to stop foreground work. Manual recall remains
+available.
 
 `low`, `medium`, and `high` select per-packet admission thresholds, not relevance
 quotas or guaranteed billing caps:
@@ -588,7 +604,7 @@ python3 integrations/codex/workshop_config.py \
   --workspace-root /absolute/workshop --state-dir /absolute/private/hook-state \
   --service-config /absolute/global/config/service.json \
   --database-path /absolute/stores/user.db --db-id VERIFIED_DATABASE_ID \
-  --reader-codex /absolute/bin/codex > /absolute/private/workshop-plan.json
+  --reader-codex codex > /absolute/private/workshop-plan.json
 ```
 
 This emits config and source hashes only. It does not install hooks or contact
@@ -607,7 +623,7 @@ ordinary-work owner (`project` alias), not the personal `user` store:
 python3 integrations/codex/misc_config.py \
   --state-dir /absolute/private/misc-state --service-config /absolute/misc/service.json \
   --database-path /absolute/server/misc.db --db-id VERIFIED_DATABASE_ID \
-  --reader-codex /absolute/bin/codex --hooks-program /absolute/runtime/hook_launcher.py \
+  --reader-codex codex --hooks-program /absolute/runtime/hook_launcher.py \
   --hook-config-path /absolute/private/misc-hooks.json \
   --excluded-root /absolute/excluded > /absolute/private/misc-plan.json
 ```
@@ -695,7 +711,7 @@ actor:
 python3 /absolute/runtime/registry_config.py prepare-native \
   --memory-config /absolute/config/memory.toml \
   --native-cli /absolute/bin/mnemed --cwd /absolute/workspace \
-  --state-dir /absolute/private/hook-state --reader-codex /absolute/bin/codex \
+  --state-dir /absolute/private/hook-state --reader-codex codex \
   --hooks-program /absolute/runtime/hook_launcher.py \
   --hook-config-path /absolute/private/device-hooks.json \
   --stable-root /absolute/private/mneme-hooks \

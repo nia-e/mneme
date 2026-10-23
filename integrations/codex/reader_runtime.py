@@ -10,7 +10,6 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
@@ -20,7 +19,7 @@ import uuid
 
 import host_files
 import host_process
-from host_platform import is_executable
+from host_platform import is_executable, validate_reader_codex
 
 WINDOWS = os.name == "nt"
 MAX_AUTH_BYTES = 1024 * 1024
@@ -108,19 +107,34 @@ class ReaderRuntime(AssessmentMixin):
         codex = self._config("reader_codex")
         digest = self._config("reader_codex_sha256")
         model = self._config("reader_model")
-        if (not isinstance(codex, (str, Path)) or not Path(codex).is_absolute()
-                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                or self.budget is None or self.budget.assessor != "codex" or model != self.budget.model):
+        fields = {"reader_codex": codex}
+        if ("reader_codex_sha256" in self.config if isinstance(self.config, dict)
+                else hasattr(self.config, "reader_codex_sha256")):
+            fields["reader_codex_sha256"] = digest
+        try:
+            validate_reader_codex(fields)
+        except ValueError as exc:
+            raise TransportError("invalid_config") from exc
+        if self.budget is None or self.budget.assessor != "codex" or model != self.budget.model:
             raise TransportError("invalid_config")
-        codex = Path(codex)
+        if codex == "codex":
+            # Resolve the inherited PATH before isolating cwd/HOME. Keep this
+            # launch choice local: a later process should see installed updates.
+            found = shutil.which("codex")
+            if found is None:
+                raise TransportError("unavailable")
+            codex = Path(found).absolute()
+        else:
+            codex = Path(codex)
         if not is_executable(codex):
             raise TransportError("unavailable")
-        hasher = hashlib.sha256()
-        with codex.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(block)
-        if hasher.hexdigest() != digest:
-            raise TransportError("binary_changed")
+        if digest is not None:
+            hasher = hashlib.sha256()
+            with codex.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(block)
+            if hasher.hexdigest() != digest:
+                raise TransportError("binary_changed")
         auth = self._config("reader_auth")
         if auth is None:
             auth = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json"

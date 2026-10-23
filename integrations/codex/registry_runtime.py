@@ -8,9 +8,9 @@ ledgers are retained, never reset on upgrade.
 """
 from pathlib import Path
 import hashlib
-import re
 
 from librarian_policy import resolve as resolve_budget
+from host_platform import validate_reader_codex
 from misc_binding import canonical_path, validate_binding
 from profile import MAX_PATH_BYTES
 from store_registry import (Selection, project_store, resolve, admit_project_workspace)
@@ -18,7 +18,7 @@ from tag_config import FIELDS as TAG_FIELDS, validate as validate_tags
 
 SCHEMA = "mneme.codex-hooks.config.v12"
 BASE_FIELDS = {"schema", "state_dir", "store_registry", "memory_mode", "reader_model",
-               "librarian_effort", "recording_mode", "reader_codex", "reader_codex_sha256"}
+               "librarian_effort", "recording_mode", "reader_codex"}
 
 
 def validate_static(value):
@@ -28,19 +28,22 @@ def validate_static(value):
     if scope not in ("project", "registry"):
         raise ValueError("v12 hook scope must be project or registry")
     required = BASE_FIELDS | ({"memory_scope"} if scope == "registry" else {"project_root", "service_config"})
-    if not required <= set(value) or set(value) - required - TAG_FIELDS - {"memory_scope", "reader_auth"}:
+    if not required <= set(value) or set(value) - required - TAG_FIELDS - {"memory_scope", "reader_auth", "reader_codex_sha256"}:
         raise ValueError("invalid v12 hook configuration fields")
     if value.get("memory_mode") != "async" or value.get("recording_mode") not in ("off", "automatic"):
         raise ValueError("v12 requires explicit async and recording policies")
     resolve_budget(value)
     validate_tags(value)
-    for field in ("state_dir", "store_registry", "reader_codex", "reader_auth", "project_root", "service_config"):
+    validate_reader_codex(value)
+    if not isinstance(value["reader_codex"], str):
+        raise ValueError("reader_codex must be a string")
+    if value["reader_codex"] != "codex":
+        canonical_path(value["reader_codex"])
+    for field in ("state_dir", "store_registry", "reader_auth", "project_root", "service_config"):
         if field in value:
             if not isinstance(value[field], str):
                 raise ValueError("hook configuration paths must be strings")
             canonical_path(value[field])
-    if not isinstance(value.get("reader_codex_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", value["reader_codex_sha256"]):
-        raise ValueError("invalid reader executable hash")
     return dict(value)
 
 
@@ -88,7 +91,9 @@ def load(value, path, raw, *, workspace_binding=None, cwd=None, expected_selecti
         if not config["project_root"].is_dir():
             raise ValueError("project root must exist")
         current = Path(cwd or config["project_root"])
-    for field in ("state_dir", "store_registry", "reader_codex", "reader_auth", "service_config"):
+    if config["reader_codex"] != "codex":
+        config["reader_codex"] = Path(config["reader_codex"]).resolve()
+    for field in ("state_dir", "store_registry", "reader_auth", "service_config"):
         if field in config:
             config[field] = Path(config[field]).resolve()
     config["selection_cwd"] = current
@@ -176,7 +181,7 @@ def admit_session(config, event):
 
 
 NATIVE_SCHEMA = "mneme.codex-hooks.config.v13"
-NATIVE_FIELDS = {"schema", "state_dir", "memory_config", "native_cli", "reader_codex", "reader_codex_sha256"}
+NATIVE_FIELDS = {"schema", "state_dir", "memory_config", "native_cli", "reader_codex"}
 
 
 def native_memory_config_path(value):
@@ -199,27 +204,37 @@ def native_memory_config_path(value):
 
 def validate_native_static(value):
     if (not isinstance(value, dict) or value.get("schema") != NATIVE_SCHEMA
-            or not NATIVE_FIELDS <= set(value) or set(value) - NATIVE_FIELDS - {"reader_auth", "workspace_adapters"}):
+            or not NATIVE_FIELDS <= set(value) or set(value) - NATIVE_FIELDS - {"reader_auth", "workspace_adapters", "reader_codex_sha256"}):
         raise ValueError("invalid native hook adapter fields")
     native_memory_config_path(value["memory_config"])
-    for key in ("state_dir", "native_cli", "reader_codex", "reader_auth"):
+    validate_reader_codex(value)
+    if not isinstance(value["reader_codex"], str):
+        raise ValueError("reader_codex must be a string")
+    if value["reader_codex"] != "codex":
+        canonical_path(value["reader_codex"])
+    for key in ("state_dir", "native_cli", "reader_auth"):
         if key in value: canonical_path(value[key])
-    if not isinstance(value["reader_codex_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["reader_codex_sha256"]):
-        raise ValueError("invalid reader executable hash")
     adapters = value.get("workspace_adapters", [])
     if not isinstance(adapters, list) or len(adapters) > 64:
         raise ValueError("invalid workspace adapter inventory")
     roots = set()
     for adapter in adapters:
-        if not isinstance(adapter, dict) or set(adapter) != {"root", "state_dir", "reader_codex", "reader_codex_sha256"}:
+        required = {"root", "state_dir", "reader_codex"}
+        if (not isinstance(adapter, dict) or not required <= set(adapter)
+                or set(adapter) - required - {"reader_codex_sha256"}):
             raise ValueError("invalid workspace adapter")
-        for key in ("root", "state_dir", "reader_codex"): canonical_path(adapter[key])
+        validate_reader_codex(adapter)
+        if not isinstance(adapter["reader_codex"], str):
+            raise ValueError("reader_codex must be a string")
+        if adapter["reader_codex"] != "codex":
+            canonical_path(adapter["reader_codex"])
+        for key in ("root", "state_dir"): canonical_path(adapter[key])
         root_path = Path(adapter["root"]).resolve(strict=True)
         if not root_path.is_dir():
             raise ValueError("workspace adapter root must exist")
         root = str(root_path)
-        if root in roots or not isinstance(adapter["reader_codex_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", adapter["reader_codex_sha256"]):
-            raise ValueError("duplicate workspace adapter or invalid reader hash")
+        if root in roots:
+            raise ValueError("duplicate workspace adapter")
         roots.add(root)
     return dict(value)
 
@@ -234,7 +249,10 @@ def load_native(value, path, raw, *, cwd=None, workspace_binding=None, expected_
     matching = [row for row in config.get("workspace_adapters", []) if canonical.is_relative_to(Path(row["root"]).resolve(strict=True))]
     if matching:
         adapter = max(matching, key=lambda row: len(Path(row["root"]).parts))
-        config.update({key: adapter[key] for key in ("state_dir", "reader_codex", "reader_codex_sha256")})
+        config.update({key: adapter[key] for key in ("state_dir", "reader_codex")})
+        config.pop("reader_codex_sha256", None)
+        if "reader_codex_sha256" in adapter:
+            config["reader_codex_sha256"] = adapter["reader_codex_sha256"]
     replay = ({"expected_selection_digest": expected_selection_digest}
               if expected_selection_digest is not None else {})
     return native_capture_selection(config, path, raw, cwd=current, **replay)
@@ -302,7 +320,9 @@ def _native_capture_selection(config, path, raw, *, cwd, capture_only, expected_
                   _registry_config_sha256=hashlib.sha256(raw).hexdigest())
     resolve_budget(config)
     config["memory_config"] = native_memory_config_path(config["memory_config"])
-    for key in ("state_dir", "native_cli", "reader_codex", "reader_auth", "reader_claude", "transcripts_root"):
+    if "reader_codex" in config and config["reader_codex"] != "codex":
+        config["reader_codex"] = Path(config["reader_codex"]).resolve()
+    for key in ("state_dir", "native_cli", "reader_auth", "reader_claude", "transcripts_root"):
         if key in config: config[key] = Path(config[key]).resolve()
     check = read_regular(Path(path), 8192)
     if len(check) > 8192 or check != raw:

@@ -129,7 +129,7 @@ class ReaderRuntimeTest(unittest.TestCase):
             # the real process/pipe/job implementation remains exercised.
             native_spawn = host_process.spawn
             def fixture_spawn(argv, **kwargs):
-                if Path(argv[0]) == self.codex:
+                if Path(argv[0]).name == self.codex.name and Path(argv[0]).is_relative_to(self.root):
                     argv = [sys.executable, *argv]
                 return native_spawn(argv, **kwargs)
             fixture = patch.object(host_process, "spawn", side_effect=fixture_spawn)
@@ -155,6 +155,129 @@ class ReaderRuntimeTest(unittest.TestCase):
 
     def rows(self):
         return [json.loads(line) for line in self.trace.read_text().splitlines()]
+
+    def path_config(self):
+        return {key: value for key, value in {**self.config, "reader_codex": "codex"}.items()
+                if key != "reader_codex_sha256"}
+
+    def test_path_replacement_affects_new_process_not_reuse_or_thread_rotation(self):
+        config = self.path_config()
+        before = copy.deepcopy(config)
+        with patch.dict(os.environ, {"PATH": str(self.root)}):
+            with ReaderRuntime(config, self.root / "scratch") as runtime:
+                self.assertEqual(runtime.select(self.dialogue, self.cards)["selected_ids"], ["c1"])
+                self.codex.write_text(self.codex.read_text().replace('else ["c1"]', 'else ["c2"]'))
+                # An installed update does not retire an already running process.
+                for _ in range(8):
+                    self.assertEqual(runtime.select(self.dialogue, self.cards)["selected_ids"], ["c1"])
+                self.assertEqual(runtime.config, before)
+            with ReaderRuntime(config, self.root / "scratch") as runtime:
+                result = runtime.select(self.dialogue, self.cards)
+                self.assertEqual((result["reason"], result["selected_ids"]), ("selected", ["c2"]))
+                self.assertEqual(runtime.config, before)
+        self.assertEqual(config, before)
+        starts = [row for row in self.rows() if row["method"] == "initialize"]
+        self.assertEqual(len(starts), 2)
+        self.assertNotEqual(starts[0]["pid"], starts[1]["pid"])
+        self.assertFalse(list((self.root / "scratch").iterdir()))
+
+    def test_path_reordering_changes_next_process_and_assessor_can_start_it(self):
+        other = self.root / "other"
+        other.mkdir()
+        other_codex = other / self.codex.name
+        other_codex.write_text(self.codex.read_text().replace('else ["c1"]', 'else ["c2"]'))
+        other_codex.chmod(0o700)
+        config = self.path_config()
+        for first, second, expected in ((self.root, other, ["c1"]), (other, self.root, ["c2"])):
+            with patch.dict(os.environ, {"PATH": os.pathsep.join(map(str, (first, second)))}), \
+                 ReaderRuntime(config, self.root / "scratch") as runtime:
+                # Both selectors and assessors enter the same new-process path.
+                self.assertEqual(runtime.assess(self.observation(), [])["reason"], "proposed")
+                self.assertEqual(runtime.select(self.dialogue, self.cards)["selected_ids"], expected)
+                self.assertEqual(runtime.config, config)
+
+    def test_relative_path_entry_is_anchored_before_isolated_cwd(self):
+        config = self.path_config()
+        original = Path.cwd()
+        try:
+            os.chdir(self.root)
+            with patch.dict(os.environ, {"PATH": "."}), ReaderRuntime(config, self.root / "scratch") as runtime:
+                self.assertEqual(runtime.select(self.dialogue, self.cards)["reason"], "selected")
+                self.assertNotEqual(runtime.cwd, self.root)
+                executable = runtime.process.args[1 if os.name == "nt" else 0]
+                self.assertEqual(Path(executable).resolve(), self.codex.resolve())
+        finally:
+            os.chdir(original)
+
+    def test_missing_path_reader_fails_before_auth_handoff_without_provider_attempt(self):
+        for role in ("select", "assess"):
+            with self.subTest(role=role), ReaderRuntime(self.path_config(), self.root / "scratch") as runtime, \
+                 patch("reader_runtime.shutil.which", return_value=None) as lookup, \
+                 patch.object(runtime, "_handoff_auth") as handoff, patch("host_process.spawn") as spawn:
+                result = (runtime.select(self.dialogue, self.cards) if role == "select"
+                          else runtime.assess(self.observation(), []))
+                self.assertEqual(result["reason"], "unavailable")
+                self.assertFalse(result["provider_attempt"])
+                self.assertIsNone(result["usage"])
+                self.assertIsNone(runtime.process)
+                lookup.assert_called_once_with("codex")
+                handoff.assert_not_called()
+                spawn.assert_not_called()
+        self.assertFalse((self.root / "scratch").exists())
+
+    def test_non_executable_path_result_fails_before_auth_handoff(self):
+        path = self.root / "not-an-executable"
+        path.mkdir()
+        with ReaderRuntime(self.path_config(), self.root / "scratch") as runtime, \
+             patch("reader_runtime.shutil.which", return_value=str(path)), \
+             patch.object(runtime, "_handoff_auth") as handoff, patch("host_process.spawn") as spawn:
+            result = runtime.select(self.dialogue, self.cards)
+            self.assertEqual(result["reason"], "unavailable")
+            self.assertFalse(result["provider_attempt"])
+            handoff.assert_not_called()
+            spawn.assert_not_called()
+
+    def test_path_plus_hash_or_other_relative_command_is_invalid_without_lookup(self):
+        for changes in ({"reader_codex_sha256": None}, {"reader_codex_sha256": "a" * 64},
+                        {"reader_codex": "./codex"}, {"reader_codex": "codex-other"}):
+            with self.subTest(changes=changes), \
+                 ReaderRuntime({**self.path_config(), **changes}, self.root / "scratch") as runtime, \
+                 patch("reader_runtime.shutil.which") as lookup, patch("host_process.spawn") as spawn:
+                result = runtime.select(self.dialogue, self.cards)
+                self.assertEqual(result["reason"], "invalid_config")
+                self.assertFalse(result["provider_attempt"])
+                lookup.assert_not_called()
+                spawn.assert_not_called()
+
+    def test_explicit_legacy_pin_still_refuses_changed_binary_before_auth_or_spawn(self):
+        self.codex.write_text(self.codex.read_text() + "\n# installed replacement\n")
+        for role in ("select", "assess"):
+            with self.subTest(role=role), ReaderRuntime(self.config, self.root / "scratch") as runtime, \
+                 patch("reader_runtime.shutil.which") as lookup, \
+                 patch.object(runtime, "_handoff_auth") as handoff, patch("host_process.spawn") as spawn:
+                result = (runtime.select(self.dialogue, self.cards) if role == "select"
+                          else runtime.assess(self.observation(), []))
+                self.assertEqual(result["reason"], "binary_changed")
+                self.assertFalse(result["provider_attempt"])
+                self.assertIsNone(result["usage"])
+                lookup.assert_not_called()
+                handoff.assert_not_called()
+                spawn.assert_not_called()
+
+    def test_windows_path_shell_trampoline_is_unavailable_without_fallback(self):
+        trampoline = self.root / "codex.cmd"
+        trampoline.write_bytes(b"echo fixture\n")
+        trampoline.chmod(0o700)
+        with ReaderRuntime(self.path_config(), self.root / "scratch") as runtime, \
+             patch("host_platform.WINDOWS", True), \
+             patch("reader_runtime.shutil.which", return_value=str(trampoline)) as lookup, \
+             patch.object(runtime, "_handoff_auth") as handoff, patch("host_process.spawn") as spawn:
+            result = runtime.select(self.dialogue, self.cards)
+            self.assertEqual(result["reason"], "unavailable")
+            self.assertFalse(result["provider_attempt"])
+            lookup.assert_called_once_with("codex")
+            handoff.assert_not_called()
+            spawn.assert_not_called()
 
     def observation(self, *, extra_text=None):
         def reference(ordinal):

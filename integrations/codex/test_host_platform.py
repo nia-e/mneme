@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,35 @@ import host_platform
 
 
 class HostPlatformTests(unittest.TestCase):
+    def test_reader_codex_modes_are_explicit_and_path_preparation_is_symbolic(self):
+        with patch.object(host_platform.shutil, "which", side_effect=AssertionError("PATH lookup")), \
+             patch.object(Path, "resolve", side_effect=AssertionError("path canonicalization")):
+            for value in ("codex", Path("codex")):
+                fields = host_platform.prepare_reader_codex(value)
+                self.assertEqual(fields, {"reader_codex": "codex"})
+                host_platform.validate_reader_codex(fields)
+        pinned = {"reader_codex": str(Path(sys.executable).resolve()), "reader_codex_sha256": "a" * 64}
+        host_platform.validate_reader_codex(pinned)
+        host_platform.validate_reader_codex({**pinned, "reader_codex": Path(pinned["reader_codex"])})
+        for fields in ({}, {"reader_codex": "codex", "reader_codex_sha256": None},
+                       {"reader_codex": "codex", "reader_codex_sha256": "a" * 64},
+                       {"reader_codex": "other"}, {"reader_codex": "./codex"},
+                       {"reader_codex": pinned["reader_codex"]},
+                       {**pinned, "reader_codex_sha256": "A" * 64}):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                host_platform.validate_reader_codex(fields)
+
+    def test_explicit_reader_preparation_retains_legacy_executable_pin(self):
+        path = Path(sys.executable).resolve()
+        fields = host_platform.prepare_reader_codex(path)
+        self.assertEqual(fields, {"reader_codex": str(path),
+            "reader_codex_sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        for value in ("other", "./codex", "bin/codex", None, 1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                host_platform.prepare_reader_codex(value)
+        with tempfile.TemporaryDirectory() as temp, self.assertRaises(ValueError):
+            host_platform.prepare_reader_codex(Path(temp).resolve())
+
     def test_native_executable_name(self):
         self.assertEqual(host_platform.executable_name("mnemed", windows=True), "mnemed.exe")
         self.assertEqual(host_platform.executable_name("mnemed.exe", windows=True), "mnemed.exe")

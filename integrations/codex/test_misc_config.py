@@ -52,6 +52,30 @@ class MiscConfigTests(unittest.TestCase):
         self.assertTrue(events["Stop"][1]["hooks"][0]["async"])
         self.assertEqual(len(events["SessionEnd"]), 1)
 
+    def test_default_reader_is_symbolic_without_lookup_and_static_parser_keeps_it(self):
+        arguments = {key: value for key, value in self.arguments.items() if key != 'reader_codex'}
+        with patch('shutil.which', side_effect=AssertionError('reader resolved during preparation')):
+            config = misc_config.prepare(**arguments)['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+        self.assertEqual(misc_config.validate_config(config), config)
+        for reader, digest in (('codex', None), ('codex', 'a' * 64), ('relative', 'a' * 64)):
+            with self.subTest(reader=reader, digest=digest), self.assertRaises(ValueError):
+                misc_config.validate_config({**config, 'reader_codex': reader, 'reader_codex_sha256': digest})
+        with self.assertRaises(ValueError):
+            misc_config.validate_config({**config, 'reader_codex': str(self.reader)})
+
+    def test_cli_reader_option_is_optional_and_keeps_path_intent(self):
+        command = [sys.executable, misc_config.__file__]
+        for name, value in self.arguments.items():
+            if name != 'reader_codex':
+                command.extend(['--' + name.replace('_', '-'), value])
+        result = subprocess.run(command, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)['hook_config']
+        self.assertEqual(config['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', config)
+
     def test_static_shape_rejects_old_schemas_root_and_missing_authority(self):
         for mutation in ({"schema": "mneme.codex-hooks.config.v8"}, {"project_root": str(self.root)},
                          {"workspace_binding": choose_workspace(self.root)}, {"recording_mode": "unknown"},

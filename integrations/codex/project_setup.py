@@ -45,7 +45,9 @@ def read_json(path, limit=1024 * 1024):
 
 
 def executable(value, name, sibling=None):
-    source = value or (sibling if sibling and sibling.is_file() else shutil.which(executable_name(name)))
+    source = value
+    if source is None or str(source) == name:
+        source = sibling if sibling and sibling.is_file() else shutil.which(executable_name(name))
     if source is None:
         raise ValueError(f"{name} executable unavailable; install it explicitly or pass --{name if name != 'mneme-mcp' else 'mcp'}-binary PATH (no builds/downloads performed)")
     source = Path(source).resolve(strict=True)
@@ -224,7 +226,9 @@ def setup(args, result):
         if previous_owner is not None:
             raise ValueError("project CLI owner already exists without a matching local Codex integration; init will not replace or compete with it")
         mcp = executable(args.mcp_binary, "mneme-mcp", mnemed.parent / executable_name("mneme-mcp"))
-        codex = executable(args.codex_binary, "codex")
+        # Persist the command choice, not whichever executable happens to be
+        # installed today. Hook trust resolves its one-shot executable below.
+        reader_codex = args.codex_binary if args.codex_binary is not None else "codex"
         if args.port is None:
             with socket.socket() as listener:
                 listener.bind(("127.0.0.1", 0))
@@ -234,7 +238,7 @@ def setup(args, result):
         # All configuration/precondition validation precedes storage creation.
         plan = install.prepare(root, prefix, mnemed, mcp, port, recall_mode="async",
                                recording_mode="off" if args.no_recording else "automatic",
-                               reader_model=install.READER_MODELS[0], reader_codex=codex,
+                               reader_model=install.READER_MODELS[0], reader_codex=reader_codex,
                                store_registry=store_registry)
         result["stage"] = "store_admission"
         install.config_directory(dot)
@@ -331,8 +335,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("root", "mnemed", "library-helper"):
         parser.add_argument("--" + name, required=True, type=Path)
-    for name in ("mcp-binary", "codex-binary", "library-config", "store-registry"):
+    for name in ("mcp-binary", "library-config", "store-registry"):
         parser.add_argument("--" + name, type=Path)
+    parser.add_argument("--codex-binary",
+                        help="optional absolute reader pin; default codex follows PATH and is resolved separately for hook trust")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-recording", action="store_true")
     parser.add_argument("--no-trust-hooks", action="store_true")

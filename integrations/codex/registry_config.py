@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import sys
 
-from host_platform import hook_command, is_executable
+from host_platform import hook_command, is_executable, prepare_reader_codex
 from misc_binding import canonical_path
 from registry_runtime import SCHEMA, validate_static
 from store_registry import SCHEMA as REGISTRY_SCHEMA, load_registry
@@ -262,24 +262,24 @@ def default_registry(*, global_preferences=None, misc=None, global_core=False):
     return {"schema": REGISTRY_SCHEMA, "stores": stores}
 
 
-def prepare(*, store_registry, state_dir, reader_codex, hooks_program, hook_config_path,
+def prepare(*, store_registry, state_dir, reader_codex="codex", hooks_program, hook_config_path,
             python=sys.executable, librarian_effort="medium", recording_mode="off", reader_auth=None):
     """Produce exact review/trust source; never register a second project actor."""
     registry_path = canonical_path(store_registry)
     registry = load_registry(registry_path)
-    reader = canonical_path(Path(reader_codex).resolve(strict=True))
+    reader = prepare_reader_codex(reader_codex)
     program = canonical_path(Path(hooks_program).resolve(strict=True))
     interpreter = canonical_path(Path(python).resolve(strict=True))
     destination = canonical_path(hook_config_path)
-    if not is_executable(reader) or not is_executable(interpreter) or not program.is_file():
-        raise ValueError("registry preparation requires existing reader, dispatcher and Python")
+    if not is_executable(interpreter) or not program.is_file():
+        raise ValueError("registry preparation requires existing dispatcher and Python")
     if program.name != "hook_launcher.py":
         raise ValueError("device registry hooks require the shipped hook_launcher.py dispatcher")
     config = {"schema": SCHEMA, "store_registry": str(registry_path),
               "state_dir": str(canonical_path(state_dir)), "memory_scope": "registry",
               "memory_mode": "async", "reader_model": "gpt-6.1-sol",
               "librarian_effort": librarian_effort, "recording_mode": recording_mode,
-              "reader_codex": str(reader), "reader_codex_sha256": hashlib.sha256(reader.read_bytes()).hexdigest(),
+              **reader,
               **prepared_fields(recording_mode, False)}
     if reader_auth is not None:
         config["reader_auth"] = str(canonical_path(reader_auth))
@@ -305,7 +305,7 @@ def prepare(*, store_registry, state_dir, reader_codex, hooks_program, hook_conf
 
 
 
-def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
+def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex="codex",
                    hooks_program, hook_config_path, python=sys.executable,
                    reader_auth=None, workspace_adapters=None, stable_root=None,
                    activity_root=None, activity_config=None, activity_device=None, activity_mcp=None):
@@ -320,7 +320,7 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
     path = native_memory_config_path(Path(memory_config).absolute())
     native = canonical_path(Path(native_cli).resolve(strict=True))
     workspace = canonical_path(Path(cwd).resolve(strict=True))
-    reader = canonical_path(Path(reader_codex).resolve(strict=True))
+    reader = prepare_reader_codex(reader_codex)
     program = canonical_path(Path(hooks_program).resolve(strict=True))
     interpreter = canonical_path(Path(python).resolve(strict=True))
     destination = canonical_path(hook_config_path)
@@ -339,8 +339,8 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
     command = hook_command(argv)
     background_command = hook_command([*argv, "--reader-background"])
     core_command = hook_command([*argv, "--core"])
-    if not all(is_executable(executable) for executable in (native, reader, interpreter)) or not program.is_file():
-        raise ValueError("native preparation requires existing native CLI, reader, dispatcher and Python")
+    if not all(is_executable(executable) for executable in (native, interpreter)) or not program.is_file():
+        raise ValueError("native preparation requires existing native CLI, dispatcher and Python")
     if program.name != "hook_launcher.py":
         raise ValueError("native device hooks require shipped hook_launcher.py")
     activity = None
@@ -355,8 +355,7 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
         raise ValueError("activity options require explicit --activity-root")
     selected = native_select(str(path), str(native), str(workspace))
     config = {"schema": NATIVE_SCHEMA, "memory_config": str(path), "native_cli": str(native),
-              "state_dir": str(canonical_path(state_dir)), "reader_codex": str(reader),
-              "reader_codex_sha256": hashlib.sha256(reader.read_bytes()).hexdigest()}
+              "state_dir": str(canonical_path(state_dir)), **reader}
     if reader_auth is not None:
         config["reader_auth"] = str(canonical_path(reader_auth))
     if workspace_adapters is not None:
@@ -366,12 +365,9 @@ def prepare_native(*, memory_config, native_cli, cwd, state_dir, reader_codex,
         for adapter in workspace_adapters:
             if not isinstance(adapter, dict) or set(adapter) != {"root", "state_dir", "reader_codex"}:
                 raise ValueError("workspace adapters select only root, state_dir and reader_codex")
-            pinned_reader = canonical_path(Path(adapter["reader_codex"]).resolve(strict=True))
-            if not is_executable(pinned_reader):
-                raise ValueError("workspace adapter reader must be executable")
+            adapter_reader = prepare_reader_codex(adapter["reader_codex"])
             adapters.append({"root": str(canonical_path(Path(adapter["root"]).resolve(strict=True))),
-                "state_dir": str(canonical_path(adapter["state_dir"])), "reader_codex": str(pinned_reader),
-                "reader_codex_sha256": hashlib.sha256(pinned_reader.read_bytes()).hexdigest()})
+                "state_dir": str(canonical_path(adapter["state_dir"])), **adapter_reader})
         config["workspace_adapters"] = sorted(adapters, key=lambda item: item["root"])
     validate_native_static(config)
     from hooks import MAX_CONFIG
@@ -506,15 +502,19 @@ def main(argv=None):
     defaults.add_argument("--global-core", action="store_true",
                           help="explicitly grant startup core to the reviewed personal owner")
     prep = sub.add_parser("prepare", help="preview device dispatcher config and exact hook definitions")
-    for name in ("store-registry", "state-dir", "reader-codex", "hooks-program", "hook-config-path"):
+    for name in ("store-registry", "state-dir", "hooks-program", "hook-config-path"):
         prep.add_argument("--" + name, required=True)
+    prep.add_argument("--reader-codex", default="codex",
+                      help="codex from PATH (default), or an absolute executable to hash-pin")
     prep.add_argument("--python", default=sys.executable)
     prep.add_argument("--recording-mode", choices=("off", "automatic"), default="off")
     prep.add_argument("--librarian-effort", choices=("low", "medium", "high"), default="medium")
     prep.add_argument("--reader-auth")
     native = sub.add_parser("prepare-native", help="preview one device actor driven by native memory.toml")
-    for name in ("memory-config", "native-cli", "cwd", "state-dir", "reader-codex", "hooks-program", "hook-config-path"):
+    for name in ("memory-config", "native-cli", "cwd", "state-dir", "hooks-program", "hook-config-path"):
         native.add_argument("--" + name, required=True)
+    native.add_argument("--reader-codex", default="codex",
+                        help="codex from PATH (default), or an absolute executable to hash-pin")
     native.add_argument("--python", default=sys.executable)
     native.add_argument("--reader-auth")
     native.add_argument("--workspace-adapters", type=Path,

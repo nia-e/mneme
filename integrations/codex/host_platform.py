@@ -8,8 +8,10 @@ starts the actual executable directly with ProcessStartInfo and inherited I/O.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -30,6 +32,36 @@ def is_executable(path, *, windows=None):
     windows = WINDOWS if windows is None else windows
     path = Path(path)
     return path.is_file() and (path.suffix.lower() == ".exe" if windows else os.access(path, os.X_OK))
+
+
+def validate_reader_codex(config):
+    """A launch-time PATH command or an explicit legacy executable pin."""
+    codex = config.get("reader_codex")
+    if codex == "codex":
+        if "reader_codex_sha256" in config:
+            raise ValueError("PATH reader_codex must omit reader_codex_sha256")
+        return
+    if not isinstance(codex, (str, Path)) or not Path(codex).is_absolute():
+        raise ValueError("reader_codex must be 'codex' or an absolute path")
+    digest = config.get("reader_codex_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("invalid reader_codex_sha256")
+
+
+def prepare_reader_codex(value="codex"):
+    """Persist PATH intent unchanged; only an explicit path requests a pin."""
+    if not isinstance(value, (str, Path)):
+        raise ValueError("reader_codex must be 'codex' or an absolute path")
+    if str(value) == "codex":
+        return {"reader_codex": "codex"}
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("reader_codex must be 'codex' or an absolute path")
+    path = path.resolve(strict=True)
+    if not is_executable(path):
+        raise ValueError("reader_codex must be executable")
+    return {"reader_codex": str(path),
+            "reader_codex_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def find_executable(name, *, sibling_dir=None):

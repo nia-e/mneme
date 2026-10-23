@@ -829,19 +829,62 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'supported reader model'):install.validate_plan(injected)
         self.assertFalse(self.prefix.exists())
 
-    def test_async_requires_explicit_model_and_absolute_codex(self):
+    def test_async_requires_explicit_model_and_rejects_arbitrary_reader_commands(self):
         for options, message in [
             ({'recall_mode': 'async'}, '--reader-model'),
-            ({'recall_mode': 'async', 'reader_model': 'gpt-6.1-sol'}, 'absolute --reader-codex'),
             ({'reader_model': 'gpt-6.1-sol'}, 'require --recall-mode async'),
             ({'recall_mode': 'async', 'reader_model': 'gpt-5.6-terra'}, '--reader-model'),
             ({'recall_mode': 'async', 'reader_model': 'gpt-6.1-sol',
-              'reader_codex': Path('codex')}, 'absolute --reader-codex'),
+              'reader_codex': Path('other-codex')}, "'codex' or an absolute path"),
+            ({'recall_mode': 'async', 'reader_model': 'gpt-6.1-sol',
+              'reader_codex': 'codex --flag'}, "'codex' or an absolute path"),
         ]:
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, message):
                 install.prepare(self.project, self.prefix, self.sources / 'mnemed',
                                 self.sources / 'mneme-mcp', 18765, program_root=self.sources,
                                 **options)
+        self.assertFalse(self.prefix.exists())
+
+    def test_async_default_survives_prepare_apply_and_receipt_without_codex_installed(self):
+        (self.sources / 'codex').unlink()
+        with patch('shutil.which', side_effect=AssertionError('reader resolved during installation')):
+            plan = install.prepare(self.project, self.prefix, self.sources / 'mnemed',
+                self.sources / 'mneme-mcp', 18765, program_root=self.sources,
+                recall_mode='async', reader_model='gpt-6.1-sol')
+            self.assertEqual(plan['reader_codex'], 'codex')
+            install.validate_plan(plan)
+            _, hook = install.runtime_configs(plan)
+            self.assertEqual(hook['reader_codex'], 'codex')
+            self.assertNotIn('reader_codex_sha256', hook)
+            result = install.apply(json.loads(json.dumps(plan)))
+        saved = json.loads((self.prefix / 'config/hooks.json').read_text())
+        self.assertEqual(saved, hook)
+        receipt = json.loads(Path(result['receipt']).read_text())
+        self.assertEqual(receipt['plan']['reader_codex'], 'codex')
+        self.assertEqual(install.uninstall(result['receipt'])['status'], 'configuration removed')
+
+    def test_async_symbolic_reader_plan_rejects_alternate_commands_and_partial_pins(self):
+        plan = self.async_plan()
+        for reader in ('other-codex', 'codex --flag', './codex', None,
+                       {'source': 'codex', 'sha256': 'a' * 64},
+                       {'source': str(self.sources / 'codex')},
+                       {'source': str(self.sources / 'codex'), 'sha256': None}):
+            changed = {**plan, 'reader_codex': reader}
+            changed['plan_sha256'] = install.plan_hash(changed)
+            with self.subTest(reader=reader), self.assertRaises(ValueError):
+                install.validate_plan(changed)
+
+    def test_async_cli_defaults_to_symbolic_reader(self):
+        output = self.base / 'reviewed-plan.json'
+        command = [sys.executable, install.__file__, 'prepare',
+            '--project-root', str(self.project), '--prefix', str(self.prefix),
+            '--mnemed', str(self.sources / 'mnemed'), '--mcp', str(self.sources / 'mneme-mcp'),
+            '--recall-mode', 'async', '--reader-model', 'gpt-6.1-sol', '--output', str(output)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(output.read_text())
+        self.assertEqual(plan['reader_codex'], 'codex')
+        self.assertNotIn('reader_codex_sha256', install.runtime_configs(plan)[1])
         self.assertFalse(self.prefix.exists())
 
     def test_async_bundle_hook_groups_and_uninstall(self):

@@ -2,24 +2,23 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 
+from host_platform import prepare_reader_codex
 from target_policy import workshop_policy, WORKSHOP_SCHEMA
 
 
-def prepare(*, workspace_root, state_dir, service_config, database_path, db_id, reader_codex):
+def prepare(*, workspace_root, state_dir, service_config, database_path, db_id, reader_codex="codex"):
     root = Path(workspace_root).resolve(strict=True)
     state = Path(state_dir)
     service = Path(service_config).resolve(strict=True)
-    reader = Path(reader_codex).resolve(strict=True)
-    if (not root.is_dir() or not state.is_absolute() or not reader.is_file()
-            or not os.access(reader, os.X_OK)):
-        raise ValueError("workshop requires existing workspace and executable, absolute state directory")
+    reader = prepare_reader_codex(reader_codex)
+    if not root.is_dir() or not state.is_absolute():
+        raise ValueError("workshop requires existing workspace and absolute state directory")
     config = {"schema": WORKSHOP_SCHEMA, "project_root": str(root), "state_dir": str(state),
               "service_config": str(service), "memory_scope": "workshop", "memory_mode": "async",
               "reader_model": "gpt-6.1-sol", "librarian_effort": "medium", "recording_mode": "automatic",
-              "reader_codex": str(reader), "reader_codex_sha256": hashlib.sha256(reader.read_bytes()).hexdigest(),
+              **reader,
               "store_target": {"db_alias": "user", "database_path": database_path, "db_id": db_id}}
     workshop_policy(config)
     from install import PROGRAMS
@@ -34,8 +33,10 @@ def prepare(*, workspace_root, state_dir, service_config, database_path, db_id, 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for flag in ("workspace-root", "state-dir", "service-config", "database-path", "db-id", "reader-codex"):
+    for flag in ("workspace-root", "state-dir", "service-config", "database-path", "db-id"):
         parser.add_argument("--" + flag, required=True)
+    parser.add_argument("--reader-codex", default="codex",
+                        help="codex from PATH (default), or an absolute executable to hash-pin")
     args = parser.parse_args()
     print(json.dumps(prepare(**vars(args)), ensure_ascii=False, indent=2))
 
