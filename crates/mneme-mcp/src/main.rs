@@ -746,7 +746,7 @@ impl Server {
                 Ok(json!({
                     "protocolVersion": negotiated_protocol(&params)?,
                     "capabilities": { "tools": {}, "experimental": {
-                        (mneme_app::core::CONTRADICTION_SUMMARY_FEATURE): true
+                        (mneme_app::core::CONTRADICTION_SUMMARY_FEATURE): {}
                     } },
                     "serverInfo": {
                         "name": "mneme-mcp",

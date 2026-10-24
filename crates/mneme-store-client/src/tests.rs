@@ -850,15 +850,18 @@ async fn configured_content_edit_profile_parity_denies_before_operation_send() {
 #[tokio::test]
 async fn optional_core_notice_uses_initialize_without_catalog_io() {
     let notice = json!({"status":"complete","open_found":2,"rows_scanned":3});
-    for feature in [
-        None,
-        Some(json!(false)),
-        Some(json!("true")),
-        Some(json!(1)),
-        Some(json!({})),
-        Some(json!(true)),
+    for (feature, supported) in [
+        (None, false),
+        (Some(Value::Null), false),
+        (Some(json!(false)), false),
+        (Some(json!("true")), false),
+        (Some(json!(1)), false),
+        (Some(json!([])), false),
+        (Some(json!({})), true),
+        (Some(json!({"future_metadata": 1})), true),
+        // Current configured owners may still use the boolean predecessor.
+        (Some(json!(true)), true),
     ] {
-        let supported = feature == Some(json!(true));
         let server = fixture_with_core(
             "read-only",
             false,
@@ -913,7 +916,7 @@ async fn default_core_read_omits_optional_field_and_result() {
         false,
         false,
         CoreFixture {
-            feature: Some(json!(true)),
+            feature: Some(json!({})),
             notice: Some(json!({"status":"complete","open_found":1,"rows_scanned":1})),
             ..CoreFixture::default()
         },
@@ -993,7 +996,7 @@ async fn optional_core_notice_failures_do_not_erase_cards_or_bypass_identity() {
             false,
             false,
             CoreFixture {
-                feature: Some(json!(true)),
+                feature: Some(json!({})),
                 notice,
                 ..CoreFixture::default()
             },
@@ -1017,7 +1020,7 @@ async fn optional_core_notice_failures_do_not_erase_cards_or_bypass_identity() {
             wrong_handshake,
             false,
             CoreFixture {
-                feature: Some(json!(true)),
+                feature: Some(json!({})),
                 wrong_result_identity: true,
                 ..CoreFixture::default()
             },

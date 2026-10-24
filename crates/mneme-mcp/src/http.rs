@@ -1279,8 +1279,16 @@ mod tests {
         );
         assert_eq!(
             initialize["result"]["capabilities"]["experimental"]["mneme/core-contradiction-summary-v1"],
-            true
+            serde_json::json!({})
         );
+        assert!(
+            initialize["result"]["capabilities"]["experimental"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(serde_json::Value::is_object)
+        );
+        assert!(mneme_app::core::initialized_support(&initialize["result"]));
 
         headers.insert("mcp-session-id", session);
         headers.insert(

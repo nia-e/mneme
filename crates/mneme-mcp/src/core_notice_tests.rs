@@ -17,8 +17,17 @@ async fn core_notice_catalog_matches_boolean_admission_before_database_checkout(
             .unwrap();
         assert_eq!(
             initialize["capabilities"]["experimental"]["mneme/core-contradiction-summary-v1"],
-            true
+            json!({})
         );
+        assert!(
+            initialize["capabilities"]["experimental"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(Value::is_object),
+            "MCP experimental capability values must be objects: {initialize}"
+        );
+        assert!(mneme_app::core::initialized_support(&initialize));
         let schemas = tool_schemas(server.capability);
         let schema = tool_input_schema(&schemas, "core");
         assert_eq!(

@@ -146,7 +146,10 @@ pub fn advertised(catalog: &[Value]) -> bool {
 }
 
 pub fn initialized_support(initialize: &Value) -> bool {
-    initialize["capabilities"]["experimental"][CONTRADICTION_SUMMARY_FEATURE] == true
+    let feature = &initialize["capabilities"]["experimental"][CONTRADICTION_SUMMARY_FEATURE];
+    // MCP experimental capability values are objects. Keep recognizing the
+    // boolean predecessor while current configured owners still advertise it.
+    feature.is_object() || feature == true
 }
 
 /// Do not send a newly introduced optional field to owners whose strict parser
@@ -217,6 +220,26 @@ pub fn attach_contradiction_summary(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn initialized_support_accepts_mcp_objects_and_current_legacy_owners() {
+        assert!(!initialized_support(&json!({})));
+        for (feature, supported) in [
+            (json!({}), true),
+            (json!({"future_metadata": 1}), true),
+            (json!(true), true),
+            (json!(false), false),
+            (Value::Null, false),
+            (json!("true"), false),
+            (json!(1), false),
+            (json!([]), false),
+        ] {
+            let initialize = json!({"capabilities":{"experimental":{
+                (CONTRADICTION_SUMMARY_FEATURE): feature
+            }}});
+            assert_eq!(initialized_support(&initialize), supported, "{initialize}");
+        }
+    }
 
     #[test]
     fn strict_opt_in_and_old_owner_fallback_preserve_default() {
