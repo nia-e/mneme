@@ -318,7 +318,7 @@ class NativeInstallTests(unittest.TestCase):
         path.write_bytes(install.json_bytes(service))
         with patch('host_platform.shutil.which', side_effect=AssertionError('owner selector resolved')):
             retained = self.plan(existing_service_config=path)
-            self.assertEqual(retained['config_revision'], 41)
+            self.assertEqual(retained['config_revision'], install.EXISTING_SERVICE_REVISION)
             self.assertNotIn('existing_owner_binary', retained)
             install.apply(retained)
         self.assertEqual(json.loads((self.fixture.prefix / 'config/service.json').read_text()), service)

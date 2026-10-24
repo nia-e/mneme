@@ -9,13 +9,13 @@ include!(concat!(env!("OUT_DIR"), "/init_bundle.rs"));
 
 #[derive(Args)]
 pub(crate) struct InitArgs {
-    /// Project directory (default: current directory). Never selects the user store.
+    /// Project directory: absolute or parent-free relative path (default: current directory; no ..).
     #[arg(long)]
     root: Option<PathBuf>,
-    /// Set up recall/inspection without automatic session recording.
+    /// Non-native setup only: recall/inspection without automatic recording; native policy controls recording.
     #[arg(long)]
     no_recording: bool,
-    /// Leave the installed project hooks pending manual Codex trust review.
+    /// Non-native setup: leave generated project hooks pending manual Codex trust review.
     #[arg(long)]
     no_trust_hooks: bool,
     /// Explicit MCP runtime selector and installation source; omitted requires mneme-mcp on PATH.
@@ -360,6 +360,25 @@ pub(crate) async fn discover_python(explicit: Option<&Path>) -> Option<PathBuf> 
     .await
 }
 
+/// Native declarations select the setup route, not an admitted/active store.
+/// Keep the logical user path (including managed symlinks); project-only
+/// declarations instead use the nearest overlay witnessed by the shared reader.
+fn native_setup_source(
+    prepared: Option<mneme_config::WorkspaceDeclarations>,
+) -> Result<Option<PathBuf>, AnyErr> {
+    let Some(prepared) = prepared else {
+        return Ok(None);
+    };
+    let source = if prepared.context.sources.iter().any(|s| s.role == "user") {
+        prepared.request.user_path
+    } else {
+        prepared.context.project.overlay
+    };
+    source.map(Some).ok_or_else(|| {
+        "native setup declarations have no configuration source; repair native configuration".into()
+    })
+}
+
 pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
     if !cfg!(feature = "cozo") {
         return refuse(
@@ -377,6 +396,44 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
             json,
         );
     }
+    // Resolve relative CLI roots without canonicalizing away lexical privacy
+    // boundaries; the shared workspace reader examines both ancestry chains.
+    let root = match std::path::absolute(args.root.as_deref().unwrap_or(Path::new("."))) {
+        Ok(root) => root,
+        Err(error) => {
+            return refuse(
+                &format!(
+                    "init cannot resolve its project directory: {error}; no project state changed"
+                ),
+                json,
+            );
+        }
+    };
+    // Parse present metadata before launching even the Python probe. Invalid
+    // native declarations must never become permission for legacy setup.
+    // Effective native selection/admission remains the coordinator's job.
+    let memory_config = match mneme_config::prepare_workspace(None, &root, None)
+        .map_err(AnyErr::from)
+        .and_then(native_setup_source)
+    {
+        Ok(source) => source,
+        Err(error) => {
+            let root_hint = if root
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+            {
+                "; use a parent-free --root path, or cd into the target before rerunning init"
+            } else {
+                ""
+            };
+            return refuse(
+                &format!(
+                    "init cannot prepare native configuration: {error}{root_hint}; no project state changed"
+                ),
+                json,
+            );
+        }
+    };
     let python = discover_python(args.python.as_deref()).await;
     let Some(python) = python else {
         return refuse(
@@ -396,7 +453,6 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
         }
     };
     let executable = std::env::current_exe()?;
-    let root = args.root.clone().unwrap_or(std::env::current_dir()?);
     let mut command = tokio::process::Command::new(&python);
     #[cfg(windows)]
     command.env("PYTHONUTF8", "1").args(["-X", "utf8"]);
@@ -410,6 +466,9 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
         .arg("--library-helper")
         .arg(bundle.path.join("library/library.py"))
         .kill_on_drop(true);
+    if let Some(config) = memory_config {
+        command.arg("--memory-config").arg(config);
+    }
     if json {
         command.arg("--json");
     }
@@ -462,6 +521,66 @@ mod tests {
             std::env::temp_dir().join(format!("mneme init café 日本語 {}", ulid::Ulid::new())),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn native_setup_source_is_presence_not_store_activation() {
+        assert!(native_setup_source(None).unwrap().is_none());
+        let bundle = unicode_bundle();
+        let user = bundle.path.join("user.toml");
+        // Empty declarations still require native setup; they are not absence.
+        std::fs::write(&user, "schema='mneme.config.v1'").unwrap();
+        let prepared = mneme_config::prepare_workspace(Some(&user), &bundle.path, None)
+            .unwrap()
+            .unwrap();
+        assert!(prepared.local.stores.is_empty());
+        assert_eq!(native_setup_source(Some(prepared)).unwrap(), Some(user));
+    }
+
+    #[test]
+    fn native_setup_source_uses_overlay_only_without_an_actual_user_source() {
+        let bundle = unicode_bundle();
+        let user = bundle.path.join("user.toml");
+        std::fs::write(&user, "schema='mneme.config.v1'").unwrap();
+        let mut prepared = mneme_config::prepare_workspace(Some(&user), &bundle.path, None)
+            .unwrap()
+            .unwrap();
+        let overlay = bundle.path.join(".mneme/memory.toml");
+        prepared.context.project.overlay = Some(overlay.clone());
+        assert_eq!(
+            native_setup_source(Some(prepared.clone())).unwrap(),
+            Some(user)
+        );
+        // Discover requests freeze even an absent user path. It cannot take
+        // precedence over a project source unless it was actually read.
+        prepared.context.sources.retain(|s| s.role != "user");
+        assert_eq!(
+            native_setup_source(Some(prepared.clone())).unwrap(),
+            Some(overlay)
+        );
+        prepared.context.project.overlay = None;
+        assert!(native_setup_source(Some(prepared)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_setup_source_preserves_logical_user_symlink() {
+        let bundle = unicode_bundle();
+        let target = bundle.path.join("managed.toml");
+        let logical = bundle.path.join("memory.toml");
+        std::fs::write(&target, "schema='mneme.config.v1'").unwrap();
+        std::os::unix::fs::symlink(&target, &logical).unwrap();
+        let prepared = mneme_config::prepare_workspace(Some(&logical), &bundle.path, None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            prepared
+                .context
+                .sources
+                .iter()
+                .any(|s| s.path == target.canonicalize().unwrap())
+        );
+        assert_eq!(native_setup_source(Some(prepared)).unwrap(), Some(logical));
     }
 
     #[test]

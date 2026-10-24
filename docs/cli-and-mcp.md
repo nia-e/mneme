@@ -289,19 +289,24 @@ links. Snapshot publication is an operator workflow; see
 ## Selective Codex project memory
 
 ```sh
-mnemed init                         # project setup, including automatic recording
-mnemed init --no-recording          # recall and inspection without recording
+mnemed init                         # respects existing native policy
+mnemed init --no-recording          # recording off for non-native setup
 mnemed init --root /path/to/project
 ```
 
-`init` creates or adopts `.mneme/codex-memory.db`, starts its shared owner and
-writes CLI, MCP and hook configuration. It registers the verified owner locally,
-not for snapshots, peers or hosted tunnels. Existing off/private/isolated choices
-and conflicting stores are not silently replaced.
+`init` creates or adopts `.mneme/codex-memory.db` and starts its shared owner.
+When native configuration is present, it adds a guarded project-local owner
+overlay and managed MCP startup, preserving native grants, defaults, libraries
+and the configured device actor. Malformed or denied native policy never falls
+back to legacy setup. See [native project setup](declarative-config.md#native-project-setup).
+Without native configuration, it writes the existing project CLI/MCP/hooks and
+registers the owner locally, not for snapshots, peers or hosted tunnels.
+Existing off/private/isolated choices and conflicting stores are not replaced.
 
 Setup requires Python 3.11+, Codex and a matching `mneme-mcp`. Override discovery
 with `--python`, `--codex-binary` or `--mcp-binary`. `--json` reports completed stages
-and recovery actions. Hook trust is limited to matching installed Mneme hooks;
+and recovery actions. Use normalized root paths without `..` components; relative
+child paths are accepted. In non-native setup, hook trust is limited to matching installed Mneme hooks;
 `--no-trust-hooks` leaves trust unchanged. If Codex's configuration API is unavailable
 or the installed definitions differ, trust remains pending for manual review.
 

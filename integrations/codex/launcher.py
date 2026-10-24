@@ -1,9 +1,9 @@
-"""Bounded Codex stdio MCP front door for one explicitly selected Mneme owner.
+"""Codex MCP startup for explicit local owners and connect-only endpoints.
 
-The first valid initialize ensures that owner is ready; remote owners remain
-connect-only. This process owns only its MCP session, never a database lease.
-A failed request is reported once and
-never replayed; the next explicit client request may establish a new session.
+Legacy relay mode ensures one selected owner on initialize. Explicit native
+local mode checks current-workspace policy, ensures that local owner, then runs the full
+configured router without reading protocol input. Neither opens a database.
+Relay failures are reported once, never replayed automatically.
 """
 
 import argparse
@@ -16,8 +16,10 @@ import re
 import sys
 
 from mcp_client import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PROTOCOL_VERSION, McpClient, McpError
-from service import _expected_catalog, client_for_service, ensure_ready, load_config
+from service import (_expected_catalog, client_for_service, ensure_ready, load_config,
+                     load_config_snapshot, ServiceConfig)
 from profile import permit_service, select_for_cwd
+from host_process import IS_WINDOWS
 
 ALLOWED_METHODS = frozenset(("initialize", "notifications/initialized", "ping", "tools/list", "tools/call"))
 SUPPORTED_VERSIONS = frozenset((PROTOCOL_VERSION, "2025-06-18", "2025-03-26"))
@@ -284,13 +286,113 @@ def _enroll_selected_project(config, selection, service_path):
                           database=config.database_name, owner_endpoint=endpoint)
 
 
+def _absolute_native_path(value):
+    value = str(value)
+    path = Path(value)
+    if (not value or len(value.encode()) > 4096 or not path.is_absolute()
+            or str(path) != value or ".." in path.parts
+            or any(ord(char) < 32 for char in value)):
+        raise ValueError("native local launcher paths must be bounded normalized absolute paths")
+    return path
+
+
+def _native_local_guard(selection, config, root, expected_db_id, actual_cwd=None):
+    """Native policy permits use; only this explicit local entry permits startup."""
+    if not isinstance(config, ServiceConfig):
+        raise ValueError("native local startup requires a managed local service configuration")
+    config.validate_identity()
+    if not isinstance(expected_db_id, str) or re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", expected_db_id) is None:
+        raise ValueError("native local startup requires a canonical expected database ID")
+    if config.database_id != expected_db_id:
+        raise ValueError("native local service database_id differs from the generated identity pin")
+    project = selection.snapshot.get("project") or {}
+    if (project.get("configured") is not True or project.get("root") != str(root)
+            or selection.canonical_cwd != str((actual_cwd or root).resolve())
+            or config.working_directory != root or config.database_name != "project"):
+        raise ValueError("native local startup requires the exact configured project root and service")
+    rows = [row for row in selection.snapshot["active"] if row["store"]["id"] == expected_db_id]
+    if len(rows) != 1 or rows[0]["eligible"]["read"] is not True:
+        raise ValueError("native local project owner is inactive, unselected or read-denied; no startup attempted")
+    owner = rows[0]["store"]["owner"]
+    if (owner.get("url") != config.url or owner.get("db") != config.database_name
+            or owner.get("path") != str(config.database_path)
+            or owner.get("ssh_mcp_port") is not None
+            or (owner.get("token_env") or "") != config.token_env):
+        raise ValueError("native local selected owner differs from the exact service route; no startup attempted")
+    _absolute_native_path(config.database_path)
+    return selection
+
+
+def launch_native_configured(service_path, memory_config, cwd, expected_db_id,
+                             native_cli="mnemed", native_mcp="mneme-mcp"):
+    """Start the explicit local owner, then hand untouched stdio to the full router.
+
+    Imported owner metadata never supplies an executable or process authority.
+    This mode reads no MCP frame and never reduces the native router to the
+    project owner's catalog. Initial native selection may acquire policy-gated
+    metadata for the actual cwd; every subsequent replay is exact and offline.
+    """
+    from host_platform import resolve_command
+    from store_registry import (NativeSelection, native_bridge, native_selection_budget,
+                                native_selection_remaining)
+    service_path = _absolute_native_path(service_path)
+    memory_config = _absolute_native_path(memory_config)
+    root = _absolute_native_path(cwd)
+    # Project-local MCP entries can be inherited by nested projects. The entry's
+    # root binds process authority; it must never replace the caller's privacy
+    # boundary. Native selection owns nearest-project/profile interpretation.
+    actual_cwd = _absolute_native_path(Path.cwd())
+    native_cli = resolve_command(native_cli, default="mnemed")
+    native_mcp = resolve_command(native_mcp, default="mneme-mcp")
+    config, witness = load_config_snapshot(service_path)
+    with native_selection_budget(25.0):
+        snapshot = native_bridge(native_cli, ["select", "--config", str(memory_config),
+                                              "--cwd", str(actual_cwd)], timeout=3.0)
+        selection = NativeSelection(snapshot, str(memory_config), native_cli, str(actual_cwd))
+        _native_local_guard(selection, config, root, expected_db_id, actual_cwd)
+        store_name = next(row["name"] for row in snapshot["active"] if row["store"]["id"] == expected_db_id)
+        selection = selection.revalidate(operation="read", store_name=store_name)
+        _native_local_guard(selection, config, root, expected_db_id, actual_cwd)
+        if load_config_snapshot(service_path)[1] != witness:
+            raise ValueError("native local service configuration changed before startup")
+        remaining = native_selection_remaining(10.0)
+        ensure_ready(config, timeout=remaining, lock_timeout=min(2.0, remaining))
+        # Waiting on another starter cannot extend old policy or service bytes.
+        selection = selection.revalidate()
+        _native_local_guard(selection, config, root, expected_db_id, actual_cwd)
+        if load_config_snapshot(service_path)[1] != witness:
+            raise ValueError("native local service configuration changed during readiness; router not started")
+        native_selection_remaining(1.0)
+    command = [native_mcp, "--memory-config", str(memory_config), "--cwd", str(actual_cwd)]
+    if IS_WINDOWS:
+        import subprocess
+        # As with hook_forwarder, Windows execv is not Unix replacement. Keep
+        # this front door alive until the router exits, preserving its status.
+        # Defaults inherit protocol stdin/stdout/stderr, environment and cwd.
+        raise SystemExit(subprocess.run(command, shell=False).returncode)
+    os.execv(native_mcp, command)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     routing = parser.add_mutually_exclusive_group(required=True)
     routing.add_argument("--service-config", help="existing explicit private Mneme service JSON")
     routing.add_argument("--store-registry", help="explicit named-store registry JSON")
     parser.add_argument("--store", help="read-enabled named store selected for this workspace")
+    parser.add_argument("--memory-config", help="full native policy; use explicit local startup then exec its configured router")
+    parser.add_argument("--cwd", help="exact project root for native configured startup")
+    parser.add_argument("--expected-db-id", help="generated local owner identity pin")
+    parser.add_argument("--native-cli", help="native metadata selector (default mnemed)")
+    parser.add_argument("--native-mcp", help="full native configured router (default mneme-mcp)")
     args = parser.parse_args(argv)
+    if args.memory_config is not None:
+        if args.service_config is None or args.store is not None or args.cwd is None or args.expected_db_id is None:
+            parser.error("--memory-config requires --service-config, --cwd and --expected-db-id, without --store")
+        launch_native_configured(args.service_config, args.memory_config, args.cwd, args.expected_db_id,
+                                 args.native_cli or "mnemed", args.native_mcp or "mneme-mcp")
+        return
+    if any(value is not None for value in (args.cwd, args.expected_db_id, args.native_cli, args.native_mcp)):
+        parser.error("native startup options require --memory-config")
     if args.store_registry:
         if args.store is None:
             parser.error("--store-registry requires --store")

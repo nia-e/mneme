@@ -23,10 +23,10 @@ except ImportError:
 
 SCHEMA = "mneme.codex-install.v1"
 HOST_PLATFORM = "windows" if os.name == "nt" else "posix"
-CONFIG_REVISION = 40
-EXISTING_SERVICE_REVISION = 41
-EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, 35, 37, 39, EXISTING_SERVICE_REVISION)
-SUPPORTED_APPLY_REVISIONS = (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, CONFIG_REVISION, EXISTING_SERVICE_REVISION)
+CONFIG_REVISION = 42
+EXISTING_SERVICE_REVISION = 43
+EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, EXISTING_SERVICE_REVISION)
+SUPPORTED_APPLY_REVISIONS = tuple(range(20, EXISTING_SERVICE_REVISION + 1))
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
 END = "# END mneme-codex-v1"
@@ -179,6 +179,76 @@ def revalidate_memory_config(plan):
     if memory_config_input(pin["path"], native["source"], plan["project_root"],
                            expected_selection_digest=pin["digest"]) != pin:
         raise ValueError("memory config changed since prepare; prepare a new plan")
+
+
+def native_mcp_input(memory_config, root):
+    """Identify only the supported native registration; never copy user secrets.
+
+    A same-name project table overrides launch machinery and inherits the user's
+    tool filters, approvals, environment and disabled state through Codex layers.
+    The global file is a guarded input, never an installer output.
+    """
+    home = os.environ.get("CODEX_HOME")
+    if home is None:
+        home = Path.home() / ".codex"
+    path = Path(home).absolute() / "config.toml"
+    raw = read_optional(path)
+    parsed = {} if raw is None else tomllib.loads(raw.decode())
+    servers = parsed.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("user MCP configuration must be a table")
+    matches = []
+    for name, server in servers.items():
+        if not isinstance(server, dict):
+            raise ValueError("user MCP server must be a table")
+        command, args = server.get("command"), server.get("args")
+        if not isinstance(args, list) or str(memory_config) not in args:
+            continue
+        if not isinstance(command, str) or Path(command).name not in ("mneme-mcp", "mneme-mcp.exe"):
+            raise ValueError("native MCP registration uses unsupported launch machinery; preserve it and configure startup explicitly")
+        if args != ["--memory-config", str(memory_config)] or server.get("cwd") is not None:
+            raise ValueError("native MCP registration has unsupported workspace/arguments; no override attempted")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name):
+            raise ValueError("native MCP registration has an unsupported server name")
+        if server.get("enabled", True) is not True:
+            raise ValueError("native MCP registration is explicitly disabled; init preserves that choice")
+        validate_command(command, default="mneme-mcp")
+        matches.append((name, command))
+    if len(matches) > 1:
+        raise ValueError("multiple native MCP registrations select this configuration; review them instead of guessing")
+    return {"name": matches[0][0] if matches else SERVER,
+            "command": matches[0][1] if matches else "mneme-mcp",
+            "config_path": str(path), "sha256": None if raw is None else digest(raw),
+            "inherited": bool(matches)}
+
+
+def validate_native_managed(plan):
+    if "native_managed" not in plan:
+        return
+    managed = plan.get("native_managed")
+    if (plan.get("config_revision", 1) < 42 or "memory_config" not in plan
+            or not isinstance(managed, dict) or set(managed) != {"db_id", "mcp"}
+            or not isinstance(managed["db_id"], str)
+            or not re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", managed["db_id"])):
+        raise ValueError("invalid native managed project binding")
+    mcp = managed["mcp"]
+    if (not isinstance(mcp, dict) or set(mcp) != {"name", "command", "config_path", "sha256", "inherited"}
+            or not isinstance(mcp["name"], str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", mcp["name"])
+            or not isinstance(mcp["config_path"], str) or not Path(mcp["config_path"]).is_absolute()
+            or type(mcp["inherited"]) is not bool
+            or (mcp["sha256"] is not None and
+                (not isinstance(mcp["sha256"], str) or not HEX_SHA256.fullmatch(mcp["sha256"])))):
+        raise ValueError("invalid inherited native MCP binding")
+    validate_command(mcp["command"], default="mneme-mcp")
+
+
+def revalidate_native_managed(plan):
+    validate_native_managed(plan)
+    if "native_managed" in plan:
+        expected = plan["native_managed"]["mcp"]
+        actual = native_mcp_input(plan["memory_config"]["path"], Path(plan["project_root"]))
+        if actual != expected:
+            raise ValueError("user native MCP configuration changed since prepare; prepare a new plan")
 
 
 def existing_service_input(path):
@@ -377,6 +447,7 @@ def validate_plan(plan):
         native_memory_config_path(pin["path"])
     elif "existing_owner_binary" in plan:
         raise ValueError("retained owner binary requires native memory config")
+    validate_native_managed(plan)
     root, prefix = Path(plan["project_root"]), Path(plan["prefix"])
     if not root.is_absolute() or not prefix.is_absolute() or not root.is_dir() or root.is_symlink():
         raise ValueError("plan paths must be absolute and project must be a real directory")
@@ -520,10 +591,26 @@ def config_outputs(plan, before):
     existing = before["config.toml"]
     old = b"" if existing is None else existing
     parsed = tomllib.loads(old.decode())
-    if SERVER in parsed.get("mcp_servers", {}) or BEGIN.encode() in old:
-        raise ValueError("mneme_project configuration already exists; do not overwrite it")
-    block = f"\n{BEGIN}\n[mcp_servers.{SERVER}]\n"
-    if "memory_config" in plan:
+    managed = plan.get("native_managed")
+    server = managed["mcp"]["name"] if managed is not None else SERVER
+    if server in parsed.get("mcp_servers", {}) or BEGIN.encode() in old:
+        raise ValueError(f"{server} configuration already exists; do not overwrite it")
+    key = toml_value(server) if managed is not None else server
+    block = f"\n{BEGIN}\n[mcp_servers.{key}]\n"
+    if managed is not None:
+        launcher = python_hook_argv(plan["python"], [str(prefix / "lib/launcher.py"),
+            "--service-config", str(prefix / "config/service.json"),
+            "--memory-config", plan["memory_config"]["path"], "--cwd", str(root),
+            "--expected-db-id", managed["db_id"], "--native-cli", plan["native_command"],
+            "--native-mcp", plan["mcp_command"]], windows=plan_platform(plan) == "windows")
+        block += (f"command = {toml_value(launcher[0])}\n"
+                  f"args = {toml_value(launcher[1:])}\n")
+        if not managed["mcp"]["inherited"]:
+            block += "startup_timeout_sec = 30\n"
+        # Do not serialize inherited environment/secrets or narrow the native
+        # router's toolset. Codex merges this same-name launch override with the
+        # user's filters, approvals and other per-server settings.
+    elif "memory_config" in plan:
         mcp_selector = plan["mcp_command"] if revision >= 40 else str(prefix / binary_destination(plan, "mneme-mcp"))
         block += (f"command = {toml_value(mcp_selector)}\n"
                   f"args = {toml_value(['--memory-config', plan['memory_config']['path'], '--cwd', str(root)])}\n"
@@ -541,8 +628,9 @@ def config_outputs(plan, before):
     # output hashes for recovery/uninstall. Episode enrollment is revision 7;
     # canonical SAVE authorization starts only with revision 12, concern with 13.
     tools = NATIVE_TOOLS if "memory_config" in plan else TOOLS if revision >= 13 else SAVE_TOOLS if revision >= 12 else EPISODE_TOOLS if revision >= 7 else LEGACY_TOOLS
-    block += f"enabled_tools = {json.dumps(tools)}\n"
-    if revision >= 2:
+    if managed is None:
+        block += f"enabled_tools = {json.dumps(tools)}\n"
+    if revision >= 2 and managed is None:
         # No server default, sandbox change, or global approval. Only the
         # tools this project integration actually uses are preapproved.
         block += "".join(f"[mcp_servers.{SERVER}.tools.{name}]\n"
@@ -582,7 +670,7 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder", 
             recording_mode="off", librarian_effort=None, global_preferences=None,
             store_registry=None, existing_service_config=None, tag_stewardship=None, tag_guide_id=None, memory_config=None,
             activity_root=None, activity_config=None, activity_device=None,
-            mcp_command="mneme-mcp", native_command="mnemed"):
+            mcp_command="mneme-mcp", native_command="mnemed", native_managed=None):
     python = prepare_python_selector(python, windows=HOST_PLATFORM == "windows")
     mcp_command = validate_command(mcp_command, default="mneme-mcp")
     native_command = validate_command(native_command, default="mnemed")
@@ -602,6 +690,8 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder", 
                 or tag_stewardship is not None or tag_guide_id is not None
                 or recall_mode not in ("reminder", "async") or library_helper is not None or enroll_existing):
             raise ValueError("native memory config cannot be combined with independent hook policy or enrollment")
+    elif native_managed is not None:
+        raise ValueError("native managed startup requires native memory config")
     if not project_root.is_dir() or project_root.is_symlink():
         raise ValueError("project root must be an existing real directory")
     if prefix.exists():
@@ -729,6 +819,9 @@ def prepare(project_root, prefix, mnemed, mcp, port, *, recall_mode="reminder", 
         plan["memory_config"] = native_pin
         plan["authority"] = "native config grants; one device hook actor; no project hook lifecycle"
         plan["does_not"].append("install project hooks; device hooks are prepared separately")
+    if native_managed is not None:
+        plan["native_managed"] = native_managed
+        validate_native_managed(plan)
     if existing_service_config is not None:
         plan["config_revision"] = EXISTING_SERVICE_REVISION
         plan["existing_service_config"] = existing_service_input(existing_service_config)
@@ -811,6 +904,8 @@ def runtime_configs(plan):
                "working_directory": str(root), "port": plan["port"], "state_dir": str(prefix / "run")}
     if "existing_service_config" in plan:
         service = dict(validate_existing_service(plan)["config"])
+    if "native_managed" in plan:
+        service["database_id"] = plan["native_managed"]["db_id"]
     hook = {"schema": "mneme.codex-hooks.config.v2", "project_root": str(root),
             "state_dir": str(root / ".mneme/codex-hook-state"),
             "service_config": str(prefix / "config/service.json"),
@@ -850,6 +945,7 @@ def apply(plan):
     if plan_platform(plan) != HOST_PLATFORM:
         raise ValueError("install plan targets a different host platform; prepare a new plan")
     revalidate_existing_service(plan)
+    revalidate_native_managed(plan)
     revalidate_store_registry(plan)
     if "activity" in plan:
         from registry_config import revalidate_activity

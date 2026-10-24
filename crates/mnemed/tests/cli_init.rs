@@ -12,12 +12,17 @@ impl Fixture {
         Self(path)
     }
     fn run(&self, args: &[&str]) -> Output {
+        self.run_at(&self.0, args)
+    }
+    fn run_at(&self, cwd: &std::path::Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_mnemed"))
             .args(args)
-            .current_dir(&self.0)
+            .current_dir(cwd)
             .env("HOME", self.0.join("home"))
             .env("XDG_DATA_HOME", self.0.join("data"))
             .env("XDG_CONFIG_HOME", self.0.join("config"))
+            .env("CODEX_HOME", self.0.join("home/.codex"))
+            .env("MNEME_INIT_PYTHON_TRACE", self.0.join("python-trace"))
             .env_remove("MNEME_DB")
             .output()
             .unwrap()
@@ -37,6 +42,10 @@ fn init_help_and_illegal_selectors_are_local_and_bounded() {
     let help = fixture.run(&["init", "--help"]);
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
+    let help_words = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help_words.contains("absolute or parent-free relative path"));
+    assert!(help_words.contains("native policy controls recording"));
+    assert!(help_words.contains("generated project hooks"));
     for option in [
         "--root",
         "--no-recording",
@@ -53,6 +62,9 @@ fn init_help_and_illegal_selectors_are_local_and_bounded() {
         vec!["--json", "--user", "init"],
         vec!["--json", "--db", "memory.db", "init"],
         vec!["--json", "--remote", "http://127.0.0.1:19871/", "init"],
+        vec!["--json", "--memory-config", "memory.toml", "init"],
+        vec!["--json", "--store", "project", "init"],
+        vec!["--json", "--profile", "isolated", "init"],
     ] {
         let output = fixture.run(&args);
         assert!(!output.status.success());
@@ -99,6 +111,239 @@ fn explicitly_unusable_python_does_not_fall_through_or_create_state() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(result["error"].as_str().unwrap().contains("Python 3.11+"));
     fixture.unchanged();
+}
+
+#[cfg(feature = "cozo")]
+#[test]
+fn malformed_native_default_or_project_refuses_before_python_or_setup() {
+    for relative in ["config/mneme/memory.toml", ".mneme/memory.toml"] {
+        let fixture = Fixture::new();
+        let config = fixture.0.join(relative);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "schema = [invalid native TOML").unwrap();
+        #[cfg(unix)]
+        let python = fixture.recording_python();
+        #[cfg(not(unix))]
+        let python = PathBuf::from("/nonexistent/python");
+        let output = fixture.run(&["--json", "init", "--python", python.to_str().unwrap()]);
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["stage"], "preflight");
+        assert_eq!(result["published"], false);
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot prepare native configuration")
+        );
+        assert!(!fixture.0.join("python-trace").exists());
+        assert!(!fixture.0.join(".codex").exists());
+        assert!(!fixture.0.join("data").exists());
+        let human = fixture.run(&["init", "--python", python.to_str().unwrap()]);
+        assert!(!human.status.success());
+        assert!(human.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&human.stderr).contains("cannot prepare native configuration")
+        );
+        assert!(!fixture.0.join("python-trace").exists());
+        assert_eq!(
+            std::fs::read_to_string(config).unwrap(),
+            "schema = [invalid native TOML"
+        );
+    }
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn dangling_native_default_or_project_refuses_instead_of_legacy_fallback() {
+    for relative in ["config/mneme/memory.toml", ".mneme/memory.toml"] {
+        let fixture = Fixture::new();
+        let config = fixture.0.join(relative);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("absent-native.toml", &config).unwrap();
+        let python = fixture.recording_python();
+        let output = fixture.run(&["--json", "init", "--python", python.to_str().unwrap()]);
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot prepare native configuration")
+        );
+        assert_eq!(result["published"], false);
+        assert!(!fixture.0.join("python-trace").exists());
+        assert!(!fixture.0.join(".codex").exists());
+        assert!(std::fs::symlink_metadata(config).unwrap().is_symlink());
+    }
+}
+
+#[cfg(all(feature = "cozo", unix))]
+impl Fixture {
+    /// A disposable interpreter stand-in records probes/setup arguments without
+    /// running project_setup or contacting any owner. It proves CLI routing only.
+    fn recording_python(&self) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let python = self.0.join("python");
+        let probe = serde_json::json!({"version": [3, 11], "executable": python});
+        std::fs::write(&python, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$MNEME_INIT_PYTHON_TRACE\"\nif [ \"$1\" = -I ]; then\n  printf '%s\\n' '{probe}'\nfi\n"
+        )).unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o700)).unwrap();
+        python
+    }
+    fn setup_trace(&self, root: &std::path::Path) -> String {
+        let python = self.recording_python();
+        let output = self.run(&[
+            "--json",
+            "init",
+            "--root",
+            root.to_str().unwrap(),
+            "--python",
+            python.to_str().unwrap(),
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.join(".codex").exists());
+        std::fs::read_to_string(self.0.join("python-trace")).unwrap()
+    }
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn absent_native_configuration_keeps_legacy_setup_arguments() {
+    let fixture = Fixture::new();
+    let trace = fixture.setup_trace(&fixture.0);
+    assert!(trace.contains("codex/project_setup.py\n--root\n"));
+    assert!(!trace.contains("--memory-config"));
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn relative_requested_root_is_absolute_for_native_and_legacy_setup() {
+    for native in [false, true] {
+        let fixture = Fixture::new();
+        let requested = fixture.0.join("child");
+        std::fs::create_dir(&requested).unwrap();
+        let overlay = requested.join(".mneme/memory.toml");
+        if native {
+            std::fs::create_dir(requested.join(".mneme")).unwrap();
+            std::fs::write(&overlay, "schema='mneme.config.v1'").unwrap();
+        }
+        let trace = fixture.setup_trace(std::path::Path::new("child"));
+        // current_dir may use the platform's canonical spelling of the temp
+        // root, but CLI relative paths must not be forwarded still relative.
+        assert!(trace.contains(&format!(
+            "--root\n{}\n",
+            requested.canonicalize().unwrap().display()
+        )));
+        assert_eq!(trace.contains("--memory-config"), native);
+        if native {
+            assert!(trace.contains(&format!(
+                "--memory-config\n{}\n",
+                overlay.canonicalize().unwrap().display()
+            )));
+        }
+        assert!(!requested.join(".codex").exists());
+    }
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn parent_component_root_refuses_before_python_with_or_without_native_config() {
+    for native in [false, true] {
+        let fixture = Fixture::new();
+        let invoking = fixture.0.join("invoking");
+        let requested = fixture.0.join("parentRoot");
+        std::fs::create_dir(&invoking).unwrap();
+        std::fs::create_dir(&requested).unwrap();
+        let overlay = requested.join(".mneme/memory.toml");
+        if native {
+            std::fs::create_dir(requested.join(".mneme")).unwrap();
+            std::fs::write(&overlay, "schema='mneme.config.v1'").unwrap();
+        }
+        let python = fixture.recording_python();
+        let output = fixture.run_at(
+            &invoking,
+            &[
+                "--json",
+                "init",
+                "--root",
+                "../parentRoot",
+                "--python",
+                python.to_str().unwrap(),
+            ],
+        );
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["stage"], "preflight");
+        assert_eq!(result["published"], false);
+        let error = result["error"].as_str().unwrap();
+        assert!(error.contains("paths must not contain parent components"));
+        assert!(error.contains("cd into the target"));
+        assert!(!fixture.0.join("python-trace").exists());
+        assert!(!requested.join(".codex").exists());
+        assert!(!fixture.0.join("data").exists());
+        assert_eq!(std::fs::read_dir(&invoking).unwrap().count(), 0);
+        if native {
+            assert_eq!(
+                std::fs::read_to_string(overlay).unwrap(),
+                "schema='mneme.config.v1'"
+            );
+            assert_eq!(
+                std::fs::read_dir(requested.join(".mneme")).unwrap().count(),
+                1
+            );
+        } else {
+            assert_eq!(std::fs::read_dir(&requested).unwrap().count(), 0);
+        }
+    }
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn native_project_route_uses_requested_root_not_invoking_directory() {
+    let fixture = Fixture::new();
+    // The invoking directory has invalid native metadata; an unrelated requested
+    // root must not inherit it. Conversely, its own valid overlay is discovered.
+    std::fs::create_dir(fixture.0.join(".mneme")).unwrap();
+    std::fs::write(
+        fixture.0.join(".mneme/memory.toml"),
+        "invalid native metadata",
+    )
+    .unwrap();
+    let requested = Fixture::new();
+    std::fs::create_dir(requested.0.join(".mneme")).unwrap();
+    let overlay = requested.0.join(".mneme/memory.toml");
+    std::fs::write(&overlay, "schema='mneme.config.v1'").unwrap();
+    let trace = fixture.setup_trace(&requested.0);
+    assert!(trace.contains(&format!(
+        "--memory-config\n{}\n",
+        overlay.canonicalize().unwrap().display()
+    )));
+    assert!(!trace.contains(&fixture.0.join(".mneme/memory.toml").display().to_string()));
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn native_user_source_keeps_logical_symlink_even_with_no_active_store() {
+    let fixture = Fixture::new();
+    let target = fixture.0.join("managed.toml");
+    let logical = fixture.0.join("config/mneme/memory.toml");
+    std::fs::create_dir_all(logical.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target,
+        "schema='mneme.config.v1'\n[workspace]\nallow_stores=[]\n[stores.denied]\nid='01M3CV5EZP4HWAK56YJCMZQG2Y'\nowner={url='http://127.0.0.1:1',db='uncontacted'}\nactive={enabled=false}\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&target, &logical).unwrap();
+    let trace = fixture.setup_trace(&fixture.0);
+    assert!(trace.contains(&format!("--memory-config\n{}\n", logical.display())));
+    assert!(!trace.contains(&format!("--memory-config\n{}\n", target.display())));
+    assert!(std::fs::symlink_metadata(logical).unwrap().is_symlink());
 }
 #[cfg(feature = "cozo")]
 #[test]

@@ -145,6 +145,260 @@ def import_library(path):
     return module
 
 
+def native_selection(mnemed, root, memory_config, *, expected=None):
+    """Acquire permitted discovery metadata once; subsequent guards replay offline."""
+    from store_registry import native_select
+    options = {} if expected is None else {"expected_selection_digest": expected}
+    return native_select(str(memory_config), str(mnemed), str(root), **options).snapshot
+
+
+def native_project_route(snapshot, db_id, root, *, url=None):
+    rows = [row for row in snapshot["active"] if row["store"]["id"] == db_id]
+    if len(rows) != 1:
+        raise ValueError("native project owner is not uniquely active; review configuration (no fallback attempted)")
+    row = rows[0]
+    owner = row["store"]["owner"]
+    if (not row["eligible"]["read"] or owner["db"] != "project"
+            or owner.get("path") != str(root / ".mneme/codex-memory.db")
+            or (url is not None and owner["url"] != url)
+            or owner.get("token_env") is not None):
+        raise ValueError("native project read grant/owner identity differs from local setup; no alternate owner started")
+    return row
+
+
+def native_setup_baseline(snapshot, root, name):
+    """Check known exclusions before creating a new, not-yet-identified store."""
+    project = snapshot["project"]
+    if snapshot["profile"] != "default" or project.get("legacy_library") is not None:
+        raise ValueError("native project policy is excluded or selects a legacy library; preserve it and migrate explicitly")
+    for allow in (snapshot["config"].get("workspace", {}).get("allow_stores"),
+                  project.get("legacy_allow_stores")):
+        if allow is not None and name not in allow:
+            raise ValueError("native workspace does not admit this project store; no fallback attempted")
+
+
+def native_local_claims(snapshot):
+    """Read only native-pinned local declarations, not imported policy assertions."""
+    names, ids = set(), set()
+    for source in snapshot["sources"]:
+        if source["role"] not in ("user", "project"):
+            continue
+        raw = install.read_optional(Path(source["path"]))
+        if raw is None or install.digest(raw) != source["sha256"]:
+            raise ValueError("native source changed during project setup; reselect before retrying")
+        # Native selection already validated this TOML. This is a declaration
+        # inventory for safe append, not a second policy/selection implementation.
+        for name, store in tomllib.loads(raw.decode()).get("stores", {}).items():
+            names.add(name)
+            ids.add(store["id"])
+    return names, ids
+
+
+def restore_native_overlay(path, before, after):
+    current = install.read_optional(path)
+    if current == before:
+        return
+    if current != after:
+        raise ValueError("native overlay changed concurrently; retained it for manual recovery")
+    if before is None:
+        path.unlink()
+    else:
+        install.private_write(path, before)
+
+
+def native_setup_result(result, snapshot, row, service_path, receipt, store):
+    result.update(status="configured", stage="complete", store=store,
+        integration="native", db_id=row["store"]["id"], owner_url=row["store"]["owner"]["url"],
+        service_config=str(service_path), receipt=str(receipt), selection_digest=snapshot["digest"],
+        memory_config=(snapshot.get("request") or {}).get("user_path"),
+        local_registration=False, library_config=None,
+        recording="eligible (native device policy)" if row["eligible"]["record"] else "off (native policy)",
+        hippocampus="native device policy unchanged",
+        hook_trust={"status":"device_actor", "trusted":0,
+                    "reason":"native device actor configuration/trust unchanged; no project hooks installed or trusted"},
+        recording_activation="device actor presence/trust/execution not verified by init; configuration unchanged",
+        published=False, sharing="unchanged; no enrollment/publication performed")
+
+
+def setup_native(args, result, root, selection):
+    """Adopt one project owner without replacing the configured native system."""
+    if (args.library_config is not None or getattr(args, "store_registry", None) is not None
+            or args.no_recording or args.codex_binary is not None):
+        raise ValueError("native init uses configured policy; --library-config/--store-registry/--no-recording/--codex-binary cannot override it")
+    if selection["library_config"] is not None or selection.get("stores") is not None:
+        raise ValueError("existing legacy project selector requires explicit migration; native init will not overwrite it")
+    dot, db = root / ".mneme", root / ".mneme/codex-memory.db"
+    overlay, prefix = dot / "memory.toml", dot / "codex-integration"
+    if (dot / "cli.json").exists() or (dot / "cli.json").is_symlink():
+        raise ValueError("existing legacy CLI owner requires explicit migration; native init will not compete with it")
+    for name in ("memory.db", "current", "generations"):
+        if (dot / name).exists() or (dot / name).is_symlink():
+            raise ValueError("ambiguous project storage; native init will not create a parallel database")
+    if dot.exists():
+        for index, path in enumerate(dot.iterdir()):
+            if index >= 4096:
+                raise ValueError("project storage directory exceeds setup inspection bound")
+            if path.name != db.name and path.suffix.lower() in (".db", ".sqlite", ".sqlite3"):
+                raise ValueError("ambiguous custom project storage; configure its owner explicitly")
+    if db.is_symlink() or (db.exists() and (not db.is_file() or db.stat().st_nlink != 1)):
+        raise ValueError("project store must be a single-link real file")
+    mnemed = executable(args.mnemed, "mnemed")
+    memory = Path(args.memory_config)
+    os.environ["MNEME_CLIENT_BINARY"] = str(mnemed)
+    result["stage"] = "native_policy"
+    baseline = native_selection(mnemed, root, memory)
+    native_mcp = install.native_mcp_input(memory, root)
+
+    # A completed native install is resumed in place. Never open its live DB
+    # offline beside the managed owner and never regenerate its project policy.
+    receipt_path = prefix / "receipt.json"
+    if prefix.exists():
+        pending = prefix / "pending.json"
+        if pending.is_file():
+            recovered = install.recover(pending)
+            if recovered["status"] == "aborted":
+                prefix.rename(dot / ("codex-integration-aborted-" + uuid.uuid4().hex))
+        if prefix.exists():
+            receipt = read_json(receipt_path)
+            if receipt is None or "native_managed" not in receipt.get("plan", {}):
+                raise ValueError("existing integration is not native managed setup; preserve it and migrate explicitly")
+            plan = receipt["plan"]
+            install.validate_plan(plan)
+            if plan["project_root"] != str(root) or plan["memory_config"]["path"] != str(memory):
+                raise ValueError("existing native integration selects another project/configuration")
+            previous_mcp = plan["native_managed"]["mcp"]
+            if any(native_mcp[key] != previous_mcp[key] for key in ("name", "command", "config_path", "inherited")):
+                raise ValueError("inherited native MCP registration changed; review/reprepare the project override instead of reusing a different route")
+            hashes = receipt["installed_configs"]
+            if any(install.fingerprint(root / ".codex" / name) != hashes[name] for name in install.CONFIG_NAMES):
+                raise ValueError("native project integration changed since install; review it instead of overwriting")
+            service_path = prefix / "config/service.json"
+            expected_service, _ = install.runtime_configs(plan)
+            if install.read_optional(service_path) != install.json_bytes(expected_service):
+                raise ValueError("generated native service configuration changed; review it before rerunning init")
+            config = load_config(service_path)
+            db_id = plan["native_managed"]["db_id"]
+            row = native_project_route(baseline, db_id, root, url=config.url)
+            if (not isinstance(config, ServiceConfig) or config.database_id != db_id
+                    or config.database_name != "project" or config.database_path != db
+                    or config.working_directory != root or config.token_env):
+                raise ValueError("native service no longer matches the guarded project owner")
+            if args.port is not None and args.port != config.port:
+                raise ValueError("--port conflicts with existing native owner")
+            native_selection(mnemed, root, memory, expected=baseline["digest"])
+            result["stage"] = "owner_start"
+            ensure_ready(config, timeout=10, lock_timeout=2)
+            native_setup_result(result, baseline, row, service_path, receipt_path, "adopted")
+            return
+
+    # Pin all known local definitions and native boundary bytes before any
+    # creation. A local declaration may override imported discovery, never a
+    # user/project declaration with the same canonical identity or name.
+    local_names, local_ids = native_local_claims(baseline)
+    name = root.name if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", root.name) else "project"
+    if not db.exists():
+        native_setup_baseline(baseline, root, name)
+        if name in local_names:
+            raise ValueError("native project would duplicate a local store name; no store created")
+    project_raw = install.read_optional(root / ".codex/config.toml")
+    project_config = {} if project_raw is None else tomllib.loads(project_raw.decode())
+    if (native_mcp["name"] in project_config.get("mcp_servers", {})
+            or (project_raw is not None and install.BEGIN.encode() in project_raw)):
+        raise ValueError("project MCP integration already exists; preserve it instead of installing a second one")
+    mcp_command = str(args.mcp_binary) if args.mcp_binary is not None else native_mcp["command"]
+    from host_platform import resolve_command
+    resolve_command(mcp_command, default="mneme-mcp")
+    mcp = executable(args.mcp_binary, "mneme-mcp", mnemed.parent / executable_name("mneme-mcp"))
+    if args.port is None:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+    else:
+        port = args.port
+    if type(port) is not int or not 1024 <= port <= 65535:
+        raise ValueError("port must be in 1024..65535")
+    url = f"http://127.0.0.1:{port}/"
+    before = install.read_optional(overlay)
+    native_selection(mnemed, root, memory, expected=baseline["digest"])
+    result["stage"] = "store_admission"
+    store = "adopted" if db.exists() else "created"
+    if not db.exists():
+        install.config_directory(dot)
+        native(mnemed, root, "--db", db, "capture", "init")
+    verified = native(mnemed, root, "--db", db, "capture", "inspect")
+    db_id = verified.get("db_id")
+    if not isinstance(db_id, str) or not DB_ID.fullmatch(db_id):
+        raise ValueError("native store inspection supplied no canonical identity")
+    result.update(store=store, db_id=db_id)
+    existing_names = [row["name"] for row in baseline["stores"] if row["store"]["id"] == db_id]
+    if len(existing_names) > 1:
+        raise ValueError("multiple native names claim the project identity; review them instead of guessing")
+    if existing_names:
+        name = existing_names[0]
+        existing_row = next(row for row in baseline["stores"] if row["store"]["id"] == db_id)
+        if not existing_row["admitted"] or not existing_row["eligible"]["read"]:
+            raise ValueError("existing native project is not admitted for reads; no fallback attempted")
+    native_setup_baseline(baseline, root, name)
+    if name in local_names or db_id in local_ids:
+        raise ValueError("native project would duplicate a local store name/identity; explicit bindings are not overwritten")
+    q = lambda value: json.dumps(value, ensure_ascii=False)
+    after = (b'schema = "mneme.config.v1"\n' if before is None else before) + (
+        f'\n[stores.{q(name)}]\nid = {q(db_id)}\n'
+        f'owner = {{ url = {q(url)}, db = "project", path = {q(str(db))} }}\n'
+        'active = { workspace = "project" }\n').encode()
+    if len(after) > install.MAX_NATIVE_SOURCE_BYTES:
+        raise ValueError("project native overlay exceeds native source bound")
+    result["stage"] = "native_overlay"
+    installed = None
+    plan = None
+    owned_prefix = False
+    try:
+        if install.read_optional(overlay) != before:
+            raise ValueError("native overlay changed before publication")
+        install.private_write(overlay, after)
+        selected = native_selection(mnemed, root, memory)
+        native_project_route(selected, db_id, root, url=url)
+        plan = install.prepare(root, prefix, mnemed, mcp, port,
+            memory_config=memory, python=getattr(args, "python", "python3"),
+            mcp_command=mcp_command, native_command="mnemed",
+            native_managed={"db_id": db_id, "mcp": native_mcp})
+        result["stage"] = "integration_install"
+        installed = install.apply(plan)
+        owned_prefix = True
+        # Codex configuration is itself a native boundary source. Acquire the
+        # final receipt after ALL owned configuration writes, never pin the
+        # pre-install digest as the launcher's lasting selection.
+        result["stage"] = "native_readback"
+        final = native_selection(mnemed, root, memory)
+        row = native_project_route(final, db_id, root, url=url)
+        native_selection(mnemed, root, memory, expected=final["digest"])
+        service_path = prefix / "config/service.json"
+        expected_service, _ = install.runtime_configs(plan)
+        if install.read_optional(service_path) != install.json_bytes(expected_service):
+            raise ValueError("generated native service configuration changed during setup")
+        config = load_config(service_path)
+        if (not isinstance(config, ServiceConfig) or config.database_id != db_id
+                or config.database_name != "project" or config.database_path != db
+                or config.working_directory != root or config.token_env):
+            raise ValueError("generated service does not match the guarded native owner")
+    except Exception:
+        if installed is not None:
+            install.uninstall(installed["receipt"])
+        elif (prefix / "pending.json").is_file() and read_json(prefix / "pending.json") == plan:
+            install.recover(prefix / "pending.json")
+            owned_prefix = True
+        restore_native_overlay(overlay, before, after)
+        if owned_prefix and prefix.exists():
+            prefix.rename(dot / ("codex-integration-aborted-" + uuid.uuid4().hex))
+        raise
+    result["stage"] = "owner_start"
+    # The validated route/installer are now committed and resumable. A readiness
+    # failure retains that exact pair and the DB; rerunning init retries this
+    # same route, not another owner or a fresh database.
+    ensure_ready(config, timeout=10, lock_timeout=2)
+    native_setup_result(result, final, row, service_path, installed["receipt"], store)
+
+
 def setup(args, result):
     requested = Path(args.root).absolute()
     if requested.is_symlink() or not requested.is_dir():
@@ -177,6 +431,8 @@ def setup(args, result):
     selection = load_profile(root)
     if selection["mode"] != "default":
         raise ValueError(f"project profile is explicitly {selection['mode']}; init preserves that choice")
+    if getattr(args, "memory_config", None) is not None:
+        return setup_native(args, result, root, selection)
     registry = registry_path(selection, args.library_config)
     # Do not create a parallel conventional database beside an activated/other store.
     for name in ("memory.db", "current", "generations"):
@@ -348,7 +604,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("root", "mnemed", "library-helper"):
         parser.add_argument("--" + name, required=True, type=Path)
-    for name in ("mcp-binary", "library-config", "store-registry"):
+    for name in ("mcp-binary", "library-config", "store-registry", "memory-config"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--python", default="python3",
                         help="runtime Python selector: python3 from PATH (default), or a lexical absolute executable")
@@ -367,6 +623,8 @@ def main(argv=None):
         result["recovery"] = "Preserved data/configuration; resolve the reported conflict, then rerun mnemed init. An installer pending.json is recovered on rerun; do not delete memory data."
     if args.json:
         print(json.dumps(result, ensure_ascii=True))
+    elif result["status"] == "configured" and result.get("integration") == "native":
+        print(f"Project memory {result['store']}: {result['project_root']}\nNative owner {result['db_id']} ready; native policy unchanged (no publishing performed).\nNo project lifecycle hooks installed. Recording: {result['recording']}.\nDevice actor presence/trust/execution not verified. Managed MCP startup is configured; a fresh Codex session is still required.")
     elif result["status"] == "configured":
         print(f"Project memory {result['store']}: {result['project_root']}\nOwner {result['db_id']} ready; {('locally registered' if result['local_registration'] else 'not registered: existing exclusion/withdrawal preserved')} (no publishing performed).\nHippocampus: {result['hippocampus']}; recording: {result['recording']}.\nHook trust: {result['hook_trust']['status']} ({result['hook_trust']['trusted']} trusted enabled hooks). Fresh-session execution is not verified.")
         if result["hook_trust"]["status"] != "trusted":

@@ -34,11 +34,21 @@ mnemed init
 ```
 
 This creates or adopts `.mneme/codex-memory.db`, installs the project integration
-under `.mneme/codex-integration`, starts its local owner, writes `.mneme/cli.json`,
-and registers the verified owner in the device-local library. It does not share
+under `.mneme/codex-integration` and starts its local owner. It does not share
 memories with other devices or install a boot service.
 
-**The default enables model-backed recall and automatic recording.** Task cues,
+**Existing native configuration is reused.** Setup validates a project-local
+native owner overlay and adds managed startup to the full configured MCP router,
+without installing project hooks or changing the configured device actor. Native
+grants, recording choices, defaults and libraries remain authoritative; malformed
+or denied configuration never triggers legacy fallback. Existing legacy selectors
+must be migrated explicitly. See [native project setup](../../docs/declarative-config.md#native-project-setup)
+for registration, workspace and recovery details.
+
+Without native configuration, setup writes `.mneme/cli.json`, registers the verified
+owner in the device-local library and installs the existing project hooks.
+
+**Non-native setup enables model-backed recall and automatic recording.** Task cues,
 candidate memories and selected session messages/tool results can reach the
 configured Codex model provider. Do not enable it for material that must remain on-device.
 To set up recall without automatic recording:
@@ -46,6 +56,9 @@ To set up recall without automatic recording:
 ```sh
 mnemed init --no-recording
 ```
+
+That switch applies to non-native setup. Native setup uses its existing recording
+policy and device actor; it does not install or activate a missing actor.
 
 Reruns preserve existing off choices. They do not replace custom owners, private
 or isolated configurations, or disabled hooks. If setup fails, keep the database
@@ -55,12 +68,12 @@ Useful options:
 
 | Option | Purpose |
 | --- | --- |
-| `--root PATH` | Select a project other than the current directory. |
+| `--root PATH` | Select a project other than the current directory; use normalized paths without `..`. |
 | `--mcp-binary PATH`, `--python PATH` | Choose lexical runtime selectors explicitly; Python accepts `python3` or an absolute interpreter path. |
-| `--codex-binary PATH` | Optional absolute Codex launcher for hook trust and the reader; no automatic hash pin. |
+| `--codex-binary PATH` | Non-native setup only: optional absolute Codex launcher for hook trust and the reader; no automatic hash pin. |
 | `--port PORT` | Choose the local owner port for new setup. |
-| `--library-config PATH` | Select and retain a device-local library config. |
-| `--no-trust-hooks` | Leave generated hooks pending manual review. |
+| `--library-config PATH` | Non-native setup only: select and retain a device-local library config. |
+| `--no-trust-hooks` | Non-native setup: leave generated hooks pending manual review. Native setup does not install/trust hooks. |
 
 The background reader defaults to launch-time `codex` lookup from the hook
 process's `PATH`, rather than retaining the executable found during setup.
@@ -72,7 +85,7 @@ On POSIX, hooks discover compatible Python 3.11+ on `PATH` each launch. Windows
 authoring preserves its setup-selected interpreter once; receipt reconstruction
 never substitutes a later interpreter. An explicit Python path remains lexical.
 
-By default, init trusts only its exact generated, enabled project hooks through
+For non-native setup, init trusts only its exact generated, enabled project hooks through
 Codex's native config API. Missing APIs leave trust pending rather than bypassing
 review. If trust remains pending, use `/hooks` to review them.
 After setup and trust review, start a **fresh Codex session**—including when init
@@ -88,12 +101,17 @@ In Codex, ask for the operation you want:
 - “Save the verified lesson from this fix for future sessions.”
 - “Record this incident as an episode, including what we observed.”
 
-Use `db: "project"` with the project MCP tools. Personal memory, when separately
-configured, uses `db: "user"`; project operations never fall back to it. Keep the
-store with every returned ID.
+In non-native setup, use `db: "project"` with the project MCP tools. Native setup
+uses its selected logical store name, which can differ from the owner's `project`
+alias; preserve the returned `db` and `db_id`. In non-native/direct-owner mode,
+separately configured personal memory uses `db: "user"`; native logical names are
+configuration-defined. Failed project operations never fall back to personal
+memory. Keep the store with every returned ID.
 
-The CLI uses the owner configured by init, so ordinary commands do not open a
-second copy of the database:
+The CLI uses the configured owner connection rather than opening a second copy
+of the database. Native commands follow current native selection, including an
+explicit user `read_default` that may choose another owner; non-native commands
+use init's project binding:
 
 ```sh
 mnemed query 'storage layout decisions'

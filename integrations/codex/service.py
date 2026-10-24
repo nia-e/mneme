@@ -9,6 +9,7 @@ process, local store, or service-state directory.
 """
 
 import argparse
+import hashlib
 from dataclasses import dataclass, replace
 import json
 import math
@@ -26,7 +27,7 @@ from urllib.parse import urlsplit
 
 from mcp_client import McpError, validate_remote_endpoint
 from host_files import (atomic_write, check_private_fd, check_private_directory,
-                        ensure_private_directory, lock_file, open_regular)
+                        ensure_private_directory, lock_file, lock_file_bounded, open_regular)
 from host_platform import is_executable
 from host_process import (IS_WINDOWS, process_alive, process_identity, spawn,
                           spawned_identity, terminate_verified)
@@ -47,15 +48,23 @@ def _unique_config_fields(pairs):
     return data
 
 
-def _read_config(path):
+def _read_config_bytes(path):
     with os.fdopen(open_regular(path), "rb") as config_file:
         encoded = config_file.read(MAX_CONFIG_BYTES + 1)
     if len(encoded) > MAX_CONFIG_BYTES:
         raise ValueError("service configuration exceeds %d bytes" % MAX_CONFIG_BYTES)
+    return encoded
+
+
+def _decode_config(encoded):
     data = json.loads(encoded.decode("utf-8"), object_pairs_hook=_unique_config_fields)
     if not isinstance(data, dict):
         raise ValueError("service configuration must be an object")
     return data
+
+
+def _read_config(path):
+    return _decode_config(_read_config_bytes(path))
 
 
 def server_database_path(value):
@@ -174,7 +183,18 @@ def client_for_service(config, *, timeout=3.0, token=None, token_env=None,
 
 def load_config(path):
     """Read once; choose an explicit connection mode or the shipped local schema."""
-    data = _read_config(path)
+    return load_config_snapshot(path)[0]
+
+
+def load_config_snapshot(path):
+    """Return configuration and the digest of the same bounded byte image."""
+    encoded = _read_config_bytes(path)
+    data = _decode_config(encoded)
+    config = _config_from_data(data)
+    return config, hashlib.sha256(encoded).hexdigest()
+
+
+def _config_from_data(data):
     if data.get("mode") == "connect":
         return ConnectConfig._from_data(data)
     if data.get("mode") == "remote":
@@ -191,10 +211,11 @@ class ServiceConfig:
     state_dir: Path
     working_directory: Path
     token_env: str = ""
+    database_id: str | None = None
 
     def __init__(self, binary, project_db=_UNSET, port=None, state_dir=None,
                  working_directory=None, token_env="", *, database_name=_UNSET,
-                 database_path=_UNSET):
+                 database_path=_UNSET, database_id=None):
         # Keep the shipped project constructor, including its second positional
         # argument. New named stores must use the complete, unambiguous pair.
         if project_db is not _UNSET:
@@ -206,7 +227,7 @@ class ServiceConfig:
         for name, value in (("binary", Path(binary) if isinstance(binary, str) else binary), ("database_name", database_name),
                             ("database_path", database_path), ("port", port),
                             ("state_dir", state_dir), ("working_directory", working_directory),
-                            ("token_env", token_env)):
+                            ("token_env", token_env), ("database_id", database_id)):
             object.__setattr__(self, name, value)
 
     @property
@@ -218,6 +239,10 @@ class ServiceConfig:
 
     def validate_identity(self):
         database_alias(self.database_name)
+        if (self.database_id is not None and
+                (not isinstance(self.database_id, str) or
+                 re.fullmatch(r"[0-7][0-9A-HJKMNP-TV-Z]{25}", self.database_id) is None)):
+            raise ValueError("database_id must be a canonical uppercase ULID")
         binary = self.binary
         if (not isinstance(binary, Path) or not str(binary) or "\x00" in str(binary)
                 or (not binary.is_absolute() and
@@ -287,7 +312,7 @@ class ServiceConfig:
             raise ValueError("connect-only config cannot manage a local service; use load_config for clients")
         if not isinstance(data, dict) or set(data) - {
             "binary", "project_db", "database_name", "database_path", "port",
-            "state_dir", "working_directory", "token_env"
+            "state_dir", "working_directory", "token_env", "database_id"
         }:
             raise ValueError("unknown service configuration fields")
         if "project_db" in data:
@@ -303,7 +328,8 @@ class ServiceConfig:
                       database_path=Path(database_path), port=data["port"],
                       state_dir=Path(data["state_dir"]),
                       working_directory=Path(data["working_directory"]),
-                      token_env=data.get("token_env", ""))
+                      token_env=data.get("token_env", ""),
+                      database_id=data.get("database_id"))
         except (KeyError, TypeError) as error:
             raise ValueError("service config needs binary, database_name/database_path, port, state_dir, working_directory") from error
         return obj.validate_identity()
@@ -313,14 +339,17 @@ def _state_path(config):
     return config.state_dir / "mneme-codex-service.json"
 
 
-def _lock(config):
+def _lock(config, *, timeout=None):
     ensure_private_directory(config.state_dir)
     path = config.state_dir / "service.lock"
     fd = open_regular(path, os.O_CREAT | os.O_RDWR)
     try:
         if IS_WINDOWS:
             check_private_fd(fd)
-        lock_file(fd)
+        if timeout is None:
+            lock_file(fd)
+        else:
+            lock_file_bounded(fd, timeout=timeout)
         return fd
     except BaseException:
         os.close(fd)
@@ -377,7 +406,9 @@ def _expected_catalog(config, catalog):
             and catalog[0].get("db") == config.database_name
             and catalog[0].get("name") == config.database_name
             and catalog[0].get("state") == "open"
-            and catalog[0].get("configured_path") == str(config.database_path))
+            and catalog[0].get("configured_path") == str(config.database_path)
+            and (getattr(config, "database_id", None) is None
+                 or catalog[0].get("db_id") == config.database_id))
 
 
 def _valid_windows_identity(config, pid, identity):
@@ -491,10 +522,10 @@ def status(config):
             "url": config.url, "pid": state["pid"]}
 
 
-def start(config, timeout=10.0):
+def start(config, timeout=10.0, *, lock_timeout=None):
     _require_managed(config, "start")
     config.validate(require_binary=False)
-    fd = _lock(config)
+    fd = _lock(config) if lock_timeout is None else _lock(config, timeout=lock_timeout)
     try:
         existing = status(config)
         if existing["state"] == "ready":
@@ -544,7 +575,7 @@ def start(config, timeout=10.0):
         os.close(fd)
 
 
-def ensure_ready(config, timeout=10.0):
+def ensure_ready(config, timeout=10.0, *, lock_timeout=None):
     """Ensure an exact catalog; connect-only configs never control a process.
 
     HTTP reuse is not process identity evidence and never authorizes signalling.
@@ -598,7 +629,9 @@ def ensure_ready(config, timeout=10.0):
                 return {"state": "ready", "url": config.url, "pid": state["pid"],
                         "reuse_only": True, "process_identity": "unchecked"}
             break
-    return start(config, timeout=timeout)
+    if lock_timeout is None:
+        return start(config, timeout=timeout)
+    return start(config, timeout=timeout, lock_timeout=lock_timeout)
 
 
 def stop(config, timeout=40.0):

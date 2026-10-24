@@ -296,6 +296,54 @@ keep old direct owner registrations alongside this server as an accidental grant
 bypass. Existing project memory entries in TOML select the project; they do not
 require an additional project MCP process or project hook installation.
 
+## Native project setup
+
+Ordinary `mnemed init` detects native configuration through the shared workspace
+resolver. It does not choose legacy setup because a configured owner is inactive,
+unavailable or denied. Invalid configuration and known policy exclusions refuse
+before creating a store. Use normalized root paths without `..` components.
+
+Setup creates or adopts `.mneme/codex-memory.db`, preserving an existing native
+database identity and its bodies. It appends a project owner declaration to
+`.mneme/memory.toml` and validates the resulting native selection. An unambiguous
+discovered name for that identity is reused; explicit local name/identity claims
+are not overwritten. Existing legacy project selectors need explicit migration,
+not an automatic profile rewrite. Global store definitions, libraries, defaults,
+delivery and background policy remain unchanged. In particular, disabling core
+delivery is not the same as denying ordinary reads.
+
+The project MCP entry adds managed local startup before handing the untouched
+protocol stream to the **full configured native router**. If a supported shared
+native registration selects the same memory configuration, setup overrides that
+same server name only in the project layer. Tool filters, approvals and environment
+remain inherited; secrets are not copied into project configuration. Ambiguous,
+disabled or fixed-workspace registrations refuse rather than being repaired or
+duplicated. Without a matching shared entry, setup uses `mneme_project`.
+
+The launcher checks the actual process workspace, not a forced parent workspace.
+Ordinary subdirectories retain native scope; a different nested project or privacy
+boundary cannot start or use the parent's managed owner through this entry.
+Native metadata discovery remains bounded and policy-controlled. Exact selections
+are replayed offline before and after owner readiness; policy drift is not a reason
+to retry through another route. Bare CLI commands remain connect-only: when the
+owner is stopped they report unavailable; launching MCP can start the owner again.
+This is not continuous service supervision.
+
+No project lifecycle hooks or device actor are installed or trusted by native
+init. Existing device actor configuration and trust remain unchanged; prepare that
+actor separately if it is absent. `--no-recording`, `--library-config` and
+`--store-registry` cannot independently override native policy. `--codex-binary`
+also applies only to non-native setup; configure the native actor separately.
+
+Before configuration commits, failure restores only unchanged installer-owned
+outputs and the known overlay preimage. Concurrent edits are retained for review.
+After the overlay, service and final selection have been checked, an owner-start
+failure reports **incomplete** and retains that coherent configuration for a
+validated same-route rerun. A newly created store whose final identity-specific
+admission fails may also remain as resumable data. Setup never deletes, resets or
+rolls back a database or its bodies. Keep the reported receipts and rerun after
+resolving the refusal; do not delete memory data to recover setup.
+
 ## Prepare one Codex device actor
 
 Use Python 3.11+ and a coherent published helper bundle. This command prints a

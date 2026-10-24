@@ -114,13 +114,13 @@ class HookTrustTests(unittest.TestCase):
 
     def test_dynamic_interpreter_receipt_survives_runtime_path_change(self):
         receipt = json.loads((self.prefix / "receipt.json").read_text())
-        self.assertEqual(receipt["plan"]["config_revision"], 40)
+        self.assertEqual(receipt["plan"]["config_revision"], install.CONFIG_REVISION)
         self.assertEqual(receipt["plan"]["python"], "python3")
         with patch.object(sys, "executable", str(self.base / "replaced-python")):
             self.assertEqual(trust.reviewed_definitions(self.root, self.service), self.reviewed)
         self.install_existing_owner()
         owner_receipt = json.loads((self.prefix / "receipt.json").read_text())
-        self.assertEqual(owner_receipt["plan"]["config_revision"], 41)
+        self.assertEqual(owner_receipt["plan"]["config_revision"], install.EXISTING_SERVICE_REVISION)
         self.assertEqual(owner_receipt["plan"]["python"], "python3")
         with patch.object(sys, "executable", str(self.base / "another-python")):
             trust.reviewed_definitions(self.root, self.service)

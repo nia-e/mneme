@@ -176,8 +176,8 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(install.V34_DESTINATIONS, (*install.V32_DESTINATIONS, ("lib/stable_hooks.py", False)))
         self.assertEqual(install.V36_DESTINATIONS, (*install.V34_DESTINATIONS, ("lib/session_activity.py", False)))
         self.assertEqual(install.DESTINATIONS, (*install.V36_DESTINATIONS, ("lib/packet_accounting.py", False)))
-        self.assertEqual(install.CONFIG_REVISION, 40)
-        self.assertEqual(install.EXISTING_SERVICE_REVISION, 41)
+        self.assertEqual(install.CONFIG_REVISION, 42)
+        self.assertEqual(install.EXISTING_SERVICE_REVISION, 43)
 
     def test_genuine_revision30_inventory_and_old_plans_do_not_gain_review_module(self):
         fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
@@ -445,7 +445,7 @@ class InstallTests(unittest.TestCase):
         with patch('host_platform.shutil.which', side_effect=AssertionError('owner selector resolved during preparation')), \
              patch('service._probe') as probe, patch('service.subprocess.Popen') as spawn:
             retained = self.existing_plan(original_service)
-            self.assertEqual(retained['config_revision'], 41)
+            self.assertEqual(retained['config_revision'], install.EXISTING_SERVICE_REVISION)
             self.assertNotIn('existing_owner_binary', retained)
             install.validate_plan(retained)
             self.assertFalse(self.prefix.exists())

@@ -32,13 +32,15 @@ cd /path/to/your/project
 mnemed init
 ```
 
-This creates project memory, starts a local server, and enables automatic recall
-and saving through Codex. Start a fresh Codex session afterward and follow any
-hook-trust instructions from setup.
+This creates or adopts project memory and starts its local owner. Existing native
+configuration is reused, including its grants and device actor; without native
+configuration, setup enables project recall and recording. Start a fresh Codex
+session afterward and follow any hook-trust instructions from setup.
 
 Automatic memory uses Codex models and can send session context to your configured
-provider. Use `mnemed init --no-recording` to disable automatic saves while keeping
-recall. See the [Codex guide](integrations/codex/README.md) for configuration.
+provider. Without native configuration, `mnemed init --no-recording` keeps recall
+but disables automatic saves. With native configuration, change its recording
+policy instead. See the [Codex guide](integrations/codex/README.md) for configuration.
 
 For multiple existing owners, see [one declarative memory configuration](docs/declarative-config.md).
 It separates store activation, grants and delivery, with one native selector and
