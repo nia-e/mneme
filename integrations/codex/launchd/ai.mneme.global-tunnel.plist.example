@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Example: replace user@remote-host and forwarding ports for your owner. -->
+<!-- Example: replace user@remote-host, forwarding ports and PATH for your owner.
+     launchd does not load shell profiles. It locates env on its standard path;
+     env resolves SSH through the configured PATH on each start. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>ai.mneme.global-tunnel</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/ssh</string>
+    <string>env</string><string>ssh</string>
     <string>-NT</string>
     <string>-o</string><string>BatchMode=yes</string>
     <string>-o</string><string>ExitOnForwardFailure=yes</string>

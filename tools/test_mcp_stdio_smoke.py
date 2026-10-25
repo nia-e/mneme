@@ -64,7 +64,7 @@ class StdioSmokeContractTests(unittest.TestCase):
                 recall_context recall episode concern get list graph neighbors
                 remote_edges core ingest save capture retag link contradict
                 contradictions merges walk reflect""",
-            "operator": """databases discovery_catalog activity database_control snapshot_create
+            "operator": """databases discovery_catalog discovery_register activity database_control snapshot_create
                 status decay prune query recall_context recall episode concern
                 get list graph neighbors remote_edges core ingest save capture retag
                 edit_body edit_summary forget

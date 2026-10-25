@@ -94,6 +94,30 @@ Resource accounting must include physical backend work and repeated calls, not
 just returned nodes. The [memory-model reference](memory-model.md)
 records public bounds; a task-wide context lease is not implemented.
 
+## TODO: move shared hook machinery into Rust
+
+Deferred, not implemented (2026-10-25). Python currently hosts more than harness
+glue: startup/core composition, background readers, recording jobs and durable
+accounting. Reduce the interpreter dependency by moving coherent responsibilities
+behind the existing native application workflows, not by rewriting everything at
+once or duplicating policy in a new frontend.
+
+- **First:** a native passive startup/core hook entrypoint. Reuse `mneme-config`,
+  `mneme-app`, `mneme-present` and owner clients; preserve bounded event admission,
+  selected-owner scope, partial/unavailable coverage and nonfatal hook failures.
+  Acceptance: ordinary startup/core delivery works without Python, with equivalent
+  Codex/Claude adapter behavior and no inference, extra store writer or fallback.
+- **Then:** migrate shared reader/recorder lifecycle and accounting as one owned
+  responsibility, leaving host event/transcript codecs as thin adapters. Inventory
+  current installations first; preserve job identities, replay receipts, pending
+  work, packet budgets and uncertain-usage state. Replacing executable tooling
+  must not reset or refill them. Validate interruption, restart and recovery before
+  retiring the Python implementation or any required old-format readers.
+
+Until then, default interpreter/tool selection should remain dynamic through
+`PATH`, with explicit operator selectors supported. This TODO authorizes no live
+deployment or state migration.
+
 ## Checks
 
 Start with focused checks for the touched owners, for example:

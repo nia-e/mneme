@@ -1,4 +1,5 @@
-//! Shared application operations over an already admitted memory instance.
+//! Shared application operations over admitted memory instances and explicit
+//! operator metadata targets.
 //!
 //! Shared operations own capture request validation and defaults; frontends own
 //! database selection and output framing. These operations neither open stores
@@ -8,6 +9,7 @@ pub mod capture;
 pub mod concern;
 mod context;
 pub mod core;
+pub mod discovery_registration;
 pub mod episode;
 pub mod graph_view;
 pub mod list;

@@ -2,8 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>org.mneme.library</string>
+  <!-- launchd does not load shell profiles. Set PATH for the reviewed installation.
+       It locates env on its standard path; env resolves Python through this PATH. -->
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>ProgramArguments</key><array>
-    <string>/usr/bin/python3</string>
+    <string>env</string><string>python3</string>
     <string>/ABSOLUTE/REPO/integrations/library/library.py</string>
     <string>--config</string><string>/ABSOLUTE/library.json</string>
     <string>once</string>

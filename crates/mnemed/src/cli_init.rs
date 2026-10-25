@@ -1,8 +1,11 @@
 //! Ordinary project setup delegates to the shipped integration's existing owners.
 use crate::AnyErr;
 use clap::Args;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 include!(concat!(env!("OUT_DIR"), "/init_bundle.rs"));
@@ -36,6 +39,229 @@ pub(crate) struct InitArgs {
     /// Local owner port; otherwise choose a free loopback port for new setup.
     #[arg(long, value_parser = clap::value_parser!(u16).range(1024..))]
     port: Option<u16>,
+    #[command(flatten)]
+    registration: crate::cli_registration::RegistrationArgs,
+}
+
+const SETUP_RESULT_BYTES: usize = 1024 * 1024;
+const SETUP_RECOVERY: &str = "Preserved data/configuration; resolve the reported problem, then rerun mnemed init. An installer pending.json is recovered on rerun; do not delete memory data.";
+
+/// The coordinator owns setup facts; native code owns subsequent registration.
+/// Preserve extension fields so adding registration does not erase helper receipts.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct SetupResult {
+    pub schema: String,
+    pub status: String,
+    pub stage: String,
+    pub published: bool,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl SetupResult {
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            schema: "mneme.project-init.v1".into(),
+            status: "incomplete".into(),
+            stage: "setup_result".into(),
+            published: false,
+            extra: Map::from_iter([
+                ("error".into(), Value::String(message.into())),
+                ("recovery".into(), Value::String(SETUP_RECOVERY.into())),
+            ]),
+        }
+    }
+
+    fn text(&self, key: &str) -> &str {
+        self.extra.get(key).and_then(Value::as_str).unwrap_or("")
+    }
+
+    fn human(&self) -> String {
+        if self.status != "configured" {
+            return format!(
+                "Project init incomplete at {}: {}\n{}\n",
+                self.stage,
+                self.text("error"),
+                self.text("recovery")
+            );
+        }
+        let registration = self.extra.get("discovery_registration");
+        let visible_registration = registration
+            .and_then(|value| value.get("published"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let attempted_registration = registration
+            .and_then(|value| value.get("hubs"))
+            .and_then(Value::as_array)
+            .is_some_and(|hubs| !hubs.is_empty());
+        let publication = if self.published || visible_registration || attempted_registration {
+            "discovery registration reported below"
+        } else {
+            "no publishing performed"
+        };
+        let mut output = format!(
+            "Project memory {}: {}\n",
+            self.text("store"),
+            self.text("project_root")
+        );
+        if self.text("integration") == "native" {
+            output.push_str(&format!(
+                "Native owner {} ready; native policy unchanged ({publication}).\nNo project lifecycle hooks installed. Recording: {}.\nDevice actor presence/trust/execution not verified. Managed MCP startup is configured; a fresh Codex session is still required.\n",
+                self.text("db_id"), self.text("recording")
+            ));
+        } else {
+            let local_registration =
+                if self.extra.get("local_registration") == Some(&Value::Bool(true)) {
+                    "locally registered"
+                } else {
+                    "not registered: existing exclusion/withdrawal preserved"
+                };
+            let trust = &self.extra["hook_trust"];
+            let trust_status = trust["status"].as_str().unwrap_or("");
+            output.push_str(&format!(
+                "Owner {} ready; {local_registration} ({publication}).\nHippocampus: {}; recording: {}.\nHook trust: {trust_status} ({} trusted enabled hooks). Fresh-session execution is not verified.\n",
+                self.text("db_id"), self.text("hippocampus"), self.text("recording"), trust["trusted"]
+            ));
+            if trust_status != "trusted" {
+                output.push_str(&format!(
+                    "Hook review remains manual ({}); use Codex /hooks. Project store/owner remain configured.\n",
+                    trust["reason"].as_str().unwrap_or("pending")
+                ));
+            }
+        }
+        if let Some(registration) = registration {
+            if let Some(summary) = registration.get("summary").and_then(Value::as_str) {
+                if summary.starts_with("Discovery registration") {
+                    output.push_str(&format!("{summary}\n"));
+                } else {
+                    output.push_str(&format!("Discovery registration: {summary}\n"));
+                }
+            } else if let Some(status) = registration.get("status").and_then(Value::as_str) {
+                output.push_str(&format!("Discovery registration: {status}.\n"));
+            }
+            if let Some(hubs) = registration.get("hubs").and_then(Value::as_array) {
+                for hub in hubs.iter().take(64) {
+                    let label = hub.get("hub").and_then(Value::as_str).unwrap_or("hub");
+                    let status = hub
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("pending");
+                    output.push_str(&format!("  {label}: {status}"));
+                    let detail = hub
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .or_else(|| hub.get("receipt")?.get("warning")?.as_str());
+                    if let Some(detail) = detail {
+                        // Native reports are already bounded; retain that
+                        // property at the human presentation boundary too.
+                        output.push_str(" — ");
+                        output.extend(detail.chars().take(2048));
+                    }
+                    output.push('\n');
+                }
+            }
+            if let Some(recovery) = registration.get("recovery").and_then(Value::as_str) {
+                output.push_str(&format!("{recovery}\n"));
+            }
+        }
+        output
+    }
+
+    fn render(&self, json: bool) -> Result<(), AnyErr> {
+        if json {
+            println!("{}", serde_json::to_string(self)?);
+        } else if self.status == "configured" {
+            print!("{}", self.human());
+        } else {
+            eprint!("{}", self.human());
+        }
+        Ok(())
+    }
+}
+
+fn parse_setup_result(bytes: &[u8]) -> Result<SetupResult, AnyErr> {
+    if bytes.len() > SETUP_RESULT_BYTES {
+        return Err("project setup result exceeds the 1 MiB limit".into());
+    }
+    let result: SetupResult = serde_json::from_slice(bytes).map_err(
+        |_| "project setup returned malformed JSON; no discovery registration attempted",
+    )?;
+    if result.schema != "mneme.project-init.v1"
+        || !matches!(result.status.as_str(), "configured" | "incomplete")
+        || result.stage.is_empty()
+        || result.stage.len() > 128
+    {
+        return Err("project setup returned an unsupported result contract; no discovery registration attempted".into());
+    }
+    let required = if result.status == "configured" {
+        &["store", "project_root", "db_id", "recording"][..]
+    } else {
+        &["error", "recovery"][..]
+    };
+    if required.iter().any(|key| result.text(key).is_empty()) {
+        return Err("project setup result is missing required text fields; no discovery registration attempted".into());
+    }
+    if result.status == "configured" {
+        if result.stage != "complete"
+            || result
+                .extra
+                .get("integration")
+                .is_some_and(|v| !v.is_string())
+        {
+            return Err("project setup returned an inconsistent success result; no discovery registration attempted".into());
+        }
+        if result.text("integration") != "native" {
+            let trust = result.extra.get("hook_trust");
+            if result
+                .extra
+                .get("local_registration")
+                .and_then(Value::as_bool)
+                .is_none()
+                || result.text("hippocampus").is_empty()
+                || trust
+                    .and_then(|v| v.get("status"))
+                    .and_then(Value::as_str)
+                    .is_none()
+                || trust
+                    .and_then(|v| v.get("trusted"))
+                    .and_then(Value::as_u64)
+                    .is_none()
+            {
+                return Err("project setup returned invalid legacy setup fields; no discovery registration attempted".into());
+            }
+        }
+    }
+    Ok(result)
+}
+
+async fn capture_setup(
+    command: &mut tokio::process::Command,
+) -> Result<(ExitStatus, Vec<u8>), AnyErr> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or("project setup stdout unavailable")?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = stdout.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        if read > SETUP_RESULT_BYTES.saturating_sub(bytes.len()) {
+            return Err(
+                "project setup output exceeds the 1 MiB limit; no discovery registration attempted"
+                    .into(),
+            );
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    Ok((child.wait().await?, bytes))
 }
 
 struct BundleDirectory {
@@ -465,12 +691,10 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
         .arg(&executable)
         .arg("--library-helper")
         .arg(bundle.path.join("library/library.py"))
+        .arg("--json")
         .kill_on_drop(true);
     if let Some(config) = memory_config {
         command.arg("--memory-config").arg(config);
-    }
-    if json {
-        command.arg("--json");
     }
     if args.no_recording {
         command.arg("--no-recording");
@@ -492,9 +716,38 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
     if let Some(port) = args.port {
         command.arg("--port").arg(port.to_string());
     }
-    let status = tokio::time::timeout(Duration::from_secs(180), command.status()).await
-        .map_err(|_| "project init timed out; retained state is recoverable with init again or the reported installer receipt; no cleanup of memory data attempted")??;
-    if !status.success() {
+    let captured = tokio::time::timeout(Duration::from_secs(180), capture_setup(&mut command))
+        .await
+        .map_err(|_| -> AnyErr {
+            "project init timed out; retained state is recoverable with init again or the reported installer receipt; no cleanup of memory data attempted".into()
+        })
+        .and_then(|result| result);
+    let mut result = match captured {
+        Ok((status, bytes)) => match parse_setup_result(&bytes) {
+            Ok(result) if status.success() || result.status != "configured" => result,
+            Ok(mut result) => {
+                // A failing coordinator may still have useful setup receipts.
+                // Keep them, but never let its success-shaped stdout authorize
+                // a subsequent publication after an unsuccessful process exit.
+                result.status = "incomplete".into();
+                result.stage = "setup_result".into();
+                result.extra.insert("error".into(), Value::String(
+                    "project setup exited unsuccessfully after reporting success; no discovery registration attempted".into(),
+                ));
+                result
+                    .extra
+                    .insert("recovery".into(), Value::String(SETUP_RECOVERY.into()));
+                result
+            }
+            Err(error) => SetupResult::failed(error.to_string()),
+        },
+        Err(error) => SetupResult::failed(error.to_string()),
+    };
+    if result.status == "configured" {
+        crate::cli_registration::after_init(&args.registration, &mut result, json).await;
+    }
+    result.render(json)?;
+    if result.status != "configured" {
         return Err("project init incomplete; see setup result and recovery action above".into());
     }
     Ok(())
@@ -515,6 +768,145 @@ pub(crate) fn refuse(message: &str, json: bool) -> Result<(), AnyErr> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    fn setup_fixture(native: bool) -> Value {
+        let mut value = serde_json::json!({
+            "schema": "mneme.project-init.v1", "status": "configured", "stage": "complete",
+            "published": false, "store": "adopted", "project_root": "/project café",
+            "db_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "recording": "off",
+            "local_registration": true, "hippocampus": "reminder",
+            "hook_trust": {"status": "pending", "trusted": 0, "reason": "manual"},
+            "receipt": "/project café/receipt.json", "future_detail": {"preserved": true}
+        });
+        if native {
+            value["integration"] = Value::String("native".into());
+        }
+        value
+    }
+
+    #[test]
+    fn setup_result_roundtrip_preserves_receipts_and_extension_fields() {
+        for native in [false, true] {
+            let value = setup_fixture(native);
+            let result = parse_setup_result(&serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&result).unwrap(), value);
+            let human = result.human();
+            assert!(human.starts_with("Project memory adopted: /project café\n"));
+            assert!(human.contains("no publishing performed"));
+            if native {
+                assert!(human.contains("Native owner"));
+                assert!(human.contains("No project lifecycle hooks installed."));
+                assert!(!human.contains("Hook review remains manual"));
+            } else {
+                assert!(human.contains("locally registered"));
+                assert!(human.contains("Hook trust: pending (0 trusted enabled hooks)."));
+                assert!(human.contains("Hook review remains manual (manual)"));
+            }
+        }
+    }
+
+    #[test]
+    fn setup_result_refuses_malformed_wrong_types_and_false_success() {
+        for bytes in [b"not json".as_slice(), b"{}", b"{}\n{}"] {
+            assert!(parse_setup_result(bytes).is_err());
+        }
+        for (key, value) in [
+            ("schema", Value::String("other".into())),
+            ("published", Value::String("false".into())),
+            ("status", Value::String("ready".into())),
+            ("stage", Value::String("preflight".into())),
+            ("store", Value::Bool(true)),
+            ("project_root", Value::Null),
+            ("db_id", Value::Number(3.into())),
+            ("integration", Value::Bool(true)),
+            ("local_registration", Value::String("true".into())),
+            ("hook_trust", Value::String("trusted".into())),
+        ] {
+            let mut fixture = setup_fixture(false);
+            fixture[key] = value;
+            assert!(
+                parse_setup_result(&serde_json::to_vec(&fixture).unwrap()).is_err(),
+                "{key}"
+            );
+        }
+        assert!(parse_setup_result(&vec![b' '; SETUP_RESULT_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn setup_failure_and_registration_have_one_actionable_rendering() {
+        let result = SetupResult::failed("malformed helper result");
+        let encoded = serde_json::to_vec(&result).unwrap();
+        let decoded = parse_setup_result(&encoded).unwrap();
+        assert_eq!(decoded.status, "incomplete");
+        assert_eq!(
+            decoded.human(),
+            format!(
+                "Project init incomplete at setup_result: malformed helper result\n{SETUP_RECOVERY}\n"
+            )
+        );
+
+        let mut result =
+            parse_setup_result(&serde_json::to_vec(&setup_fixture(true)).unwrap()).unwrap();
+        result.extra.insert("discovery_registration".into(), serde_json::json!({
+            "status": "partial", "published": true, "summary": "one hub added; one pending", "recovery": "Rerun mnemed init."
+        }));
+        let human = result.human();
+        assert!(!human.contains("no publishing performed"));
+        assert!(
+            human.ends_with(
+                "Discovery registration: one hub added; one pending\nRerun mnemed init.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn setup_human_registration_shows_each_hub_and_uncertain_publication() {
+        let mut result =
+            parse_setup_result(&serde_json::to_vec(&setup_fixture(true)).unwrap()).unwrap();
+        result.extra.insert(
+            "discovery_registration".into(),
+            serde_json::json!({
+                "status": "pending", "summary": "Discovery registration: 0/2 hubs confirmed.",
+                "hubs": [
+                    {"hub": "home", "status": "pending", "detail": "timeout; write may have completed"},
+                    {"hub": "work", "status": "already_present", "receipt": {"warning": "durability unconfirmed"}}
+                ],
+                "recovery": "Rerun mnemed init."
+            }),
+        );
+        let human = result.human();
+        assert!(!human.contains("no publishing performed"));
+        assert!(!human.contains("Discovery registration: Discovery registration"));
+        assert!(human.contains("  home: pending — timeout; write may have completed\n"));
+        assert!(human.contains("  work: already_present — durability unconfirmed\n"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn setup_capture_bounds_output_and_includes_process_wait_in_deadline() {
+        let mut valid = tokio::process::Command::new("/bin/sh");
+        valid.args(["-c", "printf 'fixture'; exit 7"]);
+        let (status, bytes) = capture_setup(&mut valid).await.unwrap();
+        assert_eq!(status.code(), Some(7));
+        assert_eq!(bytes, b"fixture");
+
+        let mut verbose = tokio::process::Command::new("/usr/bin/yes");
+        verbose.arg("x");
+        let error = tokio::time::timeout(Duration::from_secs(2), capture_setup(&mut verbose))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("1 MiB"));
+
+        // EOF is not completion: a helper can close stdout and continue running.
+        let mut hung = tokio::process::Command::new("/bin/sh");
+        hung.args(["-c", "exec 1>&-; exec /bin/sleep 10"]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), capture_setup(&mut hung))
+                .await
+                .is_err()
+        );
+    }
 
     fn unicode_bundle() -> BundleDirectory {
         extract_at(

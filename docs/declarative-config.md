@@ -5,6 +5,24 @@ activation, read/write ceilings and delivery/background switches. The native
 selector owns these rules; CLI, configured MCP and Codex hooks consume the same
 selection. Generated adapter JSON is machinery, not another store-policy file.
 
+## Which JSON files still matter?
+
+The extension does not tell you whether a file is configuration, generated
+machinery or retained state:
+
+| File or role | What to do with it |
+| --- | --- |
+| `memory.toml` and project overlays | Author store connections, selection and permissions here for the native path. |
+| Hook adapter JSON, managed `service.json` and client/owner connection files | Keep while a hook, launcher or service references them. They supply machinery bindings; some older or custom integrations still need their own connection configuration. |
+| Codex/Claude host settings | Required by the host's integration format. Native TOML does not replace hook or MCP registration. |
+| Job/packet ledgers, capture receipts and queued work | Retained operational state, not editable config clutter. Receipts can prevent replay and ledgers preserve paid-work accounting. |
+| Old plans, install receipts and backups | Historical/recovery evidence. An unused file is not automatically safe to delete; establish current references and recovery needs first. |
+
+A native recipe is not proof that an older custom hook has been replaced. Check
+the actual hook/MCP/service commands and their referenced files before removing
+duplicate-looking JSON. Moving policy to TOML should reduce hand-maintained
+configuration, not erase another integration's scope or replay history.
+
 ## A small explicit recipe
 
 The names `global`, `project` and `misc` are ordinary entries, not reserved database
@@ -312,6 +330,23 @@ not an automatic profile rewrite. Global store definitions, libraries, defaults,
 delivery and background policy remain unchanged. In particular, disabling core
 delivery is not the same as denying ordinary reads.
 
+First-time native adoption can choose a new local owner port. Its project overlay
+does not overwrite an existing discovery entry: readers outside that project
+continue to use its published endpoint. Choose the intended stable port with
+`--port`, or update the owning publisher separately and then refresh discovery in
+the affected workspaces. A refresh acquires published configuration; it does not
+publish the project's local override.
+
+For new stores, optional `[setup.discovery]` defaults select `mode = "auto"`,
+local hub names and a client-reachable `advertise_url`. `mnemed init --interactive`
+asks for registration settings for one invocation; `--register` with
+`--discovery-hub`/`--advertise-url` supplies them directly, and `--no-register`
+suppresses publication. This uses add-only hub registration after local readiness;
+failed destinations do not undo setup, and an identical rerun is safe. See
+[register new project stores](discovery.md#register-new-project-stores) for the
+hub option, full configuration and device-route examples. Without this opt-in,
+setup remains local. Low-level `capture init` does not register with hubs.
+
 The project MCP entry adds managed local startup before handing the untouched
 protocol stream to the **full configured native router**. If a supported shared
 native registration selects the same memory configuration, setup overrides that
@@ -380,8 +415,11 @@ implicitly. New preparation omits executable SHA fields; helper bundle source
 hashes and installation receipts still protect coherent publication.
 
 Stable POSIX hooks dynamically discover a compatible Python 3.11+ interpreter
-on `PATH` at every launch. Explicit absolute interpreter selectors retain their
-lexical path. A running worker keeps its actual process identity and interpreter;
+on `PATH` at every launch, including later directories when an older interpreter
+shadows a compatible one. New stable-hook plans use v2; retained v1 plans still
+render their original wrappers for rollback. The stable trusted launcher itself
+does not change. Explicit absolute interpreter selectors retain their lexical
+path. A running worker keeps its actual process identity and interpreter;
 only later launches see changes. Windows authoring preserves the established
 setup-selected interpreter for the default; it is stored once, not substituted
 while reconstructing receipts. Dynamic compatible-PATH interpreter discovery is

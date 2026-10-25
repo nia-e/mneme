@@ -22,7 +22,13 @@ fn active(app: &App) -> bool {
         && !app.show_help
         && app.source_menu.is_none()
         && app.config_inspector.is_none()
-        && (app.show_details || app.edge_lens.is_some())
+        && if app.search_visible() {
+            app.search
+                .as_ref()
+                .is_some_and(|search| search.detail.is_some())
+        } else {
+            app.show_details || app.edge_lens.is_some()
+        }
 }
 
 pub(crate) fn draw(
@@ -47,7 +53,7 @@ pub(crate) fn draw(
         .collect();
     let total: usize = counts.iter().sum();
     let max = total.saturating_sub(usize::from(area.height));
-    let offset = app.scroll.min(max);
+    let offset = app.detail_scroll().min(max);
     *app.detail_viewport.borrow_mut() = Some(Viewport { area, offset, max });
     let mut within = offset;
     let mut first = 0;
@@ -68,8 +74,9 @@ pub(crate) fn draw(
 }
 
 pub(crate) fn clamp(app: &mut App) {
-    if let Some(view) = *app.detail_viewport.borrow() {
-        app.scroll = view.offset;
+    let view = *app.detail_viewport.borrow();
+    if let Some(view) = view {
+        app.set_detail_scroll(view.offset);
     }
 }
 
@@ -77,12 +84,13 @@ fn move_by(app: &mut App, down: bool, amount: usize) {
     let Some(view) = *app.detail_viewport.borrow() else {
         return;
     };
-    let current = app.scroll.min(view.max);
-    app.scroll = if down {
+    let current = app.detail_scroll().min(view.max);
+    let offset = if down {
         current.saturating_add(amount).min(view.max)
     } else {
         current.saturating_sub(amount)
     };
+    app.set_detail_scroll(offset);
 }
 
 pub(crate) fn key(app: &mut App, key: KeyEvent) -> bool {
@@ -97,8 +105,11 @@ pub(crate) fn key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Up | KeyCode::Char('k') => move_by(app, false, 1),
         KeyCode::PageDown => move_by(app, true, page),
         KeyCode::PageUp => move_by(app, false, page),
-        KeyCode::Home => app.scroll = 0,
-        KeyCode::End => app.scroll = app.detail_viewport.borrow().unwrap().max,
+        KeyCode::Home => app.set_detail_scroll(0),
+        KeyCode::End => {
+            let max = app.detail_viewport.borrow().unwrap().max;
+            app.set_detail_scroll(max);
+        }
         _ => return false,
     }
     true

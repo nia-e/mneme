@@ -41,7 +41,7 @@ stay isolated from ambient configuration discovery.
 | Arrows or `j`/`k` | Select a card; scroll when a detail is open |
 | Enter | Open the selected memory, scene or touchstone |
 | `s` / `t` | Open Scenes / Touchstones; press again to return to Map |
-| `/` | Semantic search in Map; lexical search in Scenes |
+| `/` | Open ranked semantic-search results in Map; lexical search in Scenes |
 | `i` | Toggle Map's text inspector, or open a scene/touchstone detail |
 | `e` | Focus the selected memory's connections in Map |
 | `h` | Hide/show archived nodes in Map |
@@ -105,8 +105,13 @@ neighbor relative to selection: “supersedes this,” “is superseded,” “s
 links with a bounded neighbor page and marks incomplete coverage. `e` or Esc
 restores the field. This lens reads no bodies; Enter does.
 
-`/` opens a separate semantic-search lens with at most 16 hits. Search results
-are not the default graph inventory and cannot establish complete store coverage.
+`/` opens a separate ranked list of at most 16 semantic-search hits, not a filter
+over the graph. The map, camera and selection remain intact underneath it.
+Use arrows or `j`/`k` to choose a hit and Enter to read it. Esc, Backspace or `b`
+closes the opened memory, then closes the results and restores the map. `/` runs
+another search; `r` refreshes the current search. A startup `--query` opens this
+same list; closing it loads the normal inventory if no map has been loaded yet.
+Results are bounded retrieval, not complete store coverage or a database count.
 
 ### Loading and coverage
 

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,20 @@ class StableHookTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Python 3.11"):
                 stable_hooks._inputs(self.plan)
         self.assertTrue(spawn.call_args.kwargs["tree"])
+        process.wait.assert_called_once_with(timeout=5)
+        terminate.assert_called_once_with(process, timeout=.2)
+
+    def test_staging_probe_has_one_aggregate_deadline_across_path_entries(self):
+        from unittest.mock import MagicMock
+        process = MagicMock()
+        process.wait.side_effect = subprocess.TimeoutExpired("python", 5)
+        with mock.patch("stable_hooks.time.monotonic", side_effect=[100, 101, 121]), \
+             mock.patch("stable_hooks.shutil.which", return_value=sys.executable), \
+             mock.patch("stable_hooks.host_process.spawn", return_value=process) as spawn, \
+             mock.patch("stable_hooks.host_process.terminate_tree") as terminate:
+            with self.assertRaisesRegex(ValueError, "Python 3.11"):
+                stable_hooks._inputs({**self.plan, "python": "python3"})
+        spawn.assert_called_once()
         process.wait.assert_called_once_with(timeout=5)
         terminate.assert_called_once_with(process, timeout=.2)
 
@@ -160,6 +175,45 @@ class StableHookTests(unittest.TestCase):
             result = subprocess.run(stable_hooks.entrypoint_argv(self.root / "launch"),
                                     capture_output=True, timeout=5)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"supported\n", b""))
+
+    def test_default_interpreter_searches_later_path_entries_like_init(self):
+        first, second = self.base / 'old space [x]', self.base / "new café's *"
+        first.mkdir()
+        second.mkdir()
+        old = first / 'python3'
+        old.write_text('#!/bin/sh\necho probe-noise\nexit 1\n')
+        old.chmod(0o700)
+        (second / 'python3').symlink_to(sys.executable)
+        with mock.patch.dict(os.environ, {'PATH': os.pathsep.join(map(str, (first, second)))}):
+            plan = stable_hooks.prepare(stable_root=self.root, runtime=self.runtime,
+                                        hooks_program=self.program, hook_config_path=self.config)
+            self.publish(plan)
+            result = subprocess.run(stable_hooks.entrypoint_argv(self.root / 'launch') + ['quote\"', ''],
+                                    input=b'input', capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value = json.loads(result.stdout)
+        self.assertEqual(value['argv'], [str(self.program), '--config', str(self.config), 'quote\"', ''])
+        self.assertEqual(value['stdin'], b'input'.hex())
+        self.assertEqual(result.stderr, b'runtime stderr\n')
+
+    def test_v1_plan_retains_exact_wrapper_and_can_rollback_after_v2(self):
+        legacy = {**self.plan, 'schema': 'mneme.codex-stable-hooks.plan.v1', 'python': 'python3'}
+        expected = ("#!/bin/sh\n# mneme.stable-hook-runtime.v1\n"
+            "for python in python3 python3.14 python3.13 python3.12 python3.11; do\n"
+            "  if \"$python\" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then\n"
+            "    exec \"$python\" " + shlex.join([str(self.program), '--config', str(self.config)]) + ' "$@"\n'
+            "  fi\ndone\n"
+            "printf '%s\\n' 'stable runtime requires Python 3.11 or newer on PATH' >&2\nexit 127\n").encode()
+        self.publish(legacy)
+        self.assertEqual(self.runtime.read_bytes(), expected)
+        shim = (self.root / 'launch').read_bytes()
+        current = self.next_plan()
+        self.assertEqual(current['schema'], 'mneme.codex-stable-hooks.plan.v2')
+        self.publish(current)
+        stable_hooks.select(legacy)
+        self.assertEqual(os.readlink(self.root / 'current'), str(self.runtime))
+        self.assertEqual((self.root / 'launch').read_bytes(), shim)
+        self.assertEqual(self.runtime.read_bytes(), expected)
 
     def test_absolute_interpreter_symlink_can_update_and_missing_launch_propagates(self):
         interpreter = self.base / "python's current"
@@ -274,7 +328,7 @@ class StableHookTests(unittest.TestCase):
     def test_selected_runtime_has_no_updater_or_source_import_dependency(self):
         copied = self.base / "copied helper"
         copied.mkdir()
-        for name in ("stable_hooks.py", "host_files.py", "host_process.py"):
+        for name in ("stable_hooks.py", "host_files.py", "host_process.py", "host_platform.py"):
             shutil.copyfile(Path(stable_hooks.__file__).parent / name, copied / name)
         plan_file = self.base / "plan.json"
         plan_file.write_text(json.dumps(self.plan))

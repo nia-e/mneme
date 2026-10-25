@@ -149,8 +149,16 @@ class ClaudeRuntime(AssessmentMixin):
         # Host strict validation is terminal; no output repair/retry lives here.
         prompt = request.prompt_with_schema().encode("utf-8")
         session = str(uuid.uuid4())
+        # Safe mode does not disable built-in plugins. Turn off the defaults
+        # present in headless sessions, rather than accepting their instruction
+        # loading or UI events. Unknown/managed plugins still fail closed below.
+        # https://code.claude.com/docs/en/plugins/mods/overview#mods-built-into-claude-code
+        settings = {"disableAllHooks": True, "autoMemoryEnabled": False,
+                    "disableClaudeAiConnectors": True, "enabledPlugins": {
+                        "cc-plugin-agents-md@builtin": False,
+                        "cc-plugin-plugin-authoring@builtin": False}}
         command = [str(executable), "-p", "--safe-mode", "--setting-sources=",
-            '--settings={"disableAllHooks":true,"autoMemoryEnabled":false,"disableClaudeAiConnectors":true}',
+            "--settings=" + json.dumps(settings, separators=(",", ":")),
             "--tools=", "--disallowedTools=mcp__*", "--strict-mcp-config", '--mcp-config={"mcpServers":{}}',
             "--disable-slash-commands", "--no-chrome", "--no-session-persistence", "--permission-mode=dontAsk",
             "--permission-prompts=none", "--output-format=stream-json", "--verbose", "--input-format=text",

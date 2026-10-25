@@ -4,7 +4,7 @@ use crate::touchstones::{ExactTarget, ReferenceResolution, TouchstoneDetail, Tou
 
 pub(super) fn view_is_unread(app: &App) -> bool {
     match app.view {
-        View::Map => app.last_refresh.is_none(),
+        View::Map => !app.search_visible() && app.last_refresh.is_none(),
         View::Scenes => !app.scenes_loaded,
         View::Touchstones => !app.cabinet.loaded,
     }
@@ -18,6 +18,7 @@ fn pending_serves_view(app: &App, pending: &Option<PendingRead>) -> bool {
                 PendingRead::Inventory { .. }
                 | PendingRead::Summaries { .. }
                 | PendingRead::Query(_)
+                | PendingRead::SearchDetail(_)
                 | PendingRead::Navigate(_)
                 | PendingRead::Refresh
                 | PendingRead::EdgeLens(_),
@@ -690,7 +691,7 @@ mod tests {
             );
             assert_eq!(app.view, View::Map);
             assert!(!app.deferred_view_read);
-            assert!(app.error.is_some());
+            assert!(app.search.as_ref().unwrap().error.is_some());
             assert!(rx.try_recv().is_err());
         }
     }

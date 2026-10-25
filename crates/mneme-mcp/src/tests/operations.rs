@@ -118,6 +118,7 @@ async fn library_mode_catalog_and_raw_dispatch_are_closed_to_owner_tools() {
     );
     for hidden in [
         "discovery_catalog",
+        "discovery_register",
         "databases",
         "query",
         "get",

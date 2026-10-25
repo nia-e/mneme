@@ -1,13 +1,13 @@
 //! A serial, read-only window into an existing owner. Never opens a store.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use mneme_mcp_client::{ClientTimeouts, ConnectionOptions, RemoteClient as NativeRemoteClient};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::model::{Activity, Edge, Graph, Node, Request, Response, Target, clean};
+use crate::model::{Activity, Edge, Graph, Node, Request, Response, SearchPage, Target, clean};
 use crate::read_source::ReadProvenance;
 use crate::{scenes, touchstones};
 
@@ -15,7 +15,7 @@ mod inventory;
 mod touchstone_reads;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
-const QUERY_NODES: usize = 16;
+pub(crate) const QUERY_NODES: usize = 16;
 const NEIGHBORS: usize = 32;
 const SUMMARY_BYTES: usize = 2048;
 const BODY_BYTES: usize = 8192;
@@ -35,10 +35,6 @@ enum ReadClient {
     },
 }
 impl ReadClient {
-    #[cfg(test)]
-    async fn connect(options: &ConnectionOptions) -> Result<Self, Error> {
-        Ok(Self::Legacy(NativeRemoteClient::connect(options).await?))
-    }
     async fn connect_with_timeouts(
         options: &ConnectionOptions,
         timeouts: ClientTimeouts,
@@ -169,13 +165,7 @@ impl ReadClient {
             Self::Legacy(_) => ReadProvenance::default(),
         }
     }
-    fn restore_observed(&mut self, previous: ReadProvenance) {
-        // A rejected optional payload contributes no displayed provenance. This
-        // does not unpin its selected edition or resurrect a failed transport.
-        if let Self::Configured { observed, .. } = self {
-            *observed = Some(previous);
-        }
-    }
+
     fn observe_absent_target(&mut self) {
         // A validated native "node not found" becomes a displayed absence,
         // unlike other failed reads. Preserve the exact already-pinned source
@@ -384,20 +374,15 @@ async fn execute(
         }
         Request::Query(query) => {
             require_guard(connection, "query", None)?;
-            require_guard(connection, "neighbors", None)?;
             let result = connection
                 .call_tool(
                     "query",
                     json!({"db":target.database,"expected_db_id":identity,"text":query,"k":QUERY_NODES,"depth":0,"max_nodes":QUERY_NODES}),
                 )
                 .await?;
-            let mut graph = query_graph(&result)?;
-            if !query_edges(connection, &target.database, &identity, &mut graph, TIMEOUT).await {
-                // An optional edge read must not discard successful search
-                // hits, nor leave a failed/cancelled exchange reusable.
-                discard_client(client).await;
-            }
-            Ok(Response::Loaded(graph))
+            // A ranked result list needs no neighborhood crawl. Opening a hit
+            // remains a separate, explicit bounded read.
+            Ok(Response::Search(search_page(&result)?))
         }
         Request::Focus(id) | Request::Lens(id) => {
             require_guard(connection, "get", None)?;
@@ -478,101 +463,6 @@ async fn execute(
         Request::Cancel | Request::Shutdown => {
             unreachable!("shutdown is handled before connecting")
         }
-    }
-}
-
-/// Enrich only the fixed search field, never growing it or inventing proximity
-/// edges. All serial reads share one deadline; this is not a per-node timeout.
-/// False means the connection was failed/cancelled and must be discarded.
-async fn query_edges(
-    connection: &mut ReadClient,
-    database: &str,
-    identity: &str,
-    graph: &mut Graph,
-    budget: Duration,
-) -> bool {
-    if graph.nodes.len() < 2 {
-        return true;
-    }
-    let mut ids = graph
-        .nodes
-        .iter()
-        .map(|node| node.id.clone())
-        .collect::<Vec<_>>();
-    ids.sort_unstable();
-    let field = ids.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut edges = BTreeMap::new();
-    let mut partial = false;
-    let deadline = tokio::time::Instant::now() + budget;
-    let result = tokio::time::timeout_at(deadline, async {
-        for id in &ids {
-            let previous = connection.observed_source();
-            let page = connection
-                .call_tool(
-                    "neighbors",
-                    json!({"db":database,"expected_db_id":identity,"id":id}),
-                )
-                .await?;
-            // Validate each bounded page before accepting its edges or source.
-            // A valid empty page is still an observed absence; a malformed page
-            // must not relabel the successful search hits retained on failure.
-            let parsed = (|| {
-                let (items, more) = neighbor_items(&page)?;
-                let edges = items
-                    .iter()
-                    .take(NEIGHBORS)
-                    .map(|item| neighbor_edge(id, item))
-                    .collect::<Result<Vec<_>, Error>>()?;
-                Ok::<_, Error>((edges, more || items.len() > NEIGHBORS))
-            })();
-            let (page_edges, more) = match parsed {
-                Ok(page) => page,
-                Err(error) => {
-                    connection.restore_observed(previous);
-                    return Err(error);
-                }
-            };
-            partial |= more;
-            for edge in page_edges.into_iter().filter(|edge| {
-                field.contains(edge.from.as_str()) && field.contains(edge.to.as_str())
-            }) {
-                let key = (edge.from.clone(), edge.to.clone(), edge.kind.clone());
-                edges.entry(key).or_insert(edge);
-            }
-        }
-        Ok::<(), Error>(())
-    })
-    .await;
-    // At most 16 * 32 candidate rows were read. Canonical ordering makes the
-    // displayed 32 independent of each page's adjacency order.
-    partial |= edges.len() > NEIGHBORS;
-    graph.edges = edges.into_values().take(NEIGHBORS).collect();
-    let failure = match result {
-        Ok(Ok(())) => None,
-        Ok(Err(_)) => Some(" · links incomplete (edge read failed)"),
-        Err(_) => Some(" · links incomplete (read budget reached)"),
-    };
-    if let Some(note) = failure {
-        graph.partial = true;
-        graph.note.push_str(note);
-        // The read budget has expired, but HTTP sessions are not released by
-        // Drop (only SSH children are). Give DELETE an independent bounded
-        // cleanup phase; this is not more retrieval time or an automatic retry.
-        // ReadClient::close itself bounds DELETE at 3s; the 4s outer guard
-        // also protects this caller if that implementation later changes.
-        if tokio::time::timeout(Duration::from_secs(4), connection.close())
-            .await
-            .is_err()
-        {
-            graph.note.push_str(" · session cleanup timed out");
-        }
-        false
-    } else {
-        graph.partial |= partial;
-        if partial {
-            graph.note.push_str(" · links partial (32-edge bounds)");
-        }
-        true
     }
 }
 
@@ -861,18 +751,16 @@ pub(crate) fn node(value: &Value) -> Result<Node, Error> {
     })
 }
 
-fn query_graph(value: &Value) -> Result<Graph, Error> {
+fn search_page(value: &Value) -> Result<SearchPage, Error> {
     if value["schema"] != "mneme.query.v3" {
         return Err("unsupported memory query response schema".into());
     }
-    let mut graph = Graph {
+    let mut page = SearchPage {
         partial: value["partial"]
             .as_bool()
             .ok_or("query response omitted partial marker")?,
-        note:
-            "Search hits · stored links within this field · best-effort sample, not an atomic snapshot"
-                .into(),
-        ..Graph::default()
+        note: "Ranked search hits · bounded results, not the full graph inventory".into(),
+        ..SearchPage::default()
     };
     let mut seen = HashSet::new();
     if value["lanes"]
@@ -889,8 +777,8 @@ fn query_graph(value: &Value) -> Result<Graph, Error> {
             .as_array()
             .ok_or("query response omitted lane hits")?;
         for hit in hits {
-            if graph.nodes.len() >= QUERY_NODES {
-                graph.partial = true;
+            if page.nodes.len() >= QUERY_NODES {
+                page.partial = true;
                 break;
             }
             if hit["status"] != "active" {
@@ -906,17 +794,17 @@ fn query_graph(value: &Value) -> Result<Graph, Error> {
                     .as_u64()
                     .ok_or("query hit omitted lane rank")?
             );
-            graph.partial |= hit["summary_truncated"] == true
+            page.partial |= hit["summary_truncated"] == true
                 || hit["summary"]
                     .as_str()
                     .is_some_and(|v| v.len() > SUMMARY_BYTES);
-            graph.nodes.push(found);
+            page.nodes.push(found);
         }
     }
-    if graph.partial {
-        graph.note.push_str(" · bounded/partial results");
+    if page.partial {
+        page.note.push_str(" · bounded/partial results");
     }
-    Ok(graph)
+    Ok(page)
 }
 
 fn focus_graph(id: &str, value: &Value, neighbors: &Value) -> Result<Graph, Error> {

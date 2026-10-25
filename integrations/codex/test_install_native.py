@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import hook_launcher
 import install
-from install_test_support import InstallFixture
+from install_test_support import InstallFixture, PYTHON_PATH_ARGV_V40
 import registry_config
 
 
@@ -46,6 +46,23 @@ class NativeInstallTests(unittest.TestCase):
         import tomllib
         self.assertEqual(tomllib.loads(outputs['config.toml'].decode())['mcp_servers'][install.SERVER]['command'], mcp)
         install.validate_plan(plan)
+
+    @unittest.skipUnless(os.name == "posix", "retained POSIX managed MCP launch")
+    def test_retained_managed_mcp_command_keeps_frozen_python_rendering(self):
+        import tomllib
+        current = self.plan()
+        managed = {'db_id': '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+                   'mcp': {'name': 'fixture_project', 'inherited': False}}
+        before = {'config.toml': None, 'hooks.json': None}
+        for revision in (42, 43):
+            plan = {**current, 'config_revision': revision, 'native_managed': managed, 'python': 'python3'}
+            with patch('install._planned_python_argv',
+                       side_effect=lambda plan, args: [*PYTHON_PATH_ARGV_V40, *args]):
+                expected = install.config_outputs(plan, before)
+            self.assertEqual(install.config_outputs(plan, before), expected)
+            server = tomllib.loads(expected['config.toml'].decode())['mcp_servers']['fixture_project']
+            self.assertEqual([server['command'], *server['args'][:3]], list(PYTHON_PATH_ARGV_V40))
+            self.assertNotEqual(install.config_outputs({**plan, 'config_revision': 44}, before), expected)
 
     def discovery_plan(self):
         self.snapshot["discovery"] = {

@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub(crate) struct Source {
-    path: PathBuf,
-    publisher_db_id: ulid::Ulid,
+    pub(crate) path: PathBuf,
+    pub(crate) publisher_db_id: ulid::Ulid,
+    pub(crate) writable: bool,
 }
 
 pub(crate) struct Request {
@@ -74,7 +75,10 @@ pub(crate) fn tool_schema() -> Value {
 /// Publication files are admitted before startup opens any database. The
 /// provisional identity is used only to validate the closed operator document;
 /// it is never retained or published. Owner identity is attached afterwards.
-pub(crate) struct PreparedSources(BTreeMap<String, PathBuf>);
+pub(crate) struct PreparedSources {
+    paths: BTreeMap<String, PathBuf>,
+    writable: std::collections::BTreeSet<String>,
+}
 
 pub(crate) fn prepare_sources(entries: Vec<(String, PathBuf)>) -> Result<PreparedSources, AnyErr> {
     let mut paths = BTreeMap::new();
@@ -87,22 +91,44 @@ pub(crate) fn prepare_sources(entries: Vec<(String, PathBuf)>) -> Result<Prepare
     for path in paths.values() {
         mneme_config::read_discovery_catalog(path, &provisional_id)?;
     }
-    Ok(PreparedSources(paths))
+    Ok(PreparedSources {
+        paths,
+        writable: Default::default(),
+    })
 }
 
 impl PreparedSources {
+    /// A read publication is never implicitly writable. Only explicit operator
+    /// startup admission grants registration access to these already-known paths.
+    pub(crate) fn allow_writes(mut self, aliases: &[String]) -> Result<Self, AnyErr> {
+        for alias in aliases {
+            if !self.paths.contains_key(alias) {
+                return Err(format!(
+                    "writable discovery catalog {alias:?} has no configured publication"
+                )
+                .into());
+            }
+            if !self.writable.insert(alias.clone()) {
+                return Err(format!("duplicate writable discovery catalog {alias:?}").into());
+            }
+        }
+        Ok(self)
+    }
+
     /// Bind admitted paths to the original owner, not a reusable display alias.
     /// No second file read can reject malformed metadata after owner opening.
     pub(crate) fn bind(self, registry: &Registry) -> Result<BTreeMap<String, Source>, AnyErr> {
-        self.0
+        self.paths
             .into_iter()
             .map(|(alias, path)| {
                 let publisher_db_id = registry.slot(&alias)?.status()?.db_id;
+                let writable = self.writable.contains(&alias);
                 Ok((
                     alias,
                     Source {
                         path,
                         publisher_db_id,
+                        writable,
                     },
                 ))
             })

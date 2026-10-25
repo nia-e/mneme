@@ -60,6 +60,15 @@ init={"type":"system","subtype":"init","session_id":session,"model":model,
       "plugins":[],"skills":[],"agents":[]}
 for field in ("plugins","skills","plugin_errors","agents"):
     if mode=="loaded_"+field:init[field]=["unexpected-customization"]
+if mode in ("builtin_defaults", "builtin_ignores_settings"):
+    disabled=json.loads(option("--settings")).get("enabledPlugins",{})
+    init["plugins"]=[{"name":name,"path":"builtin","source":name+"@builtin"}
+        for name in ("cc-plugin-agents-md","cc-plugin-plugin-authoring")
+        if mode=="builtin_ignores_settings" or disabled.get(name+"@builtin") is not False]
+    if init["plugins"] and mode=="builtin_defaults":
+        send({"type":"system","subtype":"ui_invalidate","event":"ui.render","session_id":session})
+if mode=="unexpected_preinit_ui":
+    send({"type":"system","subtype":"ui_invalidate","event":"ui.render","session_id":session})
 send(init)
 if mode=="frames":
     for _ in range(1030): send({"type":"rate_limit_event","session_id":session})
@@ -193,6 +202,19 @@ class ClaudeRuntimeTests(unittest.TestCase):
             with self.subTest(field=field):
                 result=self.run_mode("loaded_"+field)
                 self.assertEqual(result["reason"],"tool_activity");self.assertIsNone(result["proposal"])
+
+    def test_headless_builtin_plugins_are_disabled_not_allowlisted(self):
+        self.assertEqual(self.run_mode("builtin_defaults")["reason"], "abstained")
+        settings=json.loads(next(arg.split("=",1)[1] for arg in self.rows()[0]["args"]
+                                 if arg.startswith("--settings=")))
+        self.assertEqual(settings["enabledPlugins"], {
+            "cc-plugin-agents-md@builtin":False, "cc-plugin-plugin-authoring@builtin":False})
+        for mode,reason in (("builtin_ignores_settings","tool_activity"),
+                            ("unexpected_preinit_ui","invalid_events")):
+            with self.subTest(mode=mode):
+                result=self.run_mode(mode)
+                self.assertEqual(result["reason"],reason)
+                self.assertIsNone(result["proposal"])
 
     def test_metadata_is_not_an_admission_gate(self):
         with patch.dict(os.environ,{"FAKE_CLAUDE_VERSION":"3.0.0 (Claude Code)"}):

@@ -22,7 +22,10 @@ pub(super) fn initial_map(
     if app.query.trim().is_empty() {
         load_inventory(app, tx, pending, None);
     } else {
-        query_field(app, tx, pending, app.query.clone());
+        let query = std::mem::take(&mut app.query);
+        if !query_field(app, tx, pending, query.clone()) {
+            app.query = query;
+        }
     }
 }
 fn load_inventory(
@@ -79,7 +82,7 @@ pub(super) fn advance_inventory(
     tx: &mpsc::Sender<Request>,
     pending: &mut Option<PendingRead>,
 ) {
-    if app.busy || app.view != View::Map {
+    if app.busy || app.view != View::Map || app.search_visible() {
         return;
     }
     let req = match pending.as_ref() {
@@ -213,7 +216,13 @@ pub(super) fn hydrate_viewport(
     tx: &mpsc::Sender<Request>,
     pending: &mut Option<PendingRead>,
 ) {
-    if app.busy || pending.is_some() || app.view != View::Map || app.editing || app.show_help {
+    if app.busy
+        || pending.is_some()
+        || app.view != View::Map
+        || app.search_visible()
+        || app.editing
+        || app.show_help
+    {
         return;
     }
     let Some(state) = app.graph.inventory.as_ref() else {

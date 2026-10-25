@@ -29,6 +29,7 @@ mod islands;
 pub(crate) mod map;
 mod memory;
 mod scenes;
+mod search;
 mod touchstones;
 
 #[cfg(test)]
@@ -57,6 +58,9 @@ pub(crate) fn near_viewport_ids(app: &App, margin: u16) -> Vec<String> {
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
     app.detail_viewport.borrow_mut().take();
     app.source_menu_hits.borrow_mut().clear();
+    if let Some(search) = &app.search {
+        search.hits.borrow_mut().clear();
+    }
     app.layout.borrow_mut().invalidate_hits();
     app.layout.borrow_mut().set_map_area(None);
     let screen = frame.area();
@@ -93,6 +97,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.view {
         View::Scenes => scenes::draw(frame, rows[1], app),
         View::Touchstones => touchstones::draw(frame, rows[1], app),
+        View::Map if app.search.is_some() => search::draw(frame, rows[1], app),
         View::Map => map::draw(frame, rows[1], app),
     }
     activity(frame, rows[2], app);
@@ -172,6 +177,10 @@ fn timestamp(ms: u64) -> String {
     mneme_present::format_timestamp_millis(u128::from(ms))
 }
 
+fn search_field(app: &App) -> bool {
+    app.view == View::Map && app.search.is_some()
+}
+
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let read_source = app.displayed_read_source();
     if let Some(snapshot) = &read_source.snapshot {
@@ -208,8 +217,17 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         if read_source.snapshot.is_some() && read_source.mixed && area.width < 30 {
             tabs.push(s("mixed · ", GOLD));
         }
+        let map_label = if search_field(app) {
+            if area.width >= 60 {
+                format!("  Search results · max {}", crate::data::QUERY_NODES)
+            } else {
+                format!(" Search ≤{}", crate::data::QUERY_NODES)
+            }
+        } else {
+            "  map".into()
+        };
         tabs.extend([
-            s("  map", if app.view == View::Map { MINT } else { DIM }),
+            s(map_label, if app.view == View::Map { MINT } else { DIM }),
             s("   /   ", GRID),
             s("scenes", if app.view == View::Scenes { MINT } else { DIM }),
             s("   /   ", GRID),
@@ -439,6 +457,29 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 s("▏", MINT),
             ]),
         );
+    } else if search_field(app) {
+        let search = app.search.as_ref().unwrap();
+        let detail = search.detail.is_some() || search.opening.is_some();
+        let candidates: &[&str] = if detail {
+            &[
+                "esc results  ↑↓ scroll  ? keys  q quit",
+                "esc results  ↑↓ scroll  ?  q",
+                "esc results  ?  q",
+            ]
+        } else {
+            &[
+                "esc map  ↑↓ choose  ↵ read  / search  ? keys  q quit",
+                "esc map  ↵ read  / search  ?  q",
+                "esc map  ↵ read  ?  q",
+                "esc map  ?  q",
+            ]
+        };
+        let keys = candidates
+            .iter()
+            .find(|keys| Line::raw(**keys).width() <= usize::from(area.width))
+            .copied()
+            .unwrap_or("esc map  q");
+        text_line(frame, area, Line::from(s(keys, LILAC)));
     } else {
         let pane_open = app.show_details
             || app.edge_lens.is_some()
@@ -557,6 +598,149 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn search_app() -> App {
+        use crate::model::{SearchPage, SearchResults};
+        let mut app = app();
+        app.demo = false;
+        let mut search = SearchResults::new("deepseek".into());
+        search.state = LensState::Ready;
+        search.page = SearchPage {
+            nodes: vec![
+                Node {
+                    id: "z-first".into(),
+                    summary: "First ranked result".into(),
+                    tags: vec!["ranked".into()],
+                    ..Node::default()
+                },
+                Node {
+                    id: "a-second".into(),
+                    summary: "Second ranked result".into(),
+                    ..Node::default()
+                },
+            ],
+            ..SearchPage::default()
+        };
+        app.search = Some(search);
+        app
+    }
+
+    #[test]
+    fn search_is_a_ranked_list_not_a_smaller_map_at_wide_and_narrow_sizes() {
+        let app = search_app();
+        for (width, height) in [(120, 36), (60, 24), (40, 16)] {
+            let text = plain_frame(width, height, &app);
+            assert!(text.contains("Search"), "{width}: {text}");
+            assert!(text.contains("max 16"), "{width}: {text}");
+            assert!(text.contains("01  First ranked result"), "{width}: {text}");
+            assert!(text.contains("02  Second ranked result"), "{width}: {text}");
+            assert!(text.find("First ranked result") < text.find("Second ranked result"));
+            assert!(!text.contains("nodes ·"));
+            assert!(!text.contains("A memory is a promise"));
+            assert!(text.lines().last().unwrap().contains("esc map"));
+            assert!(app.layout.borrow().camera.map_area.is_none());
+            assert_eq!(app.search.as_ref().unwrap().hits.borrow().len(), 2);
+        }
+        for (width, height) in [(24, 9), (10, 3), (0, 0)] {
+            plain_frame(width, height, &app);
+        }
+    }
+
+    #[test]
+    fn search_empty_loading_unavailable_and_partial_are_distinct() {
+        for (state, partial, expected) in [
+            (LensState::Loading, false, "Finding relevant memories"),
+            (LensState::Unavailable, false, "No result page loaded"),
+            (LensState::Ready, false, "No hits returned"),
+            (LensState::Ready, true, "No hits in this partial response"),
+        ] {
+            let mut app = search_app();
+            let search = app.search.as_mut().unwrap();
+            search.state = state;
+            search.page.nodes.clear();
+            search.page.partial = partial;
+            if state == LensState::Unavailable {
+                search.error = Some("Owner unavailable".into());
+            }
+            let text = plain_frame(80, 24, &app);
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains("No memories in this field"));
+            assert!(app.search.as_ref().unwrap().hits.borrow().is_empty());
+            if partial {
+                assert!(text.contains("Partial results"));
+            }
+            if state == LensState::Unavailable {
+                assert!(text.contains("Owner unavailable"));
+            }
+        }
+    }
+
+    #[test]
+    fn search_memory_has_its_own_detail_and_return_action() {
+        let mut app = search_app();
+        app.show_details = true; // An underlying map pane must not own search rendering.
+        let search = app.search.as_mut().unwrap();
+        search.detail = Some(crate::model::Graph {
+            nodes: vec![Node {
+                id: "z-first".into(),
+                summary: "Opened search memory".into(),
+                body: "The complete selected body is here.".into(),
+                ..Node::default()
+            }],
+            focus: Some("z-first".into()),
+            partial: true,
+            ..crate::model::Graph::default()
+        });
+        for (width, height) in [(120, 36), (40, 24)] {
+            let text = plain_frame(width, height, &app);
+            assert!(text.contains("Opened search memory"), "{text}");
+            assert!(text.contains("The complete selected body"), "{text}");
+            assert!(text.contains("Partial read"), "{text}");
+            assert!(text.lines().last().unwrap().contains("esc results"));
+            assert!(app.detail_viewport.borrow().is_some());
+            if width < 90 {
+                assert!(!text.contains("First ranked result"));
+                assert!(app.search.as_ref().unwrap().hits.borrow().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn search_render_preserves_map_graph_selection_history_and_world() {
+        let mut app = search_app();
+        app.selected = 3;
+        app.remember(app.visit());
+        app.search = None;
+        plain_frame(120, 36, &app); // Establish the underlying camera/world.
+        app.layout.borrow_mut().zoom_by(1.5);
+        app.layout.borrow_mut().pan(12.0, 8.0);
+        let zoom = app.layout.borrow().zoom_factor();
+        let center = app.layout.borrow().camera.center;
+        let graph_ids = app
+            .graph
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        let query = app.query.clone();
+        app.search = search_app().search;
+        for (width, height) in [(120, 36), (40, 16)] {
+            plain_frame(width, height, &app);
+        }
+        assert_eq!(
+            app.graph
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>(),
+            graph_ids
+        );
+        assert_eq!(app.selected, 3);
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.query, query);
+        assert_eq!(app.layout.borrow().zoom_factor(), zoom);
+        assert_eq!(app.layout.borrow().camera.center, center);
     }
 
     #[test]

@@ -11,6 +11,7 @@ const WHEEL_ZOOM_STEP: f64 = 1.1;
 
 pub(crate) fn map_key(app: &mut App, key: KeyEvent) -> bool {
     if app.view != View::Map
+        || app.search_visible()
         || app.editing
         || app.show_help
         || app.source_menu.is_some()
@@ -232,6 +233,9 @@ pub(crate) fn mouse(app: &mut App, event: MouseEvent) {
 }
 
 pub(crate) fn mouse_with_wheel_reports(app: &mut App, event: MouseEvent, reports: usize) {
+    if crate::search_actions::search_mouse(app, event, reports.max(1)) {
+        return;
+    }
     if crate::detail_scroll::mouse(app, event, reports.max(1)) {
         return;
     }

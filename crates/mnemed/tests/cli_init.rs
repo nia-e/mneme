@@ -55,6 +55,11 @@ fn init_help_and_illegal_selectors_are_local_and_bounded() {
         "--codex-binary",
         "--library-config",
         "--store-registry",
+        "--register",
+        "--no-register",
+        "--discovery-hub",
+        "--advertise-url",
+        "--interactive",
     ] {
         assert!(help.contains(option));
     }
@@ -90,6 +95,15 @@ fn init_help_and_illegal_selectors_are_local_and_bounded() {
     }
     let invalid = fixture.run(&["init", "--port", "1"]);
     assert!(!invalid.status.success());
+    for args in [
+        vec!["init", "--register", "--no-register"],
+        vec!["init", "--register", "--interactive"],
+        vec!["init", "--no-register", "--interactive"],
+        vec!["init", "--discovery-hub", "invalid hub"],
+        vec!["init", "--advertise-url", "http://127.0.0.1:1"],
+    ] {
+        assert!(!fixture.run(&args).status.success());
+    }
     fixture.unchanged();
 }
 #[cfg(not(feature = "cozo"))]
@@ -183,11 +197,26 @@ impl Fixture {
     /// A disposable interpreter stand-in records probes/setup arguments without
     /// running project_setup or contacting any owner. It proves CLI routing only.
     fn recording_python(&self) -> PathBuf {
+        self.recording_python_result(
+            &serde_json::json!({
+                "schema": "mneme.project-init.v1", "status": "configured", "stage": "complete",
+                "published": false, "store": "adopted", "project_root": self.0,
+                "db_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "recording": "off",
+                "local_registration": true, "hippocampus": "reminder",
+                "hook_trust": {"status": "pending", "trusted": 0, "reason": "manual"},
+                "fixture_receipt": {"preserved": true}
+            })
+            .to_string(),
+            0,
+        )
+    }
+    fn recording_python_result(&self, result: &str, status: u8) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let python = self.0.join("python");
         let probe = serde_json::json!({"version": [3, 11], "executable": python});
+        let result = shlex::try_quote(result).unwrap();
         std::fs::write(&python, format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$MNEME_INIT_PYTHON_TRACE\"\nif [ \"$1\" = -I ]; then\n  printf '%s\\n' '{probe}'\nfi\n"
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$MNEME_INIT_PYTHON_TRACE\"\nif [ \"$1\" = -I ]; then\n  printf '%s\\n' '{probe}'\nelse\n  printf '%s\\n' {result}\n  exit {status}\nfi\n"
         )).unwrap();
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o700)).unwrap();
         python
@@ -207,6 +236,9 @@ impl Fixture {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["status"], "configured");
+        assert_eq!(result["fixture_receipt"]["preserved"], true);
         assert!(!root.join(".codex").exists());
         std::fs::read_to_string(self.0.join("python-trace")).unwrap()
     }
@@ -219,6 +251,93 @@ fn absent_native_configuration_keeps_legacy_setup_arguments() {
     let trace = fixture.setup_trace(&fixture.0);
     assert!(trace.contains("codex/project_setup.py\n--root\n"));
     assert!(!trace.contains("--memory-config"));
+    assert_eq!(trace.lines().filter(|line| *line == "--json").count(), 1);
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn human_init_also_captures_json_then_renders_legacy_result_once() {
+    let fixture = Fixture::new();
+    let python = fixture.recording_python();
+    let output = fixture.run(&["init", "--python", python.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(human.matches("Project memory adopted:").count(), 1);
+    assert!(human.contains("Hook trust: pending (0 trusted enabled hooks)."));
+    assert!(!human.contains("mneme.project-init.v1"));
+    let trace = std::fs::read_to_string(fixture.0.join("python-trace")).unwrap();
+    assert_eq!(trace.lines().filter(|line| *line == "--json").count(), 1);
+    assert!(!fixture.0.join(".codex").exists());
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn malformed_helper_result_is_incomplete_json_not_a_successful_init() {
+    let fixture = Fixture::new();
+    let python = fixture.recording_python_result("not a setup result", 0);
+    let output = fixture.run(&["--json", "init", "--python", python.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "incomplete");
+    assert_eq!(result["stage"], "setup_result");
+    assert_eq!(result["published"], false);
+    assert!(result["error"].as_str().unwrap().contains("malformed JSON"));
+    assert!(
+        result["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("rerun mnemed init")
+    );
+    assert!(!fixture.0.join(".codex").exists());
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn helper_error_json_is_preserved_once_with_its_recovery_receipt() {
+    let fixture = Fixture::new();
+    let expected = serde_json::json!({
+        "schema": "mneme.project-init.v1", "status": "incomplete", "stage": "installer",
+        "published": false, "error": "fixture conflict", "recovery": "Keep and retry.",
+        "receipt": "/fixture/pending.json"
+    });
+    let python = fixture.recording_python_result(&expected.to_string(), 1);
+    let output = fixture.run(&["--json", "init", "--python", python.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        expected
+    );
+    assert!(!fixture.0.join(".codex").exists());
+}
+
+#[cfg(all(feature = "cozo", unix))]
+#[test]
+fn unsuccessful_helper_cannot_authorize_registration_with_success_shaped_output() {
+    let fixture = Fixture::new();
+    let success = serde_json::json!({
+        "schema": "mneme.project-init.v1", "status": "configured", "stage": "complete",
+        "published": false, "store": "created", "project_root": fixture.0,
+        "db_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "recording": "off", "integration": "native",
+        "receipt": "/fixture/retained.json"
+    });
+    let python = fixture.recording_python_result(&success.to_string(), 1);
+    let output = fixture.run(&["--json", "init", "--python", python.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "incomplete");
+    assert_eq!(result["stage"], "setup_result");
+    assert_eq!(result["receipt"], "/fixture/retained.json");
+    assert!(result.get("discovery_registration").is_none());
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("exited unsuccessfully")
+    );
 }
 
 #[cfg(all(feature = "cozo", unix))]

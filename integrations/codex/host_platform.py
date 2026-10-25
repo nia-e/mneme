@@ -18,6 +18,38 @@ import subprocess
 import sys
 
 WINDOWS = os.name == "nt"
+PYTHON_CANDIDATES = ("python3", "python3.14", "python3.13", "python3.12", "python3.11")
+PYTHON_PROBE = "import sys; raise SystemExit(sys.version_info < (3, 11))"
+
+
+def python_path_candidates():
+    """Match init's name-first search, including shadowed compatible interpreters."""
+    directories = os.environ.get("PATH", "").split(os.pathsep)
+    for name in PYTHON_CANDIDATES:
+        for directory in directories:
+            yield os.path.join(directory or os.curdir, name)
+
+
+def python_path_script(arguments=(), *, unavailable="Mneme requires Python 3.11 or newer on PATH"):
+    """Render one finite PATH search; paths/argv stay data, never shell source.
+
+    An incompatible first python3 must not hide a supported later python3 that
+    init can discover. Split PATH with parameter expansion, not unquoted shell
+    expansion: spaces, glob characters, and empty entries retain their meaning.
+    The host's existing hook deadline bounds these launch-time version probes.
+    """
+    args = shlex.join(arguments)
+    return ("for python in " + shlex.join(PYTHON_CANDIDATES) + "; do "
+            "path_tail=${PATH-}; while :; do "
+            'case "$path_tail" in *:*) directory=${path_tail%%:*}; path_tail=${path_tail#*:}; more=1;; '
+            '*) directory=$path_tail; more=;; esac; '
+            'candidate=${directory:-.}/$python; '
+            'case "$candidate" in /*) ;; *) candidate=./$candidate;; esac; '
+            'if [ -f "$candidate" ] && [ -x "$candidate" ] && "$candidate" -c '
+            + shlex.quote(PYTHON_PROBE) + ' >/dev/null 2>&1; then exec "$candidate" '
+            + (args + " " if args else "") + '"$@"; fi; '
+            '[ -n "$more" ] || break; done; done; '
+            "printf '%s\\n' " + shlex.quote(unavailable) + " >&2; exit 127")
 
 
 def executable_name(name, *, windows=None):
@@ -103,10 +135,7 @@ def python_hook_argv(python, arguments, *, windows=None):
     windows = WINDOWS if windows is None else windows
     if python != "python3" or windows:
         return [executable_name(python, windows=windows) if python == "python3" else python, *arguments]
-    script = ("for python in python3 python3.14 python3.13 python3.12 python3.11; do "
-              "if \"$python\" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' "
-              ">/dev/null 2>&1; then exec \"$python\" \"$@\"; fi; done; "
-              "printf '%s\\n' 'Mneme requires Python 3.11 or newer on PATH' >&2; exit 127")
+    script = python_path_script()
     return ["/bin/sh", "-c", script, "mneme-python", *arguments]
 
 

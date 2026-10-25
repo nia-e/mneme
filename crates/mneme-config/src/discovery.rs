@@ -155,6 +155,9 @@ pub struct ConfigDeclarations {
     pub schema: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    /// Local setup preferences, never imported from a discovery catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<SetupDeclaration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +174,7 @@ impl Default for ConfigDeclarations {
         Self {
             schema: CONFIG_SCHEMA.into(),
             device: None,
+            setup: None,
             read_default: None,
             background: None,
             workspace: Workspace::default(),
@@ -239,6 +243,9 @@ impl ConfigDeclarations {
         }
         if let Some(device) = &self.device {
             validate_name(device)?;
+        }
+        if let Some(setup) = &self.setup {
+            setup.validate()?;
         }
         if self.stores.len() > MAX_STORES || self.libraries.len() > MAX_LIBRARIES {
             return Err(error("configuration exceeds store/library count bound"));
@@ -327,7 +334,7 @@ impl ConfigDeclarations {
 }
 
 impl StoreDeclaration {
-    fn selected_owner(&self, device: Option<&str>) -> Option<Owner> {
+    pub(crate) fn selected_owner(&self, device: Option<&str>) -> Option<Owner> {
         device
             .and_then(|d| self.devices.get(d))
             .and_then(|patch| patch.owner.clone())

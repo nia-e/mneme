@@ -118,27 +118,26 @@ fn focus_caps_neighbors_and_body_and_sanitizes_terminal_text() {
 }
 
 #[test]
-fn query_has_bounded_nodes_no_invented_edges_and_lane_labels() {
+fn search_has_bounded_ranked_hits_and_lane_labels() {
     let hits = (0..20).map(|i| json!({"id":format!("{i:026}"),"summary":"found","status":"active","lane_rank":i+1})).collect();
-    let graph = query_graph(&query(hits)).unwrap();
+    let graph = search_page(&query(hits)).unwrap();
     assert_eq!(graph.nodes.len(), QUERY_NODES);
-    assert!(graph.edges.is_empty());
     assert!(graph.partial);
     assert!(graph.nodes[0].provenance.contains("primary lane"));
-    assert!(graph.note.contains("stored links within this field"));
+    assert!(graph.note.contains("not the full graph inventory"));
 }
 
 #[test]
 fn old_or_compatibility_lanes_and_nonactive_hits_are_refused() {
     let mut value = query(hits(&[A]));
     value["schema"] = json!("mneme.query.v2");
-    assert!(query_graph(&value).is_err());
+    assert!(search_page(&value).is_err());
     let mut value = query(hits(&[A]));
     value["lanes"]["probationary"] = json!({"hits": []});
-    assert!(query_graph(&value).is_err());
+    assert!(search_page(&value).is_err());
     let mut value = query(hits(&[A]));
     value["lanes"]["primary"]["hits"][0]["status"] = json!("archived");
-    assert!(query_graph(&value).is_err());
+    assert!(search_page(&value).is_err());
 }
 
 #[test]
@@ -251,11 +250,9 @@ struct MockOwner {
 }
 
 #[derive(Default)]
-struct EdgeFixture {
+struct QueryFixture {
     hits: Vec<Value>,
-    pages: std::collections::BTreeMap<String, Value>,
-    delay: Duration,
-    fail_on: Option<String>,
+    query_only: bool,
 }
 
 impl MockOwner {
@@ -273,8 +270,8 @@ impl MockOwner {
         )
     }
 
-    fn start_edges(edges: EdgeFixture) -> Self {
-        Self::start_config(false, false, Some(edges), false, false)
+    fn start_query(query: QueryFixture) -> Self {
+        Self::start_config(false, false, Some(query), false, false)
     }
 
     fn start_scenes() -> Self {
@@ -284,14 +281,14 @@ impl MockOwner {
     fn start_config(
         change_identity_after_error: bool,
         advertise_activity: bool,
-        edges: Option<EdgeFixture>,
+        query_fixture: Option<QueryFixture>,
         advertise_scenes: bool,
         scene_identity_guard: bool,
     ) -> Self {
         Self::start_options(
             change_identity_after_error,
             advertise_activity,
-            edges,
+            query_fixture,
             advertise_scenes,
             scene_identity_guard,
             false,
@@ -307,7 +304,7 @@ impl MockOwner {
     fn start_options(
         change_identity_after_error: bool,
         advertise_activity: bool,
-        edges: Option<EdgeFixture>,
+        query_fixture: Option<QueryFixture>,
         advertise_scenes: bool,
         scene_identity_guard: bool,
         advertise_graph: bool,
@@ -351,7 +348,13 @@ impl MockOwner {
                         json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
                     }
                     "tools/list" => {
-                        let mut names = vec!["databases", "query", "get", "neighbors"];
+                        let mut names = vec!["databases", "query"];
+                        if !query_fixture
+                            .as_ref()
+                            .is_some_and(|fixture| fixture.query_only)
+                        {
+                            names.extend(["get", "neighbors"]);
+                        }
                         if advertise_graph {
                             names.push("graph");
                         }
@@ -413,9 +416,9 @@ impl MockOwner {
                                 }
                             }
                             "query" => query(
-                                edges
+                                query_fixture
                                     .as_ref()
-                                    .map(|e| e.hits.clone())
+                                    .map(|fixture| fixture.hits.clone())
                                     .unwrap_or_else(|| hits(&[A, B])),
                             ),
                             "get" => {
@@ -446,16 +449,7 @@ impl MockOwner {
                                 "next_cursor":null,"has_more":false}),
                             "neighbors" => {
                                 let id = input["params"]["arguments"]["id"].as_str().unwrap();
-                                if let Some(edges) = &edges {
-                                    std::thread::sleep(edges.delay);
-                                    edges
-                                        .pages
-                                        .get(id)
-                                        .cloned()
-                                        .unwrap_or_else(|| json!({"items":[],"has_more":false}))
-                                } else {
-                                    json!({"items":[if id == A { edge(B,true) } else { edge(A,false) }],"has_more":false,"returned":1})
-                                }
+                                json!({"items":[if id == A { edge(B,true) } else { edge(A,false) }],"has_more":false,"returned":1})
                             }
                             "episode" => {
                                 let arguments = &input["params"]["arguments"];
@@ -492,11 +486,7 @@ impl MockOwner {
                             && input["params"]["arguments"]["id"] == "00000000000000000000000000"
                         {
                             json!({"isError":true,"content":[{"type":"text","text":"node not found"}]})
-                        } else if (change_identity_after_error && tool == "query")
-                            || (tool == "neighbors"
-                                && edges.as_ref().and_then(|e| e.fail_on.as_deref())
-                                    == input["params"]["arguments"]["id"].as_str())
-                        {
+                        } else if change_identity_after_error && tool == "query" {
                             json!({"isError":true,"content":[{"type":"text","text":"temporary fixture error"}]})
                         } else {
                             json!({"content":[{"type":"text","text":payload.to_string()}]})
@@ -865,7 +855,7 @@ async fn worker_uses_only_bounded_reads_and_poll_is_registry_only() {
     let worker = tokio::spawn(serve(owner.target(), rx, reply));
     tx.send(Request::Query("memory".into())).await.unwrap();
     assert!(
-        matches!(receive(&mut responses).await, Response::Loaded(graph) if graph.nodes.len()==2 && graph.edges.len()==1 && graph.edges[0].from==B && graph.edges[0].to==A && !graph.partial)
+        matches!(receive(&mut responses).await, Response::Search(page) if page.nodes.len()==2 && !page.partial)
     );
     tx.send(Request::Focus(A.into())).await.unwrap();
     assert!(
@@ -890,8 +880,6 @@ async fn worker_uses_only_bounded_reads_and_poll_is_registry_only() {
         [
             "databases",
             "query",
-            "neighbors",
-            "neighbors",
             "databases",
             "get",
             "neighbors",
@@ -903,15 +891,7 @@ async fn worker_uses_only_bounded_reads_and_poll_is_registry_only() {
         json!({"db":"project","expected_db_id":A,"text":"memory","k":16,"depth":0,"max_nodes":16})
     );
     assert_eq!(
-        calls[2]["params"]["arguments"],
-        json!({"db":"project","expected_db_id":A,"id":A})
-    );
-    assert_eq!(
         calls[3]["params"]["arguments"],
-        json!({"db":"project","expected_db_id":A,"id":B})
-    );
-    assert_eq!(
-        calls[5]["params"]["arguments"],
         json!({"db":"project","expected_db_id":A,"id":A,"body":true,"max_body_bytes":8192})
     );
     assert_eq!(
@@ -920,286 +900,70 @@ async fn worker_uses_only_bounded_reads_and_poll_is_registry_only() {
     );
 }
 
-async fn query_fixture(owner: &MockOwner) -> Graph {
+async fn query_fixture(owner: &MockOwner) -> SearchPage {
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let (reply, mut responses) = tokio::sync::mpsc::channel(1);
     let worker = tokio::spawn(serve(owner.target(), rx, reply));
     tx.send(Request::Query("memory".into())).await.unwrap();
-    let Response::Loaded(graph) = receive(&mut responses).await else {
-        panic!("optional links must not discard search hits");
+    let Response::Search(page) = receive(&mut responses).await else {
+        panic!("expected ranked search results");
     };
     tx.send(Request::Shutdown).await.unwrap();
     worker.await.unwrap();
-    graph
+    page
 }
 
 #[tokio::test]
-async fn query_links_deduplicate_without_merging_direction_or_kind_or_expanding_field() {
-    let mut transition = edge(B, false);
-    transition["kind"] = json!("transition");
-    transition["weight"] = json!(0.3);
-    let owner = MockOwner::start_edges(EdgeFixture {
-        hits: hits(&[B, A]),
-        pages: BTreeMap::from([
-            (
-                A.into(),
-                json!({"items":[edge(B,true),edge(B,false),transition,edge(C,false)],"has_more":false}),
-            ),
-            (
-                B.into(),
-                json!({"items":[edge(A,false),edge(A,true)],"has_more":false}),
-            ),
-        ]),
-        ..EdgeFixture::default()
-    });
-    let graph = query_fixture(&owner).await;
-    assert_eq!(
-        graph
-            .nodes
-            .iter()
-            .map(|n| n.id.as_str())
-            .collect::<Vec<_>>(),
-        [B, A]
-    );
-    assert_eq!(
-        graph
-            .edges
-            .iter()
-            .map(|e| (e.from.as_str(), e.to.as_str(), e.kind.as_str(), e.weight))
-            .collect::<Vec<_>>(),
-        [
-            (A, B, "derived_from", 0.7),
-            (A, B, "transition", 0.3),
-            (B, A, "derived_from", 0.7),
-        ]
-    );
-    assert!(!graph.partial);
-    let requests = owner.requests.lock().unwrap();
-    let ids = requests
-        .iter()
-        .filter(|r| r["params"]["name"] == "neighbors")
-        .map(|r| r["params"]["arguments"]["id"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, [A, B]);
-}
-
-#[tokio::test]
-async fn singleton_query_skips_edge_reads() {
-    let owner = MockOwner::start_edges(EdgeFixture {
-        hits: hits(&[A]),
-        ..EdgeFixture::default()
-    });
-    let graph = query_fixture(&owner).await;
-    assert_eq!(graph.nodes.len(), 1);
-    assert!(graph.edges.is_empty());
-    assert!(!graph.partial);
-    assert!(
-        !owner
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|r| r["params"]["name"] == "neighbors")
-    );
-}
-
-#[tokio::test]
-async fn query_links_report_owner_truncation_without_inventing_missing_edges() {
-    let owner = MockOwner::start_edges(EdgeFixture {
-        hits: hits(&[A, B]),
-        pages: BTreeMap::from([(A.into(), json!({"items":[edge(B,false)],"has_more":true}))]),
-        ..EdgeFixture::default()
-    });
-    let graph = query_fixture(&owner).await;
-    assert_eq!(graph.nodes.len(), 2);
-    assert_eq!(graph.edges.len(), 1);
-    assert!(graph.partial);
-    assert!(graph.note.contains("links partial"));
-}
-
-#[tokio::test]
-async fn query_links_cap_each_page_and_final_field_in_canonical_order() {
-    let ids = (0..QUERY_NODES)
-        .map(|i| format!("{i:026}"))
-        .collect::<Vec<_>>();
-    let rows = ids
-        .iter()
-        .enumerate()
-        .flat_map(|(i, from)| {
-            ids.iter()
-                .skip(i + 1)
-                .map(move |to| (from.clone(), to.clone()))
-        })
-        .collect::<Vec<_>>();
-    let pages = ids
-        .iter()
-        .map(|id| {
-            let mut items = rows
-                .iter()
-                .filter(|(from, _)| from == id)
-                .map(|(_, to)| edge(to, false))
-                .collect::<Vec<_>>();
-            items.reverse();
-            // Out-of-field rows still consume the per-page budget.
-            items.extend((0..40).map(|_| edge(C, false)));
-            (id.clone(), json!({"items":items,"has_more":false}))
-        })
-        .collect();
-    let owner = MockOwner::start_edges(EdgeFixture {
-        hits: hits(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
-        pages,
-        ..EdgeFixture::default()
-    });
-    let graph = query_fixture(&owner).await;
-    assert_eq!(graph.nodes.len(), QUERY_NODES);
-    assert_eq!(graph.edges.len(), NEIGHBORS);
-    assert!(graph.partial);
-    assert_eq!(
-        graph
-            .edges
-            .iter()
-            .map(|e| (e.from.clone(), e.to.clone()))
-            .collect::<Vec<_>>(),
-        rows.into_iter().take(NEIGHBORS).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        owner
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|r| r["params"]["name"] == "neighbors")
-            .count(),
-        QUERY_NODES
-    );
-
-    let owner = MockOwner::start_edges(EdgeFixture {
-        hits: hits(&[A, B]),
-        pages: BTreeMap::from([(
-            A.into(),
-            json!({"items":(0..NEIGHBORS).map(|_|edge(C,false)).chain([edge(B,false)]).collect::<Vec<_>>(),"has_more":false}),
-        )]),
-        ..EdgeFixture::default()
-    });
-    let graph = query_fixture(&owner).await;
-    assert!(
-        graph.edges.is_empty(),
-        "row33 must not pass the page budget"
-    );
-    assert!(graph.partial);
-}
-
-#[tokio::test]
-async fn malformed_or_failed_links_preserve_hits_and_prior_edges_then_reconnect() {
-    for fail in [false, true] {
-        let owner = MockOwner::start_edges(EdgeFixture {
-            hits: hits(&[A, B, C]),
-            pages: BTreeMap::from([
-                (A.into(), json!({"items":[edge(B,false)],"has_more":false})),
-                (
-                    B.into(),
-                    json!({"items":[{"neighbor":A,"kind":"invented","incoming":true,"weight":0.7}],"has_more":false}),
-                ),
-            ]),
-            fail_on: fail.then(|| B.into()),
-            ..EdgeFixture::default()
+async fn search_preserves_ranking_without_reading_neighbors_or_requiring_their_capability() {
+    for ids in [vec![], vec![A], vec![C, B, A]] {
+        let owner = MockOwner::start_query(QueryFixture {
+            hits: hits(&ids),
+            query_only: true,
         });
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let (reply, mut responses) = tokio::sync::mpsc::channel(1);
-        let worker = tokio::spawn(serve(owner.target(), rx, reply));
-        tx.send(Request::Query("memory".into())).await.unwrap();
-        let Response::Loaded(graph) = receive(&mut responses).await else {
-            panic!("search was discarded");
-        };
-        assert_eq!(graph.nodes.len(), 3);
-        assert_eq!(graph.edges.len(), 1);
-        assert_eq!((&*graph.edges[0].from, &*graph.edges[0].to), (A, B));
-        assert!(graph.partial);
-        assert!(graph.note.contains("edge read failed"));
-        tx.send(Request::Poll).await.unwrap();
-        assert!(matches!(
-            receive(&mut responses).await,
-            Response::Activity(_)
-        ));
-        tx.send(Request::Shutdown).await.unwrap();
-        worker.await.unwrap();
-        let requests = owner.requests.lock().unwrap();
+        let page = query_fixture(&owner).await;
         assert_eq!(
-            requests
+            page.nodes
                 .iter()
-                .filter(|r| r["method"] == "initialize")
-                .count(),
-            2
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            ids
         );
+        assert!(!page.partial);
+        let requests = owner.requests.lock().unwrap();
+        let calls: Vec<_> = requests
+            .iter()
+            .filter(|request| request["method"] == "tools/call")
+            .map(|request| request["params"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(calls, ["databases", "query"]);
         assert_eq!(
             requests
                 .iter()
-                .filter(|r| r["params"]["name"] == "query")
+                .filter(|request| request["method"] == "DELETE")
                 .count(),
             1
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|r| r["params"]["name"] == "neighbors")
-                .count(),
-            2
-        );
-        assert_eq!(
-            requests.iter().filter(|r| r["method"] == "DELETE").count(),
-            2
         );
     }
 }
 
-#[tokio::test]
-async fn edge_reads_share_one_deadline_and_keep_completed_results() {
-    let owner = MockOwner::start_edges(EdgeFixture {
-        hits: hits(&[A, B, C]),
-        pages: BTreeMap::from([(A.into(), json!({"items":[edge(B,false)],"has_more":false}))]),
-        delay: Duration::from_millis(80),
-        ..EdgeFixture::default()
-    });
-    let target = owner.target();
-    let mut connection = ReadClient::connect(&ConnectionOptions {
-        url: target.url,
-        ssh_mcp_port: target.ssh_mcp_port,
-        token_env: None,
-    })
-    .await
-    .unwrap();
-    let mut graph = query_graph(&query(hits(&[A, B, C]))).unwrap();
-    let started = tokio::time::Instant::now();
-    assert!(
-        !query_edges(
-            &mut connection,
-            "project",
-            A,
-            &mut graph,
-            Duration::from_millis(140)
-        )
-        .await
-    );
-    assert!(started.elapsed() < Duration::from_millis(300));
-    drop(connection);
-    assert_eq!(graph.nodes.len(), 3);
-    assert_eq!(graph.edges.len(), 1);
-    assert!(graph.partial);
-    assert!(graph.note.contains("read budget reached"));
-    let requests = owner.requests.lock().unwrap();
+#[test]
+fn search_preserves_partial_coverage_and_bounds_cards() {
+    let mut value = query(hits(&[B, A]));
+    value["partial"] = json!(true);
+    value["lanes"]["primary"]["hits"][0]["summary"] = json!("é".repeat(SUMMARY_BYTES));
+    let page = search_page(&value).unwrap();
+    assert!(page.partial);
     assert_eq!(
-        requests
+        page.nodes
             .iter()
-            .filter(|r| r["params"]["name"] == "neighbors")
-            .count(),
-        2
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        [B, A]
     );
-    // An expired retrieval deadline must still release the HTTP session. Drop
-    // alone cannot do this; cleanup has its own finite budget.
-    assert_eq!(
-        requests.iter().filter(|r| r["method"] == "DELETE").count(),
-        1
-    );
+    assert!(page.nodes[0].summary.len() <= SUMMARY_BYTES);
+    assert!(page.note.contains("bounded/partial"));
+    value["lanes"]["primary"]["hits"][1]["id"] = json!(B);
+    assert!(search_page(&value).is_err());
 }
 
 #[tokio::test]

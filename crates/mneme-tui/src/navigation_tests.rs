@@ -243,7 +243,7 @@ fn closing_discards_pending_lens_but_selection_keeps_anchor_read() {
 }
 
 #[test]
-fn pending_lens_blocks_another_fetch_and_query_then_clears_overlay() {
+fn pending_lens_blocks_another_fetch_and_search_retains_underlying_overlay() {
     let mut app = live_search();
     let (tx, mut rx) = mpsc::channel(1);
     let mut pending = None;
@@ -270,10 +270,17 @@ fn pending_lens_blocks_another_fetch_and_query_then_clears_overlay() {
         "new search".into()
     ));
     assert!(matches!(rx.try_recv().unwrap(), Request::Query(_)));
-    assert!(app.edge_lens.is_none());
-    apply_response(&mut app, &mut pending, Response::Loaded(Graph::default()));
-    assert_eq!(app.query, "new search");
-    assert!(app.graph.nodes.is_empty());
+    assert!(app.edge_lens.is_some());
+    apply_response(
+        &mut app,
+        &mut pending,
+        Response::Search(SearchPage::default()),
+    );
+    assert_eq!(app.search.as_ref().unwrap().query, "new search");
+    assert!(app.search.as_ref().unwrap().page.nodes.is_empty());
+    assert_eq!(app.graph.nodes.len(), 12);
+    back_key(&mut app, KeyCode::Backspace);
+    assert!(app.edge_lens.is_some());
     assert!(!app.can_go_back());
 }
 
@@ -313,9 +320,17 @@ fn source_switch_drops_pending_lens_and_old_channel() {
         "new source".into()
     ));
     assert!(matches!(new_rx.try_recv().unwrap(), Request::Query(_)));
-    apply_response(&mut app, &mut pending, Response::Loaded(demo_graph()));
-    assert_eq!(app.query, "new source");
-    assert_eq!(app.graph.nodes.len(), 12);
+    apply_response(
+        &mut app,
+        &mut pending,
+        Response::Search(SearchPage {
+            nodes: demo_graph().nodes,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(app.search.as_ref().unwrap().query, "new source");
+    assert_eq!(app.search.as_ref().unwrap().page.nodes.len(), 12);
+    assert!(app.graph.nodes.is_empty());
 }
 
 #[test]

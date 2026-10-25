@@ -420,6 +420,7 @@ fn golden_tool_catalogs_match_capability_profiles() {
             CapabilityProfile::Operator,
             &[
                 "discovery_catalog",
+                "discovery_register",
                 "databases",
                 "activity",
                 "database_control",

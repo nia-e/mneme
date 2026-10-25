@@ -11,7 +11,7 @@ import tomllib
 from unittest.mock import patch
 
 import install
-from install_test_support import InstallFixture
+from install_test_support import InstallFixture, PYTHON_PATH_ARGV_V40
 
 
 class InstallTests(unittest.TestCase):
@@ -176,8 +176,8 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(install.V34_DESTINATIONS, (*install.V32_DESTINATIONS, ("lib/stable_hooks.py", False)))
         self.assertEqual(install.V36_DESTINATIONS, (*install.V34_DESTINATIONS, ("lib/session_activity.py", False)))
         self.assertEqual(install.DESTINATIONS, (*install.V36_DESTINATIONS, ("lib/packet_accounting.py", False)))
-        self.assertEqual(install.CONFIG_REVISION, 42)
-        self.assertEqual(install.EXISTING_SERVICE_REVISION, 43)
+        self.assertEqual(install.CONFIG_REVISION, 44)
+        self.assertEqual(install.EXISTING_SERVICE_REVISION, 45)
 
     def test_genuine_revision30_inventory_and_old_plans_do_not_gain_review_module(self):
         fixture = json.loads(Path(__file__).with_name("fixtures").joinpath(
@@ -366,6 +366,61 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual(install.recover(pending)["status"], "aborted")
                 self.assertEqual({name: (config_dir / name).read_bytes() for name in originals}, originals)
                 self.assertFalse(pending.exists())
+
+    @unittest.skipUnless(sys.platform != "win32", "retained POSIX PATH commands")
+    def test_revision40_through43_python_commands_preserve_receipt_recovery(self):
+        config_dir = self.project / '.codex'
+        config_dir.mkdir()
+        originals = {'config.toml': b'model = "fixture"\n',
+                     'hooks.json': b'{"hooks":{"Stop":[]}}\n'}
+        for name, data in originals.items():
+            (config_dir / name).write_bytes(data)
+        owner, _ = self.existing_owner()
+        plans = {revision: self.existing_plan(owner) if revision % 2 else self.plan()
+                 for revision in range(40, 44)}
+        for revision, plan in plans.items():
+            with self.subTest(revision=revision):
+                prefix = self.prefix.with_name(f'runtime-{revision}')
+                plan.update(config_revision=revision, prefix=str(prefix), python='python3')
+                plan['plan_sha256'] = install.plan_hash(plan)
+                if revision % 2:
+                    owner.write_bytes(install.json_bytes(plan['existing_service_config']['config']))
+                # Expected command bytes come from the frozen pre-change renderer.
+                with patch('install._planned_python_argv',
+                           side_effect=lambda plan, args: [*PYTHON_PATH_ARGV_V40, *args]):
+                    expected = install.config_outputs(plan, originals)
+                self.assertEqual(install.config_outputs(plan, originals), expected)
+                self.assertNotEqual(install.config_outputs(
+                    {**plan, 'config_revision': install.EXISTING_SERVICE_REVISION if revision % 2
+                     else install.CONFIG_REVISION}, originals), expected)
+                result = install.apply(plan)
+                receipt = Path(result['receipt'])
+                receipt_bytes = receipt.read_bytes()
+                self.assertEqual(json.loads(receipt_bytes)['installed_configs'], install._output_hashes(expected))
+                if revision % 2:
+                    owner.unlink()  # Rollback must not reacquire mutable owner inputs.
+                pending = prefix / 'pending.json'
+                pending.write_bytes(install.json_bytes(plan))
+                self.assertEqual(install.recover(pending)['status'], 'configured')
+                self.assertEqual(receipt.read_bytes(), receipt_bytes)
+                self.assertEqual(install.uninstall(receipt)['status'], 'configuration removed')
+                self.assertEqual({name: (config_dir / name).read_bytes() for name in originals}, originals)
+                receipt.unlink()
+                (config_dir / 'config.toml').write_bytes(expected['config.toml'])
+                pending.write_bytes(install.json_bytes(plan))
+                self.assertEqual(install.recover(pending)['status'], 'aborted')
+                self.assertEqual({name: (config_dir / name).read_bytes() for name in originals}, originals)
+
+    @unittest.skipUnless(sys.platform != "win32", "retained POSIX PATH commands")
+    def test_revision40_through43_core_commands_keep_frozen_python_rendering(self):
+        current = self.async_plan()
+        for revision in range(40, 44):
+            plan = {**current, 'config_revision': revision, 'store_registry': {}, 'python': 'python3'}
+            with patch('install._planned_python_argv',
+                       side_effect=lambda plan, args: [*PYTHON_PATH_ARGV_V40, *args]):
+                expected = install.planned_hook_handlers(plan)
+            self.assertEqual(install.planned_hook_handlers(plan), expected)
+            self.assertIn('core_hook.py', expected['SessionStart'][-1]['hooks'][0]['command'])
 
     def setUp(self):
         fixture = InstallFixture()

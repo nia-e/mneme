@@ -1,10 +1,15 @@
 //! Declarative adapter admission: fixtures have no stores and no owner services.
+#[allow(dead_code)]
+#[path = "../../mneme-store-client/src/discovery/fixture.rs"]
+mod discovery_fixture;
+
 use serde_json::{Value, json};
 use std::{
     io::Write,
     net::TcpListener,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::atomic::Ordering,
 };
 
 struct Fixture {
@@ -51,10 +56,27 @@ permissions = {{ read = true, write = {write} }}
         command
             .current_dir(&self.root)
             .env("HOME", &self.root)
+            .env("PWD", &self.root)
+            .env("CODEX_HOME", self.root.join(".codex"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_CACHE_HOME", self.root.join("cache"))
             .env_remove("MNEME_DB");
         command
+    }
+    fn install_default(&self) -> PathBuf {
+        let path = self.root.join("config/mneme/memory.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::copy(&self.config, &path).unwrap();
+        path
+    }
+    fn json(&self, args: &[&str]) -> Value {
+        let output = self.command().args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
     }
     fn select(&self) -> Value {
         let output = self
@@ -144,6 +166,160 @@ fn native_snapshot_and_stores_inventory_are_identical_without_contact() {
     assert_eq!(
         selected["active"][0]["store"]["owner"]["db"],
         "native-alias"
+    );
+    fixture.no_contact();
+}
+
+#[test]
+fn omitted_config_matches_ordinary_selection_with_profile_and_project_overlay() {
+    let fixture = Fixture::new();
+    fixture.install_default();
+    let overlay = fixture.root.join(".mneme/memory.toml");
+    for project in [false, true] {
+        if project {
+            std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
+            std::fs::write(
+                &overlay,
+                "schema='mneme.config.v1'\n[stores.local]\nid='01ARZ3NDEKTSV4RRFFQ69G5FA2'\nowner={url='http://127.0.0.1:1',db='project'}\nactive={workspace='project'}\n",
+            )
+            .unwrap();
+        }
+        for profile in ["default", "private"] {
+            let ordinary = fixture.json(&["--json", "--profile", profile, "stores"]);
+            let selected = fixture.json(&[
+                "--json",
+                "--profile",
+                profile,
+                "config",
+                "select",
+                "--offline",
+            ]);
+            assert_eq!(selected, ordinary, "project={project}, profile={profile}");
+            assert_eq!(selected["request"]["mode"], "discover");
+            assert_eq!(selected["request"]["requested_profile"], profile);
+            assert_eq!(selected["request"]["lexical_pwd"], json!(fixture.root));
+            assert_eq!(selected["project"]["configured"], project);
+            assert_eq!(selected["config"]["stores"].get("local").is_some(), project);
+            fixture.no_contact();
+        }
+    }
+}
+
+#[test]
+fn omitted_config_refresh_updates_ordinary_receipt_not_explicit_receipt() {
+    fn document(port: u16) -> Value {
+        serde_json::to_value(
+            mneme_config::PublishedCatalog::parse_toml(
+                &format!(
+                    "schema='mneme.discovery-catalog.v1'\n[stores.target]\nid='01ARZ3NDEKTSV4RRFFQ69G5FAV'\nowner={{url='http://127.0.0.1:{port}/',db='project'}}\nactive={{workspace='any'}}\npermissions={{read=true,write=false}}\n"
+                ),
+                discovery_fixture::DB,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+    let publisher = discovery_fixture::Fixture::new(document(19001));
+    let fixture = Fixture::new();
+    std::fs::write(
+        &fixture.config,
+        format!(
+            "schema='mneme.config.v1'\nread_default='target'\n[stores.seed]\nid='{}'\nowner={{url='{}',db='project'}}\ndiscovery=true\nactive={{workspace='any'}}\n",
+            discovery_fixture::DB,
+            publisher.url,
+        ),
+    )
+    .unwrap();
+    let default = fixture.install_default();
+    let ordinary = fixture.json(&["--json", "stores"]);
+    assert_eq!(ordinary["request"]["mode"], "discover");
+    assert_eq!(
+        ordinary["config"]["stores"]["target"]["owner"]["url"],
+        "http://127.0.0.1:19001/"
+    );
+    assert_eq!(publisher.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        fixture.json(&["--json", "config", "select", "--offline"]),
+        ordinary
+    );
+    assert_eq!(publisher.calls.load(Ordering::Relaxed), 1);
+
+    let explicit = fixture.json(&[
+        "--json",
+        "config",
+        "select",
+        "--config",
+        default.to_str().unwrap(),
+    ]);
+    assert_eq!(explicit["request"]["mode"], "explicit");
+    assert_ne!(
+        explicit["discovery"]["binding"]["path"],
+        ordinary["discovery"]["binding"]["path"]
+    );
+    assert_eq!(publisher.calls.load(Ordering::Relaxed), 2);
+
+    publisher.set_document(document(19002));
+    let refreshed = fixture.json(&["--json", "config", "inspect", "--refresh"]);
+    assert!(refreshed["error"].is_null(), "{refreshed}");
+    assert_eq!(publisher.calls.load(Ordering::Relaxed), 3);
+    let current = fixture.json(&["--json", "stores"]);
+    assert_eq!(current["request"], ordinary["request"]);
+    assert_eq!(
+        current["config"]["stores"]["target"]["owner"]["url"],
+        "http://127.0.0.1:19002/"
+    );
+    assert_eq!(
+        current["discovery"]["binding"]["path"],
+        ordinary["discovery"]["binding"]["path"]
+    );
+    assert_ne!(current["digest"], ordinary["digest"]);
+    assert_eq!(refreshed["selection_digest"], current["digest"]);
+    assert_eq!(
+        fixture.json(&[
+            "--json",
+            "config",
+            "select",
+            "--expected-selection-digest",
+            current["digest"].as_str().unwrap(),
+        ]),
+        current,
+    );
+    assert_eq!(
+        fixture.json(&[
+            "--json",
+            "config",
+            "select",
+            "--offline",
+            "--config",
+            default.to_str().unwrap(),
+        ]),
+        explicit,
+        "refresh must not overwrite another request's retained receipt",
+    );
+    assert_eq!(publisher.calls.load(Ordering::Relaxed), 3);
+    fixture.no_contact();
+}
+
+#[test]
+fn omitted_missing_config_is_unconfigured_but_explicit_missing_config_is_an_error() {
+    let fixture = Fixture::new();
+    let automatic = fixture.json(&["--json", "config", "inspect", "--offline"]);
+    assert_eq!(automatic["configured"], false);
+    assert!(automatic["error"].is_null());
+    let missing = fixture.root.join("config/mneme/memory.toml");
+    let explicit = fixture.json(&[
+        "--json",
+        "config",
+        "inspect",
+        "--offline",
+        "--config",
+        missing.to_str().unwrap(),
+    ]);
+    assert!(explicit["configured"].is_null());
+    assert!(
+        explicit["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
     );
     fixture.no_contact();
 }

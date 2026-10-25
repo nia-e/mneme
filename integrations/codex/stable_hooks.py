@@ -22,17 +22,20 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 
 import host_files
 import host_process
+from host_platform import PYTHON_PROBE, python_path_candidates, python_path_script
 
-PLAN_SCHEMA = "mneme.codex-stable-hooks.plan.v1"
+PLAN_SCHEMA = "mneme.codex-stable-hooks.plan.v2"
+LEGACY_PLAN_SCHEMA = "mneme.codex-stable-hooks.plan.v1"
+LEGACY_PYTHON_CANDIDATES = ("python3", "python3.14", "python3.13", "python3.12", "python3.11")
+LEGACY_PYTHON_PROBE = "import sys; raise SystemExit(sys.version_info < (3, 11))"
 RESULT_SCHEMA = "mneme.codex-stable-hooks.result.v1"
 MAX_PATH_BYTES = 4096
 MAX_PLAN_BYTES = 32 * 1024
 NOTICE = "Automatic memory temporarily disabled: stable runtime unavailable."
-PYTHON_CANDIDATES = ("python3", "python3.14", "python3.13", "python3.12", "python3.11")
-PYTHON_PROBE = "import sys; raise SystemExit(sys.version_info < (3, 11))"
 _FIELDS = {"schema", "stable_root", "runtime", "python", "hooks_program", "hook_config_path"}
 
 
@@ -85,16 +88,21 @@ def _python(value):
     return "python3" if value == "python3" else str(_path(value))
 
 
-def render_runtime(python, hooks_program, hook_config_path):
+def render_runtime(python, hooks_program, hook_config_path, *, schema=PLAN_SCHEMA):
     """Keep dispatcher/config coherent without pinning the default interpreter."""
     _posix()
     python = _python(python)
     args = shlex.join([str(_path(hooks_program)), "--config", str(_path(hook_config_path))])
-    if python == "python3":
+    if python == "python3" and schema == PLAN_SCHEMA:
+        launch = python_path_script(
+            [str(_path(hooks_program)), "--config", str(_path(hook_config_path))],
+            unavailable="stable runtime requires Python 3.11 or newer on PATH") + "\n"
+    elif python == "python3":
+        # Retained v1 plans must still select their exact old wrapper for rollback.
         # Probe only the bounded supported set. Redirect probe output so startup
         # diagnostics cannot corrupt the hook protocol; never eval command text.
-        launch = ("for python in " + shlex.join(PYTHON_CANDIDATES) + "; do\n"
-                  + '  if "$python" -c ' + shlex.quote(PYTHON_PROBE) + ' >/dev/null 2>&1; then\n'
+        launch = ("for python in " + shlex.join(LEGACY_PYTHON_CANDIDATES) + "; do\n"
+                  + '  if "$python" -c ' + shlex.quote(LEGACY_PYTHON_PROBE) + ' >/dev/null 2>&1; then\n'
                   + '    exec "$python" ' + args + ' "$@"\n'
                   + "  fi\ndone\n"
                   + "printf '%s\\n' 'stable runtime requires Python 3.11 or newer on PATH' >&2\nexit 127\n")
@@ -124,9 +132,16 @@ def _optional_read(path, limit, *, private=False):
 
 def _inputs(plan):
     """Check machinery only; the dispatcher remains the native policy authority."""
-    interpreters = PYTHON_CANDIDATES if plan["python"] == "python3" else (plan["python"],)
+    if plan["python"] == "python3":
+        interpreters = python_path_candidates() if plan["schema"] == PLAN_SCHEMA else LEGACY_PYTHON_CANDIDATES
+    else:
+        interpreters = (plan["python"],)
     interpreter = None
+    deadline = time.monotonic() + 20
     for candidate in interpreters:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         found = shutil.which(candidate)
         if found is None:
             continue
@@ -134,7 +149,7 @@ def _inputs(plan):
         try:
             probe = host_process.spawn([found, "-c", PYTHON_PROBE], tree=True,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            status = probe.wait(timeout=5)
+            status = probe.wait(timeout=min(5, remaining))
         except (OSError, subprocess.TimeoutExpired):
             continue
         finally:
@@ -156,7 +171,8 @@ def _inputs(plan):
 
 def _checked(plan):
     _posix()
-    if not isinstance(plan, dict) or set(plan) != _FIELDS or plan.get("schema") != PLAN_SCHEMA:
+    if (not isinstance(plan, dict) or set(plan) != _FIELDS
+            or plan.get("schema") not in (PLAN_SCHEMA, LEGACY_PLAN_SCHEMA)):
         raise ValueError("invalid stable hook plan")
     checked = {key: str(_path(plan[key])) for key in _FIELDS - {"schema", "python"}}
     checked["python"] = _python(plan["python"])
@@ -171,7 +187,7 @@ def _checked(plan):
             or root in inputs or runtime in root.parents
             or any(output in other.parents for output in outputs for other in outputs | inputs)):
         raise ValueError("stable hook artifact and input paths must be distinct")
-    result = {"schema": PLAN_SCHEMA, **checked}
+    result = {"schema": plan["schema"], **checked}
     if len((_json(result) + "\n").encode("utf-8")) > MAX_PLAN_BYTES:
         raise ValueError("stable hook plan exceeds byte limit")
     return result
@@ -197,7 +213,7 @@ def _artifacts(plan):
     root = Path(plan["stable_root"])
     return (root / "launch", root / "current",
             render_entrypoint(root / "current"),
-            render_runtime(plan["python"], plan["hooks_program"], plan["hook_config_path"]))
+            render_runtime(plan["python"], plan["hooks_program"], plan["hook_config_path"], schema=plan["schema"]))
 
 
 def _current(selector):

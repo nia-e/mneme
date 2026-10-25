@@ -4,6 +4,7 @@
 
 mod capabilities;
 mod discovery_catalog;
+mod discovery_registration;
 mod operations;
 mod presentation;
 mod protocol;

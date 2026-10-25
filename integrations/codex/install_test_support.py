@@ -5,6 +5,16 @@ import install
 from host_platform import executable_name
 
 
+# Frozen from host_platform.python_hook_argv at 24dec1532206e3f3d6792f62fdff4de1cdb70854.
+# Do not regenerate from the current renderer: historical receipt hashes bind it.
+PYTHON_PATH_ARGV_V40 = ("/bin/sh", "-c",
+    "for python in python3 python3.14 python3.13 python3.12 python3.11; do "
+    "if \"$python\" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' "
+    ">/dev/null 2>&1; then exec \"$python\" \"$@\"; fi; done; "
+    "printf '%s\\n' 'Mneme requires Python 3.11 or newer on PATH' >&2; exit 127",
+    "mneme-python")
+
+
 class InstallFixture:
     def __init__(self):
         self.temp = tempfile.TemporaryDirectory()

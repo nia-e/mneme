@@ -113,6 +113,47 @@ pub struct InventorySummaries {
     pub bytes: usize,
 }
 
+/// Ranked query hits are a bounded result list, never the graph inventory.
+#[derive(Clone, Debug, Default)]
+pub struct SearchPage {
+    pub read_source: crate::read_source::ReadProvenance,
+    pub nodes: Vec<Node>,
+    pub partial: bool,
+    pub note: String,
+}
+
+pub struct SearchResults {
+    pub query: String,
+    pub page: SearchPage,
+    pub selected: usize,
+    pub state: LensState,
+    pub detail: Option<Graph>,
+    pub opening: Option<String>,
+    pub error: Option<String>,
+    pub scroll: usize,
+    pub(crate) hits: RefCell<Vec<(ratatui::layout::Rect, usize)>>,
+    pub(crate) saved_error: Option<String>,
+}
+impl SearchResults {
+    pub fn new(query: String) -> Self {
+        Self {
+            query,
+            page: SearchPage::default(),
+            selected: 0,
+            state: LensState::Loading,
+            detail: None,
+            opening: None,
+            error: None,
+            scroll: 0,
+            hits: RefCell::default(),
+            saved_error: None,
+        }
+    }
+    pub fn selected_node(&self) -> Option<&Node> {
+        self.page.nodes.get(self.selected)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Activity {
     pub state: String,
@@ -168,6 +209,7 @@ pub enum Response {
     Inventory(InventoryPage),
     Summaries(InventorySummaries),
     Loaded(Graph),
+    Search(SearchPage),
     Scenes(ScenePage),
     Scene(Scene),
     Touchstones(TouchstonePage),
@@ -349,6 +391,7 @@ pub struct App {
     pub targets: Vec<Target>,
     pub target: usize,
     pub graph: Graph,
+    pub search: Option<SearchResults>,
     pub(crate) layout: RefCell<crate::layout::LayoutCache>,
     pub selected: usize,
     pub hide_archived: bool,
@@ -396,6 +439,7 @@ impl App {
             targets,
             target: 0,
             graph: Graph::default(),
+            search: None,
             layout: RefCell::default(),
             selected: 0,
             hide_archived: false,
@@ -424,6 +468,22 @@ impl App {
     pub fn selected_scene(&self) -> Option<&Scene> {
         self.scenes.items.get(self.scene_selected)
     }
+    pub(crate) fn search_visible(&self) -> bool {
+        self.view == View::Map && self.search.is_some()
+    }
+    pub(crate) fn detail_scroll(&self) -> usize {
+        self.search
+            .as_ref()
+            .filter(|_| self.search_visible())
+            .map_or(self.scroll, |search| search.scroll)
+    }
+    pub(crate) fn set_detail_scroll(&mut self, scroll: usize) {
+        if self.search_visible() {
+            self.search.as_mut().unwrap().scroll = scroll;
+        } else {
+            self.scroll = scroll;
+        }
+    }
     /// Provenance belongs to retained content, never the most recent activity
     /// response or route selection. Empty, unread placeholders do not dilute a
     /// witness; successfully loaded empty pages still carry their own source.
@@ -439,6 +499,15 @@ impl App {
         };
         match self.view {
             View::Map => {
+                if let Some(search) = &self.search {
+                    if search.state == LensState::Ready || !search.page.nodes.is_empty() {
+                        include(&search.page.read_source);
+                    }
+                    if let Some(detail) = &search.detail {
+                        include(&detail.read_source);
+                    }
+                    return shown.unwrap_or_default();
+                }
                 let graph_present = |graph: &Graph| {
                     !graph.nodes.is_empty()
                         || !graph.edges.is_empty()

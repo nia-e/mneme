@@ -926,6 +926,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_registration_http_and_stdio_share_admission_profiles_and_retry_result() {
+        for profile in [
+            crate::CapabilityProfile::ReadOnly,
+            crate::CapabilityProfile::ReceiptGrounded,
+            crate::CapabilityProfile::Curator,
+            crate::CapabilityProfile::Operator,
+        ] {
+            let (root, mut shared) = shutdown_fixture();
+            let server = &mut Arc::get_mut(&mut shared).unwrap().server;
+            server.capability = crate::CapabilityPolicy::new(profile, false);
+            let id = server
+                .registry
+                .slot("a")
+                .unwrap()
+                .status()
+                .unwrap()
+                .db_id
+                .to_string();
+            let path = root.join("registration-catalog.toml");
+            std::fs::write(&path, "schema = 'mneme.discovery-catalog.v1'\n[stores]\n").unwrap();
+            server.registry.discovery_catalogs =
+                crate::discovery_catalog::prepare_sources(vec![("a".into(), path.clone())])
+                    .unwrap()
+                    .allow_writes(&["a".to_owned()])
+                    .unwrap()
+                    .bind(&server.registry)
+                    .unwrap();
+            server
+                .registry
+                .slot("a")
+                .unwrap()
+                .begin_release()
+                .unwrap()
+                .finish()
+                .unwrap();
+            let args = serde_json::json!({
+                "db":"a", "expected_db_id":id, "label":"registered",
+                "store":{"id":ulid::Ulid::new().to_string(), "discovery":true}
+            });
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::ACCEPT,
+                HeaderValue::from_static("application/json, text/event-stream"),
+            );
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            let init = post_handler(State(shared.clone()), headers.clone(), Body::from(serde_json::to_vec(&serde_json::json!({
+                "jsonrpc":"2.0", "id":"init", "method":"initialize", "params":{"protocolVersion":crate::PROTOCOL_VERSION}
+            })).unwrap())).await;
+            assert_eq!(init.status(), StatusCode::OK);
+            headers.insert(
+                "mcp-session-id",
+                init.headers().get("mcp-session-id").unwrap().clone(),
+            );
+            headers.insert(
+                "mcp-protocol-version",
+                HeaderValue::from_static(crate::PROTOCOL_VERSION),
+            );
+            // First registration is through HTTP. Subsequent stdio/HTTP requests
+            // compare the same already-present result, not added against a retry.
+            let add = serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"discovery_register", "arguments":args}});
+            let added = post_handler(
+                State(shared.clone()),
+                headers.clone(),
+                Body::from(serde_json::to_vec(&add).unwrap()),
+            )
+            .await;
+            assert_eq!(added.status(), StatusCode::OK);
+            let added = response_json(added).await;
+            assert_eq!(
+                added["result"]["isError"],
+                profile != crate::CapabilityProfile::Operator,
+                "{added}"
+            );
+            if profile == crate::CapabilityProfile::Operator {
+                let payload: Value =
+                    serde_json::from_str(added["result"]["content"][0]["text"].as_str().unwrap())
+                        .unwrap();
+                assert_eq!(payload["status"], "added");
+                assert_eq!(payload["publisher_db_id"], id);
+            }
+            for params in [
+                serde_json::json!({"name":"discovery_register", "arguments":args}),
+                serde_json::json!({"name":"discovery_register", "arguments":{"db":"a", "expected_db_id":id}}),
+                serde_json::json!({"name":"discovery_register", "arguments":{"db":"a", "expected_db_id":id, "label":"invalid", "store":{"id":ulid::Ulid::new().to_string(), "extra":true}}}),
+            ] {
+                let request = serde_json::json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":params});
+                let stdio = shared.server.handle(request.clone()).await.unwrap();
+                let http = post_handler(
+                    State(shared.clone()),
+                    headers.clone(),
+                    Body::from(serde_json::to_vec(&request).unwrap()),
+                )
+                .await;
+                assert_eq!(http.status(), StatusCode::OK);
+                assert_eq!(
+                    response_json(http).await,
+                    serde_json::from_slice::<Value>(stdio.bytes()).unwrap()
+                );
+            }
+            let listing =
+                serde_json::json!({"jsonrpc":"2.0", "id":3, "method":"tools/list", "params":{}});
+            let stdio = shared.server.handle(listing.clone()).await.unwrap();
+            let http = post_handler(
+                State(shared.clone()),
+                headers,
+                Body::from(serde_json::to_vec(&listing).unwrap()),
+            )
+            .await;
+            assert_eq!(
+                response_json(http).await,
+                serde_json::from_slice::<Value>(stdio.bytes()).unwrap()
+            );
+            let catalog = mneme_config::read_discovery_catalog(&path, &id).unwrap();
+            assert_eq!(
+                catalog.stores.len(),
+                usize::from(profile == crate::CapabilityProfile::Operator)
+            );
+            assert_eq!(
+                shared
+                    .server
+                    .registry
+                    .slot("a")
+                    .unwrap()
+                    .status()
+                    .unwrap()
+                    .in_flight,
+                0
+            );
+            drop(shared);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn shutdown_releases_all_databases_without_reopening_maintenance() {
         let (root, shared) = shutdown_fixture();
         let a = shared.server.registry.slot("a").unwrap();

@@ -2199,6 +2199,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mneme-body",
+ "mneme-config",
  "mneme-core",
  "mneme-cozo",
  "mneme-embed",
@@ -2207,8 +2208,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml_edit",
  "ulid",
 ]
 

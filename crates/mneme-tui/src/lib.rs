@@ -11,12 +11,14 @@ pub mod read_source;
 mod render;
 mod scene_actions;
 pub mod scenes;
+mod search_actions;
 mod source_picker;
 mod touchstone_actions;
 pub mod touchstones;
 use inventory_actions::*;
 use scene_actions::*;
 use scenes::{SceneAxis, ScenePage};
+use search_actions::*;
 use touchstone_actions::*;
 
 #[cfg(not(unix))]
@@ -266,6 +268,7 @@ enum PendingRead {
         ids: Vec<String>,
     },
     Query(String),
+    SearchDetail(String),
     Navigate(Visit),
     Refresh,
     EdgeLens(String),
@@ -354,8 +357,14 @@ fn query_field(
     pending: &mut Option<PendingRead>,
     query: String,
 ) -> bool {
+    let saved_error = app
+        .search
+        .as_ref()
+        .map_or_else(|| app.error.clone(), |search| search.saved_error.clone());
     if request(app, tx, Request::Query(query.clone())) {
-        app.close_edge_lens();
+        let mut search = SearchResults::new(query.clone());
+        search.saved_error = saved_error;
+        app.search = Some(search);
         *pending = Some(PendingRead::Query(query));
         true
     } else {
@@ -414,6 +423,8 @@ fn memory_reads_visible(app: &App) -> bool {
 
 fn reset_source(app: &mut App, pending: &mut Option<PendingRead>) {
     *pending = None;
+    app.search = None;
+    app.query.clear();
     app.close_edge_lens();
     app.target = (app.target + 1) % app.targets.len().max(1);
     app.source_menu = None;
@@ -444,8 +455,13 @@ fn apply_response(app: &mut App, pending: &mut Option<PendingRead>, response: Re
     match response {
         Response::Inventory(page) => apply_inventory(app, pending, page),
         Response::Summaries(page) => apply_summaries(app, pending, page),
+        Response::Search(page) => apply_search_page(app, pending, page),
         Response::Loaded(graph) => {
             let intent = pending.take();
+            if let Some(PendingRead::SearchDetail(id)) = &intent {
+                apply_search_detail(app, id, graph);
+                return;
+            }
             if let Some(PendingRead::EdgeLens(anchor)) = intent {
                 // Closing the lens, changing selection or switching source does
                 // not cancel network I/O. Its eventual reply is safely discarded.
@@ -480,11 +496,6 @@ fn apply_response(app: &mut App, pending: &mut Option<PendingRead>, response: Re
                 None
             };
             match intent {
-                Some(PendingRead::Query(query)) => {
-                    app.layout.borrow_mut().reset();
-                    app.query = query;
-                    app.history.clear();
-                }
                 Some(PendingRead::Navigate(visit)) => {
                     app.remember(visit);
                     app.layout.borrow_mut().reset();
@@ -493,9 +504,10 @@ fn apply_response(app: &mut App, pending: &mut Option<PendingRead>, response: Re
                 // Responses belong to one request on one worker connection.
                 // An unsolicited/stale graph must not replace a field.
                 None => return,
-                Some(PendingRead::EdgeLens(_)) => unreachable!(),
+                Some(PendingRead::EdgeLens(_) | PendingRead::SearchDetail(_)) => unreachable!(),
                 Some(
-                    PendingRead::Inventory { .. }
+                    PendingRead::Query(_)
+                    | PendingRead::Inventory { .. }
                     | PendingRead::Summaries { .. }
                     | PendingRead::Scenes { .. }
                     | PendingRead::Scene { .. }
@@ -550,6 +562,13 @@ fn apply_response(app: &mut App, pending: &mut Option<PendingRead>, response: Re
             app.activity = Some(activity);
         }
         Response::Error(error) => {
+            if matches!(
+                pending,
+                Some(PendingRead::Query(_) | PendingRead::SearchDetail(_))
+            ) {
+                apply_search_error(app, pending, &error);
+                return;
+            }
             if let Some(state) = app.graph.inventory.as_mut() {
                 state.crawling = false;
             }
@@ -608,6 +627,8 @@ fn back_key(app: &mut App, key: KeyCode) -> bool {
     let previous_view = app.view;
     if key == KeyCode::Esc && app.show_help {
         app.show_help = false;
+    } else if app.search_visible() {
+        return search_back(app);
     } else if app.view == View::Touchstones {
         return cabinet_back(app);
     } else if key == KeyCode::Esc && app.edge_lens.is_some() {
@@ -844,6 +865,9 @@ pub async fn run(options: Options) -> Result<(), Error> {
                                 _ => {}
                             }
                         } else {
+                            if search_key(&mut app, key, channel.as_ref().map(|c| &c.0), &mut pending) {
+                                continue;
+                            }
                             // Keep one latest explicit intent, not one new MCP
                             // session per key. A barrier lets the current bounded
                             // read finish, then reuses its verified connection.
@@ -1049,3 +1073,5 @@ mod input_runtime_tests;
 mod navigation_tests;
 #[cfg(test)]
 mod provenance_ui_tests;
+#[cfg(test)]
+mod search_tests;

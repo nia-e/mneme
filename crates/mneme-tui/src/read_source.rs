@@ -36,6 +36,7 @@ impl crate::model::Response {
             Response::Inventory(page) => page.graph.read_source = source,
             Response::Summaries(page) => page.read_source = source,
             Response::Loaded(graph) => graph.read_source = source,
+            Response::Search(page) => page.read_source = source,
             Response::Scenes(page) => page.read_source = source,
             Response::Scene(scene) => scene.read_source = source,
             Response::Touchstones(page) => page.read_source = source,

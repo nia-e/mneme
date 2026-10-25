@@ -120,3 +120,32 @@ class DynamicNativeToolsTests(unittest.TestCase):
                 env={**os.environ, 'PATH': str(self.root)}, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), edition.encode())
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX hook launch')
+    def test_direct_default_python_finds_shadowed_unversioned_interpreter(self):
+        first, second = self.root / 'old space [x]', self.root / "new café's *"
+        first.mkdir()
+        second.mkdir()
+        old = first / 'python3'
+        old.write_text('#!/bin/sh\necho probe-noise\nexit 1\n')
+        old.chmod(0o700)
+        (second / 'python3').symlink_to(sys.executable)
+        arguments = ['', 'space path', 'quote\"', "apostrophe'", '$(not-code)']
+        result = subprocess.run(python_hook_argv('python3',
+            ['-c', 'import json,sys; print(json.dumps(sys.argv[1:]))', *arguments]),
+            env={**os.environ, 'PATH': os.pathsep.join(map(str, (first, second)))},
+            capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), arguments)
+        self.assertEqual(result.stderr, b'')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX hook launch')
+    def test_direct_default_python_preserves_empty_and_relative_path_entries(self):
+        (self.root / 'python3').symlink_to(sys.executable)
+        (self.root / '-odd').mkdir()
+        (self.root / '-odd' / 'python3').symlink_to(sys.executable)
+        for path in ('', 'missing:', ':missing', 'missing::other', '.', '-odd'):
+            with self.subTest(path=path):
+                result = subprocess.run(python_hook_argv('python3', ['-c', 'print("supported")']),
+                    cwd=self.root, env={**os.environ, 'PATH': path}, capture_output=True, timeout=5)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b'supported\n', b''))

@@ -17,6 +17,7 @@ mod concern;
 mod configured_server;
 mod context_observation;
 mod discovery_catalog;
+mod discovery_registration;
 mod edit_body;
 mod edit_summary;
 mod episode;
@@ -550,7 +551,8 @@ fn build_owner_registry(
     options: startup::OwnerOptions,
     sessions: &mut SessionState,
 ) -> Result<Registry, AnyErr> {
-    let catalogs = discovery_catalog::prepare_sources(options.discovery_catalogs().to_vec())?;
+    let catalogs = discovery_catalog::prepare_sources(options.discovery_catalogs().to_vec())?
+        .allow_writes(options.writable_discovery_catalogs())?;
     let mut registry = build_registry(options.into_databases(), sessions)?;
     registry.discovery_catalogs = catalogs.bind(&registry)?;
     Ok(registry)
@@ -847,6 +849,9 @@ async fn call_tool_authorized(
             Ok(serde_json::to_value(reg.activity.page(after, limit))?)
         }
         AdmittedOperation::DiscoveryCatalog(request) => discovery_catalog::read(reg, request),
+        AdmittedOperation::DiscoveryRegister(request) => {
+            discovery_registration::register(reg, request).await
+        }
         AdmittedOperation::Databases => Ok(json!(
             reg.catalog()?
                 .into_iter()
@@ -2225,6 +2230,7 @@ impl<'a> ValidatedToolArguments<'a> {
 enum AdmittedOperation {
     Databases,
     DiscoveryCatalog(discovery_catalog::Request),
+    DiscoveryRegister(discovery_registration::Request),
     Activity { after: u64, limit: usize },
     DatabaseControl(DatabaseControlRequest),
     SnapshotCreate,
@@ -2266,6 +2272,7 @@ impl AdmittedOperation {
         match self {
             Self::Databases => ToolRequestKind::Databases,
             Self::DiscoveryCatalog(_) => ToolRequestKind::DiscoveryCatalog,
+            Self::DiscoveryRegister(_) => ToolRequestKind::DiscoveryRegister,
             Self::Activity { after, limit } => ToolRequestKind::Activity {
                 after: *after,
                 limit: *limit,
@@ -2370,6 +2377,7 @@ enum IngestRequest {
 enum ToolRequestKind {
     Databases,
     DiscoveryCatalog,
+    DiscoveryRegister,
     Activity {
         after: u64,
         limit: usize,
@@ -2417,6 +2425,7 @@ impl ToolRequestKind {
         match self {
             Self::Databases => "databases",
             Self::DiscoveryCatalog => "discovery_catalog",
+            Self::DiscoveryRegister => "discovery_register",
             Self::Activity { .. } => "activity",
             Self::DatabaseControl(_) => "database_control",
             Self::SnapshotCreate => "snapshot_create",
@@ -2477,7 +2486,7 @@ impl ToolRequestKind {
                     CapabilityClass::Operator
                 }
             },
-            Self::SnapshotCreate => CapabilityClass::Operator,
+            Self::SnapshotCreate | Self::DiscoveryRegister => CapabilityClass::Operator,
             Self::EditBody | Self::EditSummary => CapabilityClass::Curator,
             Self::Concern(action) => match action {
                 concern::ConcernAction::List => CapabilityClass::ReadOnly,
@@ -2545,6 +2554,7 @@ impl ToolRequestKind {
         matches!(
             self,
             Self::DiscoveryCatalog
+                | Self::DiscoveryRegister
                 | Self::DatabaseControl(
                     DatabaseControlRequest::Release | DatabaseControlRequest::Resume
                 )
@@ -3260,6 +3270,7 @@ fn mutation_requires_explicit_db(name: &str) -> bool {
     matches!(
         name,
         "database_control"
+            | "discovery_register"
             | "snapshot_create"
             | "decay"
             | "prune"
@@ -3412,6 +3423,8 @@ fn admit_tool_operation(name: &str, arguments: &Value) -> Result<AdmittedOperati
         "discovery_catalog" => {
             discovery_catalog::Request::parse(arguments).map(AdmittedOperation::DiscoveryCatalog)
         }
+        "discovery_register" => discovery_registration::Request::parse(arguments)
+            .map(AdmittedOperation::DiscoveryRegister),
         "activity" => Ok(AdmittedOperation::Activity {
             after: arguments.get("after").map_or(Ok(0), |value| {
                 value
@@ -3788,6 +3801,7 @@ fn graph_tool_schema() -> Value {
 fn unfiltered_tool_schemas() -> Vec<Value> {
     let mut tools = vec![
         discovery_catalog::tool_schema(),
+        discovery_registration::tool_schema(),
         tool(
             "databases",
             "List registered databases with stable id, resolved path, lease state, and in-flight MCP checkout count.",
@@ -4049,7 +4063,7 @@ fn catalog_minimum_capability(name: &str) -> Option<CapabilityClass> {
         | "remote_edges" | "core" | "contradictions" | "merges" | "walk" | "episode"
         | "concern" => Some(CapabilityClass::ReadOnly),
         "reflect" => Some(CapabilityClass::ReceiptGrounded),
-        "snapshot_create" => Some(CapabilityClass::Operator),
+        "snapshot_create" | "discovery_register" => Some(CapabilityClass::Operator),
         "retag" | "edit_body" | "edit_summary" | "ingest" | "capture" | "save" | "link"
         | "contradict" => Some(CapabilityClass::Curator),
         "decay" | "prune" | "feedback" | "forget" | "supersede" | "reconcile" | "merge" => {

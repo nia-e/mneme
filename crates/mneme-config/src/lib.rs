@@ -9,8 +9,10 @@ pub use discovery_receipt::*;
 mod legacy_workspace;
 mod privacy;
 mod selection;
+mod setup;
 mod workspace;
 pub use selection::*;
+pub use setup::*;
 pub use workspace::{
     SelectionRequest, SelectionRequestMode, WorkspaceDeclarations, default_user_path,
     discover_workspace, finish_workspace, prepare_workspace, select_workspace,

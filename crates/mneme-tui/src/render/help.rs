@@ -102,7 +102,7 @@ fn lines(view: View) -> Vec<Line<'static>> {
             "click          select a marker or index row",
             "enter          follow connections",
             "i / e          open memory / edges",
-            "/              search",
+            "/              ranked semantic search",
             "drag / ⇧arrows  pan",
             "wheel / +/-    zoom (+ also uses =)",
             "f / 0 / R      fit / 100% / recompose",
@@ -147,6 +147,21 @@ fn lines(view: View) -> Vec<Line<'static>> {
     match view {
         View::Map => result.extend([
             Line::from(s("◆ selected · ◇ core · × archived · • memory", MINT)),
+            Line::from(s(
+                format!(
+                    "Search returns at most {} semantic hits, not a full-map filter.",
+                    crate::data::QUERY_NODES
+                ),
+                DIM,
+            )),
+            Line::from(s(
+                "Search keeps the map intact: ↑↓ chooses a hit, Enter reads it.",
+                DIM,
+            )),
+            Line::from(s(
+                "Esc / Backspace / b closes the memory, then returns to the map.",
+                DIM,
+            )),
             Line::from(s(
                 "Islands group loaded links; names are existing tags.",
                 DIM,

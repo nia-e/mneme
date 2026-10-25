@@ -73,6 +73,7 @@ mod cli_library;
 mod cli_library_config;
 mod cli_list;
 mod cli_owner;
+mod cli_registration;
 mod cli_retag;
 mod cli_save;
 mod cli_single_graph_upgrade;

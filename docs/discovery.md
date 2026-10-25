@@ -6,9 +6,10 @@ database ID, apply explicit local overrides, then select stores under the existi
 workspace and owner-capability boundaries. Discovery reads **configuration
 metadata**, not memories, and never starts an owner or opens a remote path locally.
 
-This is explicit operator-authored publication. Creating a store does not yet
-announce it to a seed automatically. Library snapshots and replication remain
-separate mechanisms.
+Publication may be operator-authored or populated by optional
+[project setup registration](#register-new-project-stores). Creating a store does
+not announce it unless registration is configured or requested. Library snapshots
+and replication remain separate mechanisms.
 
 ## Configure the client
 
@@ -109,7 +110,103 @@ store declarations, not TOML comments or whitespace. For external clients,
 `expected_catalog_sha256`. Updated native clients check its advertised contract;
 unsupported servers do not fall back to a guessed operation.
 
-### Devices, routes and secrets
+## Register new project stores
+
+Configure the hub once to accept additions to its existing catalog:
+
+```sh
+mneme-mcp --db user=/absolute/store.db \
+  --capability-profile operator \
+  --discovery-catalog user=/absolute/discovery.toml \
+  --discovery-catalog-writable user
+```
+
+Apply these options to the existing owner, not a second process over its live
+database. The catalog must already exist and be writable; a Nix-store or other
+read-only configuration is not a writable registration destination. Publishing a
+catalog without `--discovery-catalog-writable` remains read-only. This uses the
+existing owner connection and authentication, not a new per-agent enrollment
+system.
+
+On the device creating projects, add defaults to the ordinary local
+`memory.toml`:
+
+```toml
+schema = "mneme.config.v1"
+device = "laptop"
+
+[setup.discovery]
+mode = "auto"
+hubs = ["home"]
+advertise_url = "ssh://operator@laptop.example.test"
+
+[stores.home]
+id = "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+owner = { url = "https://memory.example.test/mcp", db = "user" }
+discovery = true
+```
+
+Then ordinary `mnemed init` registers its ready project owner with `home`.
+`hubs` names local configured stores, not every recursively discovered publisher.
+The hub's `discovery = true` opts into reading its catalog; publishing to it is the
+separate setup option. Setup defaults are local only and never imported from a
+publisher. Project setup defaults inherit omitted fields; an explicit `hubs = []`
+clears the destination list rather than extending it.
+
+The modes are `off` (default), `ask`, and `auto`. `ask` offers registration in a
+terminal; JSON and noninteractive runs never prompt. For one setup without saved
+defaults:
+
+```sh
+# Ask for missing destinations, advertised route and device name.
+mnemed init --interactive
+
+# Supply the publication choice explicitly; device comes from local config.
+mnemed init --register --discovery-hub home \
+  --advertise-url ssh://operator@laptop.example.test
+
+# Suppress registration for this setup even when defaults enable it.
+mnemed init --no-register
+```
+
+Repeat `--discovery-hub` for multiple destinations; the flags replace the saved
+destination list. Interactive answers apply to this invocation, not a silent edit
+of user configuration. Save the defaults above to avoid repeated questions.
+
+**Advertise a route other devices can reach.** SSH publication uses the actual
+local owner's MCP port as `ssh_mcp_port`. HTTP(S) routes may include `{port}`, for
+example `https://laptop.example.test:{port}/mcp`; this only constructs the route,
+it does not arrange a listener, proxy or firewall. Loopback, unspecified and
+wildcard advertised hosts are refused. Setup also publishes the local loopback
+route and project root under `devices.<device>`, without exporting secret
+references or local database paths. Other devices add their own project-root
+mapping when needed; discovery does not turn project memory into global recording
+policy.
+
+Registration runs **after local readiness**. Each hub has an independent result
+under `discovery_registration` in the JSON setup result. An unavailable hub leaves
+the local store configured. Rerun `mnemed init` to retry registration through its
+existing-owner resume path; do not delete or recreate the database. Legacy
+`published` still describes the separate library-publication mechanism.
+
+The native `discovery_register` tool is add-only. It requires the publisher's
+canonical identity, a label and a validated sparse store declaration. An identical
+declaration with the same database identity is a successful no-op, even after a
+lost response or under a different label. A reused label with another identity,
+or changed declaration for an existing identity, is a conflict rather than an
+overwrite. Change an existing route deliberately in the hub catalog. The optional
+catalog revision check is applied after exact-retry detection.
+
+Updates preserve comments and unrelated entries, serialize cooperating writers,
+and publish by atomic replacement. Configuration symlinks remain symlinks; the
+resolved writable target is updated. External editors that ignore the sibling
+lock still need coordination. A durability warning after publication means the
+entry may already be visible; an identical retry is safe.
+
+Registration does not refresh already-frozen clients. Run `mnemed config inspect
+--refresh` in the consuming workspace and reopen clients as described below.
+
+## Devices, routes and secrets
 
 Set `device = "laptop"` at the top of the client file to accept the matching
 `devices.laptop` path patch above. Remote absolute workspace paths must be
@@ -170,6 +267,13 @@ contact from final memory-operation eligibility. An unanswered publisher is
 incomplete evidence, not an empty one.
 
 ## Inspect, refresh and replay
+
+For ordinary `mnemed` commands and TUI launches, run `mnemed config inspect
+--refresh` from the same working directory, without `--config`. Omission preserves
+automatic discovery mode, including the workspace's path witnesses. An explicit
+`--config` selects a separate boundary: use it when refreshing an explicitly
+configured client, not as a substitute for the ordinary command's refresh.
+Already-open clients keep their frozen selection; reopen them after a repair.
 
 ```sh
 # Initial acquisition if needed, otherwise reuse the retained receipt.

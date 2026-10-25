@@ -515,10 +515,100 @@ fn discovery_catalog_advertised(tool: &Value) -> bool {
         && digest["pattern"] == "^[0-9a-f]{64}$"
 }
 
+/// Registration is a distinct checked mutation, never a baseline read or an
+/// unguarded fallback to an older peer's similarly named tool.
+fn discovery_register_advertised(tool: &Value) -> bool {
+    let schema = &tool["inputSchema"];
+    let props = &schema["properties"];
+    let store = &props["store"];
+    let digest = &props["expected_catalog_sha256"];
+    schema["type"] == "object"
+        && schema["additionalProperties"] == false
+        && ["db", "expected_db_id", "label", "store"]
+            .iter()
+            .all(|field| schema_requires(schema, field))
+        && schema["required"]
+            .as_array()
+            .is_some_and(|fields| fields.len() == 4)
+        && props["db"]["type"] == "string"
+        && props["db"]["minLength"] == 1
+        && props["db"]["maxLength"] == 256
+        && expected_db_id_schema_supported(schema)
+        && props["label"]["type"] == "string"
+        && props["label"]["minLength"] == 1
+        && props["label"]["maxLength"] == 128
+        && props["label"]["pattern"] == "^[A-Za-z0-9_.-]+$"
+        && store["type"] == "object"
+        && store["additionalProperties"] == false
+        && store["required"] == json!(["id"])
+        && canonical_id_schema_supported(&store["properties"]["id"])
+        && digest["type"] == "string"
+        && digest["minLength"] == 64
+        && digest["maxLength"] == 64
+        && digest["pattern"] == "^[0-9a-f]{64}$"
+}
+
+fn validate_discovery_register_arguments(args: &Value) -> Result<(), AnyErr> {
+    let fields = args
+        .as_object()
+        .ok_or("remote MCP discovery_register arguments must be an object")?;
+    if fields.keys().any(|field| {
+        !matches!(
+            field.as_str(),
+            "db" | "expected_db_id" | "label" | "store" | "expected_catalog_sha256"
+        )
+    }) {
+        return Err(
+            "remote MCP discovery_register has unknown arguments; write was not sent".into(),
+        );
+    }
+    let canonical_id = |value: &Value| {
+        value.as_str().is_some_and(|id| {
+            id.len() == 26
+                && matches!(id.as_bytes()[0], b'0'..=b'7')
+                && id.bytes().all(|b| {
+                    matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z')
+                })
+        })
+    };
+    if args["db"]
+        .as_str()
+        .is_none_or(|db| db.is_empty() || db.chars().count() > 256)
+        || !canonical_id(&args["expected_db_id"])
+        || args["label"].as_str().is_none_or(|label| {
+            label.is_empty()
+                || label.len() > 128
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        })
+        || !args["store"].is_object()
+        || !canonical_id(&args["store"]["id"])
+    {
+        return Err("remote MCP discovery_register requires bounded db and label, canonical expected_db_id and an identity-bearing store object; write was not sent".into());
+    }
+    if fields.get("expected_catalog_sha256").is_some_and(|value| {
+        value.as_str().is_none_or(|digest| {
+            digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    }) {
+        return Err("remote MCP discovery_register expected_catalog_sha256 must be a lowercase SHA-256 digest; write was not sent".into());
+    }
+    // Nested StoreDeclaration policy belongs to the shared server-side parser.
+    // Transport framing still enforces the complete encoded request byte bound.
+    Ok(())
+}
+
 /// A guard is effective only if the peer advertises the complete canonical
 /// database-ID contract. A field name alone may be silently ignored by old peers.
 fn expected_db_id_schema_supported(schema: &Value) -> bool {
-    let guard = &schema["properties"]["expected_db_id"];
+    canonical_id_schema_supported(&schema["properties"]["expected_db_id"])
+}
+
+fn canonical_id_schema_supported(guard: &Value) -> bool {
     guard.get("type").and_then(Value::as_str) == Some("string")
         && guard.get("minLength").and_then(Value::as_u64) == Some(26)
         && guard.get("maxLength").and_then(Value::as_u64) == Some(26)
@@ -652,6 +742,12 @@ impl CatalogView<'_> {
             .any(|tool| tool["name"] == "discovery_catalog" && discovery_catalog_advertised(tool))
     }
 
+    pub fn supports_discovery_register(&self) -> bool {
+        self.0
+            .iter()
+            .any(|tool| tool["name"] == "discovery_register" && discovery_register_advertised(tool))
+    }
+
     /// Discover a canonical identity precondition on a known DB-scoped tool.
     /// Union branches may inherit a root guard; without a root, every branch
     /// must advertise it. Episode retains its stronger per-action contract.
@@ -665,6 +761,7 @@ impl CatalogView<'_> {
             ("edit_body", None) if self.supports_edit_body() => {}
             ("edit_summary", None) if self.supports_edit_summary() => {}
             ("discovery_catalog", None) if self.supports_discovery_catalog() => {}
+            ("discovery_register", None) if self.supports_discovery_register() => {}
             (
                 "walk",
                 Some("start" | "look" | "edges" | "body" | "go" | "back" | "done" | "abort"),
@@ -762,6 +859,9 @@ impl RemoteClient {
     }
     pub fn supports_discovery_catalog(&self) -> bool {
         CatalogView(&self.catalog).supports_discovery_catalog()
+    }
+    pub fn supports_discovery_register(&self) -> bool {
+        CatalogView(&self.catalog).supports_discovery_register()
     }
     pub fn supports_expected_db_id(&self, name: &str, action: Option<&str>) -> bool {
         CatalogView(&self.catalog).supports_expected_db_id(name, action)
@@ -1157,6 +1257,12 @@ impl RemoteClient {
             {
                 return Err("remote MCP discovery_catalog requires explicit db and expected_db_id; no operation was sent".into());
             }
+        }
+        if name == "discovery_register" {
+            if !self.supports_discovery_register() {
+                return Err("remote MCP discovery_register checked contract is not advertised; no write was sent, no legacy fallback".into());
+            }
+            validate_discovery_register_arguments(args)?;
         }
         if name == "episode"
             && !args
@@ -1895,6 +2001,8 @@ fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    mod discovery_register;
+
     use super::*;
     #[cfg(unix)]
     use std::future::Future;

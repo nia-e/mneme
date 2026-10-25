@@ -1,4 +1,4 @@
-# Example unit: replace account, paths and executable with your reviewed installation.
+# Example unit: replace account and paths with your reviewed installation.
 [Unit]
 Description=Process a workshop inbox or one idle hourly heartbeat
 Wants=network-online.target mneme-global.service
@@ -12,12 +12,14 @@ User=user
 Group=user
 WorkingDirectory=/home/user/workshop
 Environment=HOME=/home/user
-Environment=PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStartPre=/usr/bin/python3 -B /home/user/.local/share/mneme/workshop/current/wake.py --root /home/user/workshop maintain
+# Services do not inherit the interactive shell PATH. Include the maintained
+# Python/Codex profiles here; env resolves tools through this PATH on each run.
+Environment=PATH=/home/user/.local/bin:/home/user/.nix-profile/bin:/etc/profiles/per-user/user/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=env python3 -B /home/user/.local/share/mneme/workshop/current/wake.py --root /home/user/workshop maintain
 # Select complete installed raw packages here, not the guarded ~/.local/bin/codex launcher.
 # heartbeat.py resolves one edition per cycle and holds the same activity lock
 # through both model stages; new complete installs affect only subsequent cycles.
-ExecStart=/usr/bin/python3 -B /home/user/.local/share/mneme/workshop/current/heartbeat.py --root /home/user/workshop --codex-packages /home/user/.local/share/codex --timeout 600 --hourly-background --max-log-bytes 262144 run
+ExecStart=env python3 -B /home/user/.local/share/mneme/workshop/current/heartbeat.py --root /home/user/workshop --codex-packages /home/user/.local/share/codex --timeout 600 --hourly-background --max-log-bytes 262144 run
 # Interactive inbox routing stays disabled in this template. A reviewed override
 # may add --signal-source signal-owner after its owner bridge is configured, and/or
 # --mailbox-inbox for authenticated SSH delegations, before run. Both share default

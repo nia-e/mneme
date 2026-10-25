@@ -830,6 +830,9 @@ fn merge_project_declarations(
     if project.background.as_ref().and_then(|v| v.enabled) == Some(false) {
         user.background.get_or_insert_default().enabled = Some(false);
     }
+    if let Some(setup) = project.setup.take() {
+        user.setup.get_or_insert_default().overlay(setup);
+    }
     infer_project_roots(&mut project, root);
     let ids: BTreeSet<_> = user.stores.values().map(|s| s.id.clone()).collect();
     for (name, store) in project.stores {

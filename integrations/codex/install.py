@@ -23,9 +23,9 @@ except ImportError:
 
 SCHEMA = "mneme.codex-install.v1"
 HOST_PLATFORM = "windows" if os.name == "nt" else "posix"
-CONFIG_REVISION = 42
-EXISTING_SERVICE_REVISION = 43
-EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, EXISTING_SERVICE_REVISION)
+CONFIG_REVISION = 44
+EXISTING_SERVICE_REVISION = 45
+EXISTING_SERVICE_REVISIONS = (21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, EXISTING_SERVICE_REVISION)
 SUPPORTED_APPLY_REVISIONS = tuple(range(20, EXISTING_SERVICE_REVISION + 1))
 SERVER = "mneme_project"
 BEGIN = "# BEGIN mneme-codex-v1"
@@ -551,6 +551,20 @@ def hook_handlers(command, *, async_mode, recording, revision=CONFIG_REVISION, r
     return events
 
 
+def _planned_python_argv(plan, arguments):
+    """Receipt revisions bind command bytes, not today's Python search policy."""
+    windows = plan_platform(plan) == "windows"
+    if 40 <= plan.get("config_revision", 1) < 44 and plan["python"] == "python3" and not windows:
+        # Revisions 40-43 used first-PATH-match probing. Keep this exact spelling
+        # for hash-checked uninstall/recovery of those installed configurations.
+        script = ("for python in python3 python3.14 python3.13 python3.12 python3.11; do "
+                  "if \"$python\" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' "
+                  ">/dev/null 2>&1; then exec \"$python\" \"$@\"; fi; done; "
+                  "printf '%s\\n' 'Mneme requires Python 3.11 or newer on PATH' >&2; exit 127")
+        return ["/bin/sh", "-c", script, "mneme-python", *arguments]
+    return python_hook_argv(plan["python"], arguments, windows=windows)
+
+
 def planned_hook_handlers(plan):
     """Regenerate only the lifecycle definitions bound to this reviewed plan."""
     if "memory_config" in plan:
@@ -561,7 +575,7 @@ def planned_hook_handlers(plan):
     revision = plan.get("config_revision", 1)
     argv = [plan["python"], str(prefix / "lib/hooks.py"), "--config", str(prefix / "config/hooks.json")]
     if revision >= 40:
-        argv = python_hook_argv(plan["python"], argv[1:], windows=plan_platform(plan) == "windows")
+        argv = _planned_python_argv(plan, argv[1:])
     windows = plan_platform(plan) == "windows"
     command = hook_command(argv, windows=windows) if revision >= 24 else shlex.join(argv)
     background = (hook_command([*argv, "--reader-background"], windows=windows)
@@ -575,7 +589,7 @@ def planned_hook_handlers(plan):
         core_argv = [plan["python"], str(prefix / "lib/core_hook.py"),
                      "--hook-config", str(prefix / "config/hooks.json")]
         if revision >= 40:
-            core_argv = python_hook_argv(plan["python"], core_argv[1:], windows=windows)
+            core_argv = _planned_python_argv(plan, core_argv[1:])
         # Startup core is a separate bounded read, not worker launch, learning
         # evidence or permission to record. Preserve its complete checked output.
         events["SessionStart"].append({"hooks": [{"type": "command",
@@ -598,11 +612,11 @@ def config_outputs(plan, before):
     key = toml_value(server) if managed is not None else server
     block = f"\n{BEGIN}\n[mcp_servers.{key}]\n"
     if managed is not None:
-        launcher = python_hook_argv(plan["python"], [str(prefix / "lib/launcher.py"),
+        launcher = _planned_python_argv(plan, [str(prefix / "lib/launcher.py"),
             "--service-config", str(prefix / "config/service.json"),
             "--memory-config", plan["memory_config"]["path"], "--cwd", str(root),
             "--expected-db-id", managed["db_id"], "--native-cli", plan["native_command"],
-            "--native-mcp", plan["mcp_command"]], windows=plan_platform(plan) == "windows")
+            "--native-mcp", plan["mcp_command"]])
         block += (f"command = {toml_value(launcher[0])}\n"
                   f"args = {toml_value(launcher[1:])}\n")
         if not managed["mcp"]["inherited"]:
@@ -618,7 +632,7 @@ def config_outputs(plan, before):
     elif revision >= 3:
         launcher = [plan["python"], str(prefix / "lib/launcher.py"), "--service-config", str(prefix / "config/service.json")]
         if revision >= 40:
-            launcher = python_hook_argv(plan["python"], launcher[1:], windows=plan_platform(plan) == "windows")
+            launcher = _planned_python_argv(plan, launcher[1:])
         block += (f"command = {toml_value(launcher[0])}\n"
                   f"args = {toml_value(launcher[1:])}\n"
                   "startup_timeout_sec = 30\n")

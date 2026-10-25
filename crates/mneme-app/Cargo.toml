@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+mneme-config.workspace = true
 mneme-core.workspace = true
 mneme-engine.workspace = true
 mneme-present.workspace = true
@@ -16,11 +17,13 @@ serde_json = "1"
 sha2.workspace = true
 ulid.workspace = true
 tokio = { workspace = true, features = ["time"] }
+toml_edit = { version = "0.22", features = ["serde"] }
 
 [dev-dependencies]
 mneme-cozo.workspace = true
 mneme-embed.workspace = true
 mneme-body.workspace = true
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -128,6 +128,7 @@ def expected_catalog(profile: str) -> set[str]:
     if profile == "operator":
         tools.update(
             {
+                "discovery_register",
                 "snapshot_create",
                 "edit_body",
                 "edit_summary",

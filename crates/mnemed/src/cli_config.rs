@@ -120,18 +120,16 @@ struct BridgeRequest {
     arguments: Value,
 }
 
-fn selection_paths(args: &SelectionArgs) -> Result<(PathBuf, PathBuf), AnyErr> {
+fn selection_paths(args: &SelectionArgs) -> Result<(Option<&Path>, PathBuf), AnyErr> {
     let cwd = args
         .cwd
         .clone()
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)?;
-    let config = args
-        .config
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(mneme_config::default_user_path)?;
-    Ok((config, cwd))
+    // Omission must retain ordinary CLI/TUI discovery mode. Filling in the
+    // default path here creates an explicit-selection boundary and refreshes
+    // another receipt, leaving the ordinary command's stale catalog untouched.
+    Ok((args.config.as_deref(), cwd))
 }
 fn replay(
     args: &SelectionArgs,
@@ -139,7 +137,7 @@ fn replay(
     digest: &str,
 ) -> Result<SelectionSnapshot, AnyErr> {
     let (config, cwd) = selection_paths(args)?;
-    mneme_store_client::discovery::replay_workspace(Some(&config), &cwd, profile, digest)
+    mneme_store_client::discovery::replay_workspace(config, &cwd, profile, digest)
         .map_err(|error| -> AnyErr { error })?
         .ok_or_else(|| {
             "configuration is unavailable; reselect and reassess before submitting".into()
@@ -157,7 +155,7 @@ async fn resolve(
     )
     .map_err(|error| -> AnyErr { error })?;
     mneme_store_client::discovery::resolve_workspace(
-        Some(&config),
+        config,
         &cwd,
         profile,
         ResolveOptions {

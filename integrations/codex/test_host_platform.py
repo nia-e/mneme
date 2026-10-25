@@ -14,6 +14,13 @@ import host_platform
 
 
 class HostPlatformTests(unittest.TestCase):
+    def test_python_path_candidates_keep_name_order_and_lexical_entries(self):
+        with patch.dict(os.environ, {"PATH": os.pathsep.join(("/old space [x]", "", "relative"))}):
+            candidates = list(host_platform.python_path_candidates())
+        self.assertEqual(candidates[:3], [os.path.join(directory, 'python3')
+                                         for directory in ('/old space [x]', '.', 'relative')])
+        self.assertEqual(len(candidates), 3 * len(host_platform.PYTHON_CANDIDATES))
+
     def test_reader_codex_modes_are_explicit_and_path_preparation_is_symbolic(self):
         with patch.object(host_platform.shutil, "which", side_effect=AssertionError("PATH lookup")), \
              patch.object(Path, "resolve", side_effect=AssertionError("path canonicalization")):

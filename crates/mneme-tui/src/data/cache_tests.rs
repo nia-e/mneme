@@ -427,6 +427,7 @@ fn assert_source(response: &Response, expected: &ReadSource) {
         Response::Inventory(page) => &page.graph.read_source,
         Response::Summaries(page) => &page.read_source,
         Response::Loaded(graph) => &graph.read_source,
+        Response::Search(page) => &page.read_source,
         Response::Scenes(page) => &page.read_source,
         Response::Scene(scene) => &scene.read_source,
         Response::Touchstones(page) => &page.read_source,
@@ -482,15 +483,7 @@ async fn configured_cache_provenance_covers_all_content_without_extra_probes() {
         ),
         (
             Request::Query("synthetic".into()),
-            vec![
-                "databases",
-                "databases",
-                "query",
-                "databases",
-                "neighbors",
-                "databases",
-                "neighbors",
-            ],
+            vec!["databases", "databases", "query"],
         ),
         (
             Request::Focus(NODE.into()),
@@ -637,75 +630,58 @@ async fn expired_cache_pin_refuses_newer_generation_and_survives_failure() {
 }
 
 #[tokio::test]
-async fn canonical_content_then_cached_neighbors_marks_query_and_focus_mixed() {
+async fn canonical_content_then_cached_neighbors_marks_focus_mixed() {
     let fixture = CacheFixture::new();
     let canonical_url = format!("{}/canonical", fixture.url.trim_end_matches("/mcp"));
-    for (request, primary_tool, primary_summary, neighbor_reads) in [
-        (
-            Request::Query("synthetic".into()),
-            "query",
-            "Canonical live hit",
-            2,
-        ),
-        (
-            Request::Focus(NODE.into()),
-            "get",
-            "Canonical live memory",
-            1,
-        ),
-    ] {
-        // Fresh workers matter: an earlier cache answer deliberately pins all
-        // follow-ups, so it cannot reproduce a later first live-to-cache switch.
-        let before = fixture.requests.lock().unwrap().len();
-        let (requests, rx) = tokio::sync::mpsc::channel(4);
-        let (tx, mut responses) = tokio::sync::mpsc::channel(4);
-        let task = tokio::spawn(serve(fixture.target_with_owner(&canonical_url), rx, tx));
-        requests.send(request).await.unwrap();
-        let graph = match receive(&mut responses).await {
-            Response::Loaded(graph) => graph,
-            Response::Error(error) => panic!("mixed-source fixture failed: {error}"),
-            _ => panic!("expected mixed-source graph"),
-        };
-        assert_eq!(graph.read_source.snapshot, Some(fixture.witness("g1")));
-        assert!(
-            graph.read_source.mixed,
-            "live content must not become snapshot content"
-        );
-        assert!(
-            graph
-                .nodes
-                .iter()
-                .any(|node| node.id == NODE && node.summary == primary_summary)
-        );
-
-        let domain_calls: Vec<_> = fixture.requests.lock().unwrap()[before..]
+    let before = fixture.requests.lock().unwrap().len();
+    let (requests, rx) = tokio::sync::mpsc::channel(4);
+    let (tx, mut responses) = tokio::sync::mpsc::channel(4);
+    let task = tokio::spawn(serve(fixture.target_with_owner(&canonical_url), rx, tx));
+    requests.send(Request::Focus(NODE.into())).await.unwrap();
+    let graph = match receive(&mut responses).await {
+        Response::Loaded(graph) => graph,
+        Response::Error(error) => panic!("mixed-source fixture failed: {error}"),
+        _ => panic!("expected mixed-source graph"),
+    };
+    assert_eq!(graph.read_source.snapshot, Some(fixture.witness("g1")));
+    assert!(
+        graph.read_source.mixed,
+        "live content must not become snapshot content"
+    );
+    assert!(
+        graph
+            .nodes
             .iter()
-            .filter(|request| {
-                request["method"] == "tools/call" && request["params"]["name"] != "databases"
-            })
-            .map(|request| {
-                (
-                    request["_fixture_path"].as_str().unwrap().to_owned(),
-                    request["params"]["name"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect();
-        let mut expected_calls = vec![
-            ("/canonical".into(), primary_tool.into()),
-            ("/canonical".into(), "neighbors".into()),
-        ];
-        expected_calls.extend((0..neighbor_reads).map(|_| ("/mcp".into(), "neighbors".into())));
-        assert_eq!(
-            domain_calls, expected_calls,
-            "no extra content or provenance lookup"
-        );
-        requests.send(Request::Shutdown).await.unwrap();
-        task.await.unwrap();
-    }
+            .any(|node| node.id == NODE && node.summary == "Canonical live memory")
+    );
+
+    let domain_calls: Vec<_> = fixture.requests.lock().unwrap()[before..]
+        .iter()
+        .filter(|request| {
+            request["method"] == "tools/call" && request["params"]["name"] != "databases"
+        })
+        .map(|request| {
+            (
+                request["_fixture_path"].as_str().unwrap().to_owned(),
+                request["params"]["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let expected_calls = vec![
+        ("/canonical".into(), "get".into()),
+        ("/canonical".into(), "neighbors".into()),
+        ("/mcp".into(), "neighbors".into()),
+    ];
+    assert_eq!(
+        domain_calls, expected_calls,
+        "no extra content or provenance lookup"
+    );
+    requests.send(Request::Shutdown).await.unwrap();
+    task.await.unwrap();
 }
 
 #[tokio::test]
-async fn rejected_cached_neighbors_do_not_relabel_canonical_hits_but_keep_the_pin() {
+async fn canonical_search_stays_canonical_without_reading_cached_neighbors() {
     let fixture = CacheFixture::new();
     fixture.malformed_neighbors.store(true, Ordering::Relaxed);
     let canonical_url = format!("{}/canonical", fixture.url.trim_end_matches("/mcp"));
@@ -716,27 +692,41 @@ async fn rejected_cached_neighbors_do_not_relabel_canonical_hits_but_keep_the_pi
         .send(Request::Query("synthetic".into()))
         .await
         .unwrap();
-    let graph = match receive(&mut responses).await {
-        Response::Loaded(graph) => graph,
-        Response::Error(error) => panic!("partial query was discarded: {error}"),
-        _ => panic!("expected retained canonical graph"),
+    let page = match receive(&mut responses).await {
+        Response::Search(page) => page,
+        Response::Error(error) => panic!("canonical search failed: {error}"),
+        _ => panic!("expected ranked search results"),
     };
-    assert!(graph.partial);
+    assert!(!page.partial);
     assert!(
-        graph.edges.is_empty(),
-        "a valid prefix of a rejected page must not leak"
-    );
-    assert!(
-        graph
-            .nodes
+        page.nodes
             .iter()
             .any(|node| node.id == NODE && node.summary == "Canonical live hit")
     );
+    assert!(page.read_source.snapshot.is_none());
+    assert!(!page.read_source.mixed);
     assert!(
-        graph.read_source.snapshot.is_none(),
-        "rejected cached data must not relabel accepted live hits"
+        !fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["params"]["name"] == "neighbors")
     );
-    assert!(!graph.read_source.mixed);
+    requests.send(Request::Shutdown).await.unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_cached_neighbors_keep_the_selected_pin_for_later_focus() {
+    let fixture = CacheFixture::new();
+    fixture.malformed_neighbors.store(true, Ordering::Relaxed);
+    let canonical_url = format!("{}/canonical", fixture.url.trim_end_matches("/mcp"));
+    let (requests, rx) = tokio::sync::mpsc::channel(4);
+    let (tx, mut responses) = tokio::sync::mpsc::channel(4);
+    let task = tokio::spawn(serve(fixture.target_with_owner(&canonical_url), rx, tx));
+    requests.send(Request::Focus(NODE.into())).await.unwrap();
+    assert!(matches!(receive(&mut responses).await, Response::Error(_)));
     assert_eq!(
         fixture
             .requests
@@ -758,7 +748,7 @@ async fn rejected_cached_neighbors_do_not_relabel_canonical_hits_but_keep_the_pi
     assert!(
         fixture.requests.lock().unwrap()[before..]
             .iter()
-            .all(|request| { request["_fixture_path"] == "/mcp" }),
+            .all(|request| request["_fixture_path"] == "/mcp"),
         "discarding invalid payload evidence must not discard the selected cache pin"
     );
     requests.send(Request::Shutdown).await.unwrap();

@@ -28,7 +28,7 @@ def main():
         # OpenSSH invokes a remote shell. Quote the complete command once; a
         # message containing apostrophes, dollars or newlines stays message data.
         remote = shlex.join([".local/bin/wake", *forwarded, "--", args.message])
-        command = ["/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                    args.ssh, remote]
     else:
         try:

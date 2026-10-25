@@ -158,6 +158,36 @@ enum SnapshotCut {
 }
 
 impl DatabaseSlot {
+    /// Run bounded metadata work against this exact retained owner identity.
+    /// This is not a database checkout: released owners may publish metadata,
+    /// but replacement resume cannot change identity during the operation.
+    /// Call only from a blocking worker, and never re-enter this slot in `operation`.
+    pub(crate) fn with_retained_identity<T>(
+        &self,
+        expected_db_id: Ulid,
+        operation: impl FnOnce() -> Result<T, AnyErr>,
+    ) -> Result<T, AnyErr> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "database slot mutex poisoned")?;
+        super::require_expected_db_id(
+            "discovery publisher",
+            state.known_db_id,
+            Some(expected_db_id),
+        )?;
+        if !matches!(
+            state.lifecycle,
+            DatabaseLifecycle::Open(_) | DatabaseLifecycle::Maintenance
+        ) {
+            return Err("discovery registration requires a stable open or released owner; retry after lifecycle transition completes".into());
+        }
+        // Keep the state guard alive until the bounded publication finishes.
+        let result = operation();
+        drop(state);
+        result
+    }
+
     /// Fence all new requests before handing this worker to `spawn_blocking`.
     /// Callers must fence active walks/receipts and rotate the feedback epoch
     /// under their session ledger lock before invoking this method.

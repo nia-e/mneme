@@ -259,6 +259,11 @@ pub(super) fn capability_request_cases() -> Vec<(&'static str, Value, Capability
             json!({"db":"missing","expected_db_id":other}),
             CapabilityClass::ReadOnly,
         ),
+        (
+            "discovery_register",
+            json!({"db":"missing","expected_db_id":other,"label":"new-store","store":{"id":id,"owner":{"url":"http://127.0.0.1:9999/mcp","db":"project"}}}),
+            CapabilityClass::Operator,
+        ),
         ("databases", json!({}), CapabilityClass::ReadOnly),
         (
             "graph",

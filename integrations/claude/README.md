@@ -5,20 +5,22 @@ Mneme's **shared recorder**. It does not install Codex, read Codex authenticatio
 start a memory owner, create a store, or configure semantic recall/startup core
 memory. Keep any existing external recall/core wiring unchanged.
 
-**Status:** source tests, isolated copied-helper smoke, and offline metadata
-inspection of an integrity-checked official Claude artifact. Synthetic transcript,
-hook and executable fixtures exercise the adapter; they do **not** establish
-that an installed Claude Code version delivers these hooks or honors the runtime
-flags. No Claude version has been validated end to end here.
+**Status:** source tests and isolated copied-helper smoke cover the adapter.
+A local Claude Code **2.1.308** no-inference check on 2026-10-25 also observed real
+`SessionStart`, `UserPromptSubmit` (including `prompt_id`) and `SessionEnd` payloads,
+and exercised a generated hook command's nonfatal deferral for absent configuration.
+That establishes hook plumbing, not full recording or assessment compatibility:
+no Claude version has been validated end to end here.
 There is no automatic Claude installation command. In particular, `mnemed init`
 remains the Codex setup path, not a Claude setup shortcut.
 
 ## Prepare, review, enable
 
 Prerequisites: Python **3.11+**, matching native `mnemed` with persistent storage
-and HTTP support, an already configured native memory selector/owner, and an
-explicit Claude Code executable authenticated through its ordinary subscription
-setup. See [declarative configuration](../../docs/declarative-config.md) for
+and HTTP support, an already configured native memory selector/owner, and Claude
+Code authenticated through its ordinary subscription setup and available on the
+hook process's `PATH` (or selected by an explicit absolute path).
+See [declarative configuration](../../docs/declarative-config.md) for
 native owner selection, activation and recording grants. This adapter does not
 supply a second selector or change those grants.
 
@@ -27,15 +29,13 @@ under `integrations/codex` for historical packaging reasons; Claude does not use
 Codex executable, configuration or credentials. A copied package must retain the
 complete runtime inventory, not just the `claude_*` modules.
 
-From the Mneme checkout, prepare a review artifact (replace every example path
-and select the full model ID deliberately):
+From the Mneme checkout, prepare a review artifact using Python 3.11+ (replace
+every example path and select the full model ID deliberately):
 
 ```sh
-python3.11 integrations/codex/claude_config.py \
+python3 integrations/codex/claude_config.py \
   --memory-config /path/to/memory.toml \
-  --native-cli /path/to/mnemed \
   --state-dir /path/to/private-state/claude-capture \
-  --reader-claude /path/to/claude \
   --reader-model claude-sonnet-4-5-20250929 \
   --librarian-effort medium \
   --transcripts-root /path/to/explicit/transcript-directory \
@@ -46,17 +46,26 @@ python3.11 integrations/codex/claude_config.py \
 
 Preparation prints JSON and does not create configuration/state directories,
 contact owners, run the supplied executables, install hooks, or read authentication.
-Review its `hook_config` (including executable SHA256 values, native selector,
-transcript root, full model ID and dedicated state directory) and
-`claude_settings.hooks` command paths. Paths must be absolute; model aliases such
-as `sonnet` and `claude-sonnet` are rejected.
+Review its `hook_config` (native selector, transcript root, full model ID and
+dedicated state directory) and `claude_settings.hooks` commands. Data/configuration
+paths must be absolute; model aliases such as `sonnet` and `claude-sonnet` are
+rejected.
+
+New adapters use `mnemed` and `claude` from the invoking process's `PATH`; prepare
+does not require either executable to be installed yet. `--native-cli` and
+`--reader-claude` also accept absolute executable selectors, preserving symlink
+spelling. New preparation does not add executable SHA256 pins; existing explicit
+pins remain enforced. On POSIX, generated hooks discover compatible Python 3.11+
+on `PATH` at each launch; `--python /absolute/selector` chooses an explicit
+interpreter instead. A GUI host's environment must expose those commands too:
+an interactive terminal's `PATH` does not establish the hook's `PATH`.
 
 After review, create the private configuration directory yourself, then extract
 only the reviewed adapter configuration:
 
 ```sh
 umask 077
-python3.11 - /path/to/review/claude-capture-prepare.json <<'PY'
+python3 - /path/to/review/claude-capture-prepare.json <<'PY'
 import json, pathlib, sys
 prepared = json.loads(pathlib.Path(sys.argv[1]).read_text())
 target = pathlib.Path(prepared["hook_config_path"])
@@ -110,15 +119,17 @@ retain state/ledgers for inspection rather than resetting paid-work accounting.
   distinct from existing Codex jobs. Existing Codex receipts and ledgers are not
   upgraded or reset implicitly.
 
-The assessor hashes the explicit executable, probes bounded `--version`/`--help`,
-and refuses unsupported runtimes before an assessment attempt. The metadata
-compatibility check requires Claude Code major version 2, at least 2.1.259, and
-advertised required switches, except the documented but hidden `--max-turns`.
-That exception does not remove `--max-turns=1` from the runtime command. Metadata
-checks remain conservative; passing `--help`/`--version` is not proof that the
-assessment switches are accepted. It uses a fresh
-private neutral working directory, one model call/turn, no ordinary tools, no MCP,
-no session persistence, explicit settings isolation, and disabled built-in agents.
+The assessor resolves the selected executable for each call and verifies its
+SHA256 only when explicitly configured. It does not gate execution on a version
+number or `--help` output. Missing commands, rejected switches and protocol errors
+fail the bounded attempt without retrying with weaker flags. It uses a fresh
+private neutral working directory, one model call/turn (`--max-turns=1`), no
+ordinary tools, no MCP, no session persistence, explicit settings isolation, and
+disabled built-in agents.
+Claude's safe mode still loads [built-in plugins](https://code.claude.com/docs/en/plugins/mods/overview#mods-built-into-claude-code).
+The isolated call settings explicitly disable the bundled AGENTS.md and plugin
+authoring plugins; this does not edit the user's settings or allowlist plugin
+activity. Unknown or managed customizations remain subject to the same refusal.
 Reported loaded plugin/skill/agent metadata is refused. Strict JSON validation is
 host-side: **no `--json-schema` repair turns or retry with weaker flags**.
 
@@ -152,10 +163,12 @@ source turn into a completed one. See [episodes](../../docs/episodic-memory.md).
 ## Validation boundary
 
 Tests cover documented-shaped synthetic transcript/hook data and fake headless
-processes, including unsupported capabilities, changed executable bytes, bounded
-output, missing usage and cleanup. Copied-helper smoke tests use a private
-throwaway home and no Codex executable on `PATH`; native bundle tests verify
-inventory and extracted bytes. The copied-process smoke is POSIX-only; it does
-not establish native Windows end-to-end behavior. These are package/adapter checks, **not** live
-Claude, subscription billing, real owner/store, managed-policy or recall-quality
-validation. Review those boundaries before enabling this on real sessions.
+processes, including runtime failure, dynamic executable replacement, explicit
+pin mismatches, bounded output, missing usage and cleanup. Copied-helper smoke
+tests use a private throwaway home and no Codex executable on `PATH`; native
+bundle tests verify inventory and extracted bytes. The copied-process smoke is
+POSIX-only; it does not establish native Windows end-to-end behavior. The local
+CLI hook check above blocked the prompt before inference and recorded zero model
+turns, tokens and cost. Neither check validates a full Claude recording cycle,
+subscription billing, real owner/store behavior, managed policy or recall quality.
+Review those boundaries before enabling this on real sessions.
