@@ -118,6 +118,21 @@ Until then, default interpreter/tool selection should remain dynamic through
 `PATH`, with explicit operator selectors supported. This TODO authorizes no live
 deployment or state migration.
 
+## TODO: make reduced-build capabilities visible
+
+Deferred, not implemented (2026-10-25). Feature-reduced binaries must clearly
+communicate missing capabilities before an operator tries to use them. A remote
+client without local storage support must not look like the complete CLI and
+reveal the distinction only when `init` refuses.
+
+- Show relevant omissions in top-level help, affected command help, and
+  version/build information; distinguish compiled support from runtime policy.
+- Mark unavailable commands clearly (or omit them with an explicit capability
+  summary), explaining how to obtain a build that supports the operation.
+- Keep CLI affordances, machine-readable build metadata and applicable MCP
+  catalogs consistent with the actual artifact. Test reduced and full builds;
+  package checks must exercise promised behavior, not merely match help text.
+
 ## Checks
 
 Start with focused checks for the touched owners, for example:
