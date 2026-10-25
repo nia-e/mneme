@@ -62,6 +62,7 @@ catalog="{}"
 
     fn request(&self, mode: SelectionRequestMode) -> SelectionRequest {
         SelectionRequest {
+            purpose: Default::default(),
             mode,
             user_path: Some(self.config.clone()),
             cwd: self.dir.clone(),

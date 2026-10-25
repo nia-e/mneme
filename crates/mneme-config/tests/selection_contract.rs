@@ -283,6 +283,7 @@ fn frozen_request_serialization_keeps_fields_and_spellings() {
         (SelectionRequestMode::Discover, "discover"),
     ] {
         let request = SelectionRequest {
+            purpose: Default::default(),
             mode,
             user_path: Some("/config/absent.toml".into()),
             cwd: "/work/project".into(),

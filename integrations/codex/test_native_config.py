@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -160,9 +161,11 @@ class NativeHookConfigTests(unittest.TestCase):
             fresh = self.load()
             with self.assertRaisesRegex(ValueError, "registry_recording_policy_changed"):
                 registry_recording.validate_payload(fresh, job)
-            with self.assertRaisesRegex(hooks.HookError, "registry selection changed"):
-                registry_runtime.admit_session(fresh, event)
-            self.assertEqual(ledger.read_bytes(), old_ledger)
+            self.assertEqual(registry_runtime.admit_session(fresh, event)["outcome"], "rebound")
+            rebound = json.loads(ledger.read_bytes())
+            old = json.loads(old_ledger)
+            self.assertEqual({k: v for k, v in rebound.items() if k != "registry_binding"},
+                             {k: v for k, v in old.items() if k != "registry_binding"})
             # Even the worker's lower-level config refresh retains already-paid
             # usage and reservation identity; a new intent is not a fresh budget.
             self.assertTrue(reader_worker._state(fresh, "session-1", lambda data: (None, False))[0])
@@ -191,7 +194,7 @@ class NativeHookConfigTests(unittest.TestCase):
                 self.assertEqual(config["frozen_selection"]["config_path"], str(logical))
                 self.assertTrue(all(str(call.args[0]) == str(logical) for call in select.call_args_list))
 
-    def test_symlink_generation_change_does_not_rebind_existing_session(self):
+    def test_symlink_generation_change_rebinds_quiescent_session_but_rejects_old_config(self):
         logical = Path(self.value["memory_config"])
         targets = [self.root / name for name in ("generation-one.toml", "generation-two.toml")]
         for target in targets:
@@ -215,12 +218,181 @@ class NativeHookConfigTests(unittest.TestCase):
             logical.symlink_to(targets[1])
             with self.assertRaisesRegex(ValueError, "configuration changed"):
                 registry_runtime.selection(config)
-            with self.assertRaisesRegex(hooks.HookError, "registry selection changed"):
-                # A fresh selection is not permission to replace an old ledger.
-                # Real native snapshots include sources in their digest.
-                self.raw_snapshot["digest"] = "c" * 64
-                registry_runtime.admit_session(self.load(), event)
-            self.assertEqual(ledger.read_bytes(), original)
+            self.raw_snapshot["digest"] = "c" * 64
+            self.assertEqual(registry_runtime.admit_session(self.load(), event)["outcome"], "rebound")
+            current = ledger.read_bytes()
+            self.assertNotEqual(current, original)
+            with self.assertRaisesRegex(ValueError, "configuration changed"):
+                registry_runtime.admit_session(config, event)
+            self.assertEqual(ledger.read_bytes(), current)
+
+    def recovery_fixture(self):
+        import reader_worker
+        config = self.load()
+        event = {"hook_event_name": "SessionStart", "source": "resume",
+                 "cwd": str(self.root), "session_id": "recovery-session"}
+        registry_runtime.admit_session(config, event)
+        path = hooks._state_path(config["state_dir"], event["session_id"])
+        state = json.loads(path.read_bytes())
+        state["turns"] = {"old-turn": {"at": 0, "checkpoint": {"outcome": "none", "ids": []}}}
+        state["context_epoch"] = 9
+        path.write_text(json.dumps(state))
+        reader_path, _ = reader_worker._paths(config, event["session_id"])
+        reader_path.parent.mkdir(parents=True, exist_ok=True)
+        reader = reader_worker._new()
+        reader.update(attempts=4, input_tokens=91, output_tokens=23, unknown_usage=True,
+                      reservation={"old": "paid-intent"}, inflight={"old": "request"})
+        reader_path.write_text(json.dumps(reader))
+        raw = copy.deepcopy(self.raw_snapshot)
+        raw["digest"] = "c" * 64
+        self.selected = registry.NativeSelection(raw, self.value["memory_config"], self.value["native_cli"], str(self.root))
+        return self.load(), event, path, reader_path
+
+    def test_native_rebind_changes_only_binding_not_history_accounting_or_recording(self):
+        import recording_jobs
+        config, event, path, reader_path = self.recovery_fixture()
+        old_main = json.loads(path.read_bytes())
+        reader_before = reader_path.read_bytes()
+        recording = recording_jobs._path(config, event["session_id"])
+        recording.parent.mkdir(parents=True, exist_ok=True)
+        recording.write_text(json.dumps({**recording_jobs._new(event["session_id"]),
+                                         "watermark": 1234, "usage_unknown": True}))
+        record_before = recording.read_bytes()
+        with patch("reader_worker.host_process.spawn", side_effect=AssertionError("worker launched")):
+            result = registry_runtime.admit_session(config, event)
+        self.assertEqual(result["outcome"], "rebound")
+        current = json.loads(path.read_bytes())
+        self.assertEqual(current, {**old_main, "registry_binding": {
+            "selection": self.selected.digest, "hook_config": str(self.path)}})
+        self.assertEqual(reader_path.read_bytes(), reader_before)
+        self.assertEqual(recording.read_bytes(), record_before)
+        self.assertEqual(registry_runtime.admit_session(config, event)["outcome"], "unchanged")
+
+    def test_native_rebind_defers_held_worker_lease_and_retries_without_reset(self):
+        import host_files
+        config, event, path, reader_path = self.recovery_fixture()
+        before = path.read_bytes(), reader_path.read_bytes()
+        fd = host_files.open_regular(reader_path.with_suffix(".worker.lock"), os.O_CREAT | os.O_RDWR)
+        try:
+            host_files.lock_file(fd, blocking=False)
+            with self.assertRaisesRegex(registry_runtime.SessionAdmissionError, "previous memory worker"):
+                registry_runtime.admit_session(config, event)
+        finally:
+            os.close(fd)
+        self.assertEqual((path.read_bytes(), reader_path.read_bytes()), before)
+        self.assertEqual(registry_runtime.admit_session(config, event)["outcome"], "rebound")
+
+    def test_native_rebind_defers_spawned_child_before_worker_lease(self):
+        config, event, path, reader_path = self.recovery_fixture()
+        reader = json.loads(reader_path.read_bytes())
+        reader["worker_pid"] = os.getpid()
+        reader_path.write_text(json.dumps(reader))
+        before = path.read_bytes(), reader_path.read_bytes()
+        with self.assertRaisesRegex(registry_runtime.SessionAdmissionError, "previous memory worker"):
+            registry_runtime.admit_session(config, event)
+        self.assertEqual((path.read_bytes(), reader_path.read_bytes()), before)
+
+    def test_native_background_cannot_rebind_session(self):
+        config, event, path, reader_path = self.recovery_fixture()
+        before = path.read_bytes(), reader_path.read_bytes()
+        with self.assertRaises(registry_runtime.SessionAdmissionError):
+            registry_runtime.admit_session(config, event, background=True)
+        self.assertEqual((path.read_bytes(), reader_path.read_bytes()), before)
+
+    def test_native_legacy_workspace_recovery_requires_explicit_exact_preimage(self):
+        config, event, path, reader_path = self.recovery_fixture()
+        main = json.loads(path.read_bytes())
+        main.pop("registry_workspace")
+        path.write_text(json.dumps(main))
+        before = path.read_bytes(), reader_path.read_bytes()
+        with self.assertRaisesRegex(registry_runtime.SessionAdmissionError, "verified workspace binding"):
+            registry_runtime.admit_session(config, event)
+        with self.assertRaisesRegex(registry_runtime.SessionAdmissionError, "changed again"):
+            registry_runtime.recover_session(config, event, expected_state_sha256="f" * 64)
+        self.assertEqual((path.read_bytes(), reader_path.read_bytes()), before)
+        result = registry_runtime.recover_session(config, event,
+            expected_state_sha256=hashlib.sha256(before[0]).hexdigest())
+        self.assertEqual(result["outcome"], "rebound")
+        current = json.loads(path.read_bytes())
+        self.assertEqual(current["turns"], main["turns"])
+        self.assertEqual(current["context_epoch"], main["context_epoch"])
+        self.assertEqual(current["registry_workspace"], str(self.root))
+        self.assertEqual(reader_path.read_bytes(), before[1])
+
+    def test_native_existing_matching_binding_gains_workspace_without_pruning(self):
+        config = self.load()
+        event = {"cwd": str(self.root), "session_id": "legacy-matching"}
+        registry_runtime.admit_session(config, event)
+        path = hooks._state_path(config["state_dir"], event["session_id"])
+        old = json.loads(path.read_bytes())
+        old.pop("registry_workspace")
+        old["turns"] = {"retained": {"at": 0, "checkpoint": {"outcome": "none", "ids": []}}}
+        path.write_text(json.dumps(old))
+        self.assertEqual(registry_runtime.admit_session(config, event)["outcome"], "workspace_bound")
+        self.assertEqual(json.loads(path.read_bytes()), {**old, "registry_workspace": str(self.root)})
+
+    def test_native_recovery_never_changes_known_workspace_or_corrupt_reader(self):
+        config, event, path, reader_path = self.recovery_fixture()
+        main = json.loads(path.read_bytes())
+        main["registry_workspace"] = str(self.root / "different-workspace")
+        path.write_text(json.dumps(main))
+        before = path.read_bytes()
+        with self.assertRaisesRegex(registry_runtime.SessionAdmissionError, "different workspace"):
+            registry_runtime.recover_session(config, event, expected_state_sha256=hashlib.sha256(before).hexdigest())
+        self.assertEqual(path.read_bytes(), before)
+        main["registry_workspace"] = str(self.root)
+        path.write_text(json.dumps(main))
+        reader_path.write_text('{"schema":"future"}')
+        before = path.read_bytes(), reader_path.read_bytes()
+        with self.assertRaisesRegex(registry_runtime.SessionAdmissionError, "retained session state"):
+            registry_runtime.admit_session(config, event)
+        self.assertEqual((path.read_bytes(), reader_path.read_bytes()), before)
+
+    def test_native_recovery_warning_is_specific_and_never_emitted_on_tool_boundaries(self):
+        config, event, path, reader_path = self.recovery_fixture()
+        main = json.loads(path.read_bytes())
+        main.pop("registry_workspace")
+        path.write_text(json.dumps(main))
+        with patch("hooks._handle_async") as lifecycle:
+            result = hooks.handle_event(event, config)
+            self.assertIn("verified workspace binding", result["systemMessage"])
+            self.assertEqual(hooks.handle_event({**event, "hook_event_name": "PostToolUse"}, config), {})
+            lifecycle.assert_not_called()
+
+    def test_late_old_reader_callback_cannot_spawn_after_main_rebind(self):
+        import host_files
+        import reader_worker
+        from types import SimpleNamespace
+        old = self.load()
+        event = {"hook_event_name": "UserPromptSubmit", "cwd": str(self.root),
+                 "session_id": "late-reader", "turn_id": "turn-one",
+                 "prompt": "Inspect the requested implementation and its regressions."}
+        registry_runtime.admit_session(old, event)
+        self.assertEqual(reader_worker.notice(old, event, True)["outcome"], "queued")
+        original_lock = host_files.lock_file_bounded
+        rebound = []
+        def rebind_before_reader_lock(stream, **kwargs):
+            if not rebound:
+                rebound.append(None)  # Prevent recursion through recovery's reader lock.
+                raw = copy.deepcopy(self.raw_snapshot)
+                raw["digest"] = "c" * 64
+                self.selected = registry.NativeSelection(raw, self.value["memory_config"], self.value["native_cli"], str(self.root))
+                fresh = self.load()
+                rebound[0] = fresh
+                self.assertEqual(registry_runtime.admit_session(fresh, event)["outcome"], "rebound")
+            return original_lock(stream, **kwargs)
+        with patch("reader_worker.host_files.lock_file_bounded", side_effect=rebind_before_reader_lock), \
+             patch("recording_jobs.has_work", return_value=False), \
+             patch("reader_worker.host_process.spawn", return_value=SimpleNamespace(pid=987654)) as spawn:
+            self.assertEqual(reader_worker.background(old, event)["outcome"], "busy_or_not_ready")
+        spawn.assert_not_called()
+        fresh = rebound[0]
+        main = json.loads(hooks._state_path(fresh["state_dir"], event["session_id"]).read_bytes())
+        self.assertEqual(main["registry_binding"]["selection"], "c" * 64)
+        # Old paid results may still settle; ordinary stale callbacks may not.
+        self.assertFalse(reader_worker._state(old, event["session_id"], lambda data: (None, False))[0])
+        self.assertTrue(reader_worker._state(old, event["session_id"], lambda data: (None, False), allow_stale=True)[0])
+        self.assertTrue(reader_worker._state(fresh, event["session_id"], lambda data: (None, False))[0])
 
     def test_native_target_rejection_precedes_state_admission(self):
         logical = Path(self.value["memory_config"])

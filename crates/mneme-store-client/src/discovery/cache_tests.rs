@@ -68,6 +68,58 @@ fn catalog(extra: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn browse_reuses_discovery_without_changing_workspace_selection_or_acquisition() {
+    const REMOTE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAT";
+    let owner = Fixture::new(catalog(&format!(
+        "[stores.remote]\nid='{REMOTE}'\nowner={{url='ssh://remote',db='project',ssh_mcp_port=35169}}\n\
+         [stores.remote.devices.other.active]\nroots=['/another/device/project']",
+    )));
+    let workspace = Workspace::new(&owner);
+    let automatic = resolve_prepared(
+        workspace.prepare(),
+        ResolveOptions::default(),
+        &budget(),
+        &workspace.receipt,
+    )
+    .await
+    .unwrap()
+    .selection
+    .unwrap();
+    assert!(automatic.explicit_store("remote").is_err());
+    let receipt = std::fs::read(&workspace.receipt).unwrap();
+    let browse = resolve_prepared(
+        workspace.prepare().for_browsing(),
+        ResolveOptions::default(),
+        &budget(),
+        &workspace.receipt,
+    )
+    .await
+    .unwrap();
+    assert_eq!(browse.cache_status, CacheStatus::Cached);
+    assert!(
+        browse.report.unwrap().stores[REMOTE].blocked,
+        "automatic-policy evidence is retained"
+    );
+    let browse = browse.selection.unwrap();
+    assert!(browse.explicit_store("remote").unwrap().eligible.read);
+    assert!(!browse.explicit_store("remote").unwrap().eligible.write);
+    browse.revalidate_exact().unwrap();
+    let again = resolve_prepared(
+        workspace.prepare(),
+        ResolveOptions::default(),
+        &budget(),
+        &workspace.receipt,
+    )
+    .await
+    .unwrap()
+    .selection
+    .unwrap();
+    assert_eq!(automatic, again);
+    assert_eq!(std::fs::read(&workspace.receipt).unwrap(), receipt);
+    assert_eq!(owner.calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn receipt_readthrough_and_exact_replay_are_offline_and_stable() {
     let owner = Fixture::new(catalog(""));
     let workspace = Workspace::new(&owner);

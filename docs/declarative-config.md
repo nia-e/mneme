@@ -271,6 +271,15 @@ including an inactive one, without changing automatic activation. Profile and
 exclusion boundaries still apply. `--user` refuses under declarative configuration:
 store names are not hard-coded global/project roles.
 
+`mnemed tui` instead makes an explicit read-only browsing selection. It ignores
+`active.enabled`, workspace matching, activation roots/exclusions and every
+operation-applicability scope, including paths qualified for another device.
+This affects only browsing: automatic core/context delivery, recall, recording and
+maintenance keep their normal workspace rules. Read permission, profile/isolation,
+allowlists and owner identity/conflict checks still apply. The Config inspector
+labels its retained automatic-policy report separately from browse admission;
+neither a policy block nor a discovered route proves owner connectivity.
+
 Selection is metadata-only, bounded and digest-qualified. With discovery enabled,
 initial acquisition may contact catalog publishers; retained selection and exact
 revalidation use frozen receipts without refetching. See [store discovery](discovery.md)

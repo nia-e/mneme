@@ -38,6 +38,7 @@ impl Local {
                 .unwrap(),
             context: SelectionContext::new(root.clone()),
             request: SelectionRequest {
+                purpose: Default::default(),
                 mode: SelectionRequestMode::Explicit,
                 user_path: None,
                 cwd: root.clone(),

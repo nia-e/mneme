@@ -37,7 +37,8 @@ pub(crate) struct TuiArgs {
     #[arg(long, conflicts_with_all = ["config", "remote", "user", "db"])]
     demo: bool,
     /// Explicit library observatory; otherwise start on the configured default
-    /// owner and Tab to another admitted, readable source. --remote selects one route.
+    /// owner and Tab to another readable source, ignoring workspace applicability.
+    /// --remote selects one route.
     #[arg(long, conflicts_with_all = ["remote", "user", "db"])]
     config: Option<PathBuf>,
     /// Open a semantic search lens instead of the default graph inventory.
@@ -193,7 +194,7 @@ async fn discover_targets(
     let budget =
         mneme_store_client::OperationBudget::new(1024 * 1024, std::time::Duration::from_secs(15))
             .map_err(|error| -> AnyErr { error })?;
-    let outcome = mneme_store_client::discovery::resolve_workspace(
+    let outcome = mneme_store_client::discovery::resolve_workspace_for_browsing(
         memory_config,
         &cwd,
         profile,
@@ -256,6 +257,9 @@ fn declarative_targets_for_view(
     user: bool,
     inspect: bool,
 ) -> Result<ResolvedTargets, AnyErr> {
+    if snapshot.purpose != mneme_config::SelectionPurpose::Browse {
+        return Err("TUI requires an explicit read-only browsing selection".into());
+    }
     if user {
         return Err(
             "--user is a legacy selector; use --store NAME with declarative configuration".into(),
@@ -263,6 +267,13 @@ fn declarative_targets_for_view(
     }
     let primary = named
         .or(snapshot.read_default.as_deref())
+        .or_else(|| {
+            snapshot
+                .stores
+                .iter()
+                .find(|row| row.eligible.read)
+                .map(|row| row.name.as_str())
+        })
         .map(str::to_owned);
     if !inspect {
         snapshot
@@ -278,8 +289,8 @@ fn declarative_targets_for_view(
     let mut rows: Vec<_> = snapshot.stores.iter().collect();
     rows.sort_by_key(|row| Some(row.name.as_str()) != primary.as_deref());
     for row in rows {
-        // Choosing a source is an explicit read, not automatic workspace
-        // activation. Keep inactive but admitted/readable stores selectable.
+        // The shared browse snapshot ignores workspace applicability and grants
+        // only explicit reads. Real permission/profile/identity boundaries stay.
         if row.admitted && row.eligible.read {
             let owner = &row.store.owner;
             sources.push(SourceChoice::routed(mneme_tui::Target {
@@ -301,9 +312,11 @@ fn declarative_targets_for_view(
         } else {
             let mut source = SourceChoice::unavailable(
                 &row.name,
-                row.reason
-                    .as_deref()
-                    .unwrap_or("read permission not granted"),
+                if row.admitted {
+                    "read permission not granted"
+                } else {
+                    row.reason.as_deref().unwrap_or("store is not admitted")
+                },
             );
             source.expected_db_id = Some(row.store.id.clone());
             sources.push(source);
@@ -389,6 +402,12 @@ impl ResolvedTargets {
 mod tests {
     use super::*;
 
+    fn browse_context(cwd: PathBuf) -> mneme_config::SelectionContext {
+        let mut context = mneme_config::SelectionContext::new(cwd);
+        context.purpose = mneme_config::SelectionPurpose::Browse;
+        context
+    }
+
     fn declarative_config(cwd: &std::path::Path) -> mneme_config::Config {
         let mut config = mneme_config::Config::parse(
             r#"
@@ -435,8 +454,7 @@ active = { workspace = "any" }
     fn declarative_picker_uses_the_cli_snapshot_and_does_not_activate_inventory() {
         let cwd = std::env::temp_dir().canonicalize().unwrap();
         let config = declarative_config(&cwd);
-        let snapshot =
-            mneme_config::select(&config, &mneme_config::SelectionContext::new(cwd)).unwrap();
+        let snapshot = mneme_config::select(&config, &browse_context(cwd)).unwrap();
         let digest = snapshot.digest.clone();
         let selected = declarative_targets(snapshot.clone(), None, false).unwrap();
         assert_eq!(selected.sources[0].name, "renamed-project");
@@ -487,7 +505,7 @@ active = { workspace = "any" }
         let cwd = std::env::temp_dir().canonicalize().unwrap();
         let mut config = declarative_config(&cwd);
         for profile in ["default", "private", "isolated"] {
-            let mut context = mneme_config::SelectionContext::new(cwd.clone());
+            let mut context = browse_context(cwd.clone());
             context.profile = profile.into();
             let snapshot = mneme_config::select(&config, &context).unwrap();
             if profile == "isolated" {
@@ -503,7 +521,9 @@ active = { workspace = "any" }
             let selected =
                 declarative_targets(snapshot.clone(), Some("renamed-project"), false).unwrap();
             for source in &selected.sources {
-                let expected = matches!(source.name.as_str(), "renamed-project" | "other");
+                let expected = matches!(source.name.as_str(), "renamed-project" | "other")
+                    || (profile != "isolated"
+                        && matches!(source.name.as_str(), "disabled" | "excluded"));
                 assert_eq!(
                     source.route().is_some(),
                     expected,
@@ -523,8 +543,17 @@ active = { workspace = "any" }
                     declarative_targets(snapshot.clone(), Some(&source.name), false).is_ok(),
                     expected
                 );
+                if source.name == "unreadable" && profile != "isolated" {
+                    assert_eq!(
+                        source.unavailable_reason(),
+                        Some("read permission not granted")
+                    );
+                }
                 if let Some(route) = source.route() {
                     assert_eq!(*route.configured.as_ref().unwrap().selection, snapshot);
+                    assert!(!row.eligible.write && !row.active);
+                    assert!(!row.eligible.core && !row.eligible.context && !row.eligible.recall);
+                    assert!(!row.eligible.record && !row.eligible.maintenance);
                 }
             }
         }
@@ -534,9 +563,7 @@ active = { workspace = "any" }
     fn configuration_inspection_keeps_zero_defaultless_and_denied_stores() {
         let cwd = std::env::temp_dir().canonicalize().unwrap();
         let empty = mneme_config::Config::parse("schema = 'mneme.config.v1'").unwrap();
-        let snapshot =
-            mneme_config::select(&empty, &mneme_config::SelectionContext::new(cwd.clone()))
-                .unwrap();
+        let snapshot = mneme_config::select(&empty, &browse_context(cwd.clone())).unwrap();
         assert!(snapshot.stores.is_empty());
         assert!(snapshot.read_default.is_none());
         let selected = declarative_targets_for_view(snapshot, None, false, true).unwrap();
@@ -548,11 +575,9 @@ active = { workspace = "any" }
 
         let mut config = declarative_config(&cwd);
         config.read_default = "project-or-misc".into();
-        let snapshot =
-            mneme_config::select(&config, &mneme_config::SelectionContext::new(cwd.clone()))
-                .unwrap();
+        let snapshot = mneme_config::select(&config, &browse_context(cwd.clone())).unwrap();
         assert!(snapshot.read_default.is_none());
-        assert!(declarative_targets(snapshot.clone(), None, false).is_err());
+        assert!(declarative_targets(snapshot.clone(), None, false).is_ok());
         let selected = declarative_targets_for_view(snapshot.clone(), None, false, true).unwrap();
         assert!(
             selected
@@ -565,17 +590,14 @@ active = { workspace = "any" }
         for store in config.stores.values_mut() {
             store.active.enabled = false;
         }
-        let snapshot =
-            mneme_config::select(&config, &mneme_config::SelectionContext::new(cwd)).unwrap();
+        let snapshot = mneme_config::select(&config, &browse_context(cwd)).unwrap();
         let selected =
             declarative_targets_for_view(snapshot.clone(), Some("disabled"), false, true).unwrap();
         assert_eq!(selected.sources[0].name, "disabled");
         assert_eq!(selected.sources.len(), snapshot.stores.len());
         assert!(
-            selected
-                .sources
-                .iter()
-                .all(|source| source.route().is_none())
+            selected.sources[0].route().is_some(),
+            "activation disable does not disable browsing"
         );
         assert_eq!(*selected.selection.unwrap(), snapshot);
     }

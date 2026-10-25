@@ -8,6 +8,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Automatic workspace policy and deliberate read-only browsing are different
+/// requests. Browsing does not activate an owner or grant background work.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionPurpose {
+    #[default]
+    Workspace,
+    Browse,
+}
+impl SelectionPurpose {
+    pub fn is_workspace(&self) -> bool {
+        *self == Self::Workspace
+    }
+    pub(crate) fn ignores_applicability(self, field: &str) -> bool {
+        self == Self::Browse
+            && ((field.starts_with("active.") && field != "active.profiles")
+                || field.starts_with("applicability."))
+    }
+}
+
 impl SelectionRequest {
     /// Replay this exact frozen request using only local declarations and an
     /// optional pinned discovery receipt. In particular, an absent default
@@ -42,6 +62,7 @@ pub struct ConfigSource {
 }
 #[derive(Debug, Clone)]
 pub struct SelectionContext {
+    pub purpose: SelectionPurpose,
     pub cwd: PathBuf,
     pub profile: String,
     pub project: ProjectState,
@@ -52,6 +73,7 @@ pub struct SelectionContext {
 impl SelectionContext {
     pub fn new(cwd: PathBuf) -> Self {
         Self {
+            purpose: SelectionPurpose::Workspace,
             origins: vec![cwd.clone()],
             cwd,
             profile: "default".into(),
@@ -65,6 +87,8 @@ impl SelectionContext {
 pub struct SelectionSnapshot {
     pub schema: String,
     pub digest: String,
+    #[serde(default, skip_serializing_if = "SelectionPurpose::is_workspace")]
+    pub purpose: SelectionPurpose,
     #[serde(default)]
     pub request: Option<SelectionRequest>,
     pub sources: Vec<ConfigSource>,
@@ -111,6 +135,7 @@ enum DenialReason {
 
 #[derive(Debug, Clone, Copy)]
 enum InactiveReason {
+    ExplicitBrowse,
     WorkspaceNotApplicable,
     RootNotApplicable,
 }
@@ -135,6 +160,7 @@ impl StoreDisposition {
                 DenialReason::ProfileNotAdmitted => "profile-not-admitted",
             }),
             Self::Inactive(reason) => Some(match reason {
+                InactiveReason::ExplicitBrowse => "explicit-browse",
                 InactiveReason::WorkspaceNotApplicable => "workspace-not-applicable",
                 InactiveReason::RootNotApplicable => "root-not-applicable",
             }),
@@ -205,8 +231,9 @@ impl ActiveStore {
     }
 }
 impl SelectionSnapshot {
-    /// Deliberate non-active access does not activate background delivery. Profile,
-    /// isolation, exclusions and disabled-store boundaries still apply.
+    /// Deliberate non-active access does not activate background delivery. A
+    /// workspace snapshot retains exclusions and disabled-store boundaries;
+    /// browsing ignores applicability but never profile/isolation/read ceilings.
     pub fn explicit_store(&self, name: &str) -> Result<ActiveStore> {
         let store = self
             .stores
@@ -375,10 +402,12 @@ pub(crate) fn select_resolved(
         None => context_profile,
     };
     let mut project = context.project.clone();
+    let browse = context.purpose == SelectionPurpose::Browse;
     // Disabled project entries still prove configured presence. Availability is
     // intentionally not an input, so a connection failure can never activate misc.
     for store in config.stores.values() {
-        if store.active.workspace == WorkspaceKind::Project
+        if !browse
+            && store.active.workspace == WorkspaceKind::Project
             && store.active.has_positive_roots()
             && (path_match(&origins, &store.active.roots)?
                 || path_match(&origins, &store.active.subtree_roots)?)
@@ -421,27 +450,29 @@ pub(crate) fn select_resolved(
             project.legacy_library.is_none() || project.legacy_allow_stores.is_some();
         let profile_allowed = store.active.profiles.iter().any(|p| p == profile.as_str())
             || (isolated && allowlisted);
-        let excluded = path_match(&origins, &store.active.excluded_roots)?;
-        let workspace_matches = match store.active.workspace {
-            WorkspaceKind::Any => true,
-            WorkspaceKind::Project => {
-                project.configured
-                    && store.active.has_positive_roots()
-                    && positive_boundary_match(
-                        &origins,
-                        &project,
-                        &store.active.roots,
-                        &store.active.subtree_roots,
-                    )?
-            }
-            WorkspaceKind::NoProject => !project.configured,
-        };
-        let roots_match = !store.active.has_positive_roots()
+        let excluded = !browse && path_match(&origins, &store.active.excluded_roots)?;
+        let workspace_matches = browse
+            || match store.active.workspace {
+                WorkspaceKind::Any => true,
+                WorkspaceKind::Project => {
+                    project.configured
+                        && store.active.has_positive_roots()
+                        && positive_boundary_match(
+                            &origins,
+                            &project,
+                            &store.active.roots,
+                            &store.active.subtree_roots,
+                        )?
+                }
+                WorkspaceKind::NoProject => !project.configured,
+            };
+        let roots_match = browse
+            || !store.active.has_positive_roots()
             || positive_match(&origins, &store.active.roots, &store.active.subtree_roots)?;
         // Do not short-circuit path checks on denial: even disabled entries
         // retain their metadata-validation errors. Only operation scopes below
         // are conditional on eligibility.
-        let disposition = if !store.active.enabled {
+        let disposition = if !browse && !store.active.enabled {
             StoreDisposition::Denied(DenialReason::Disabled)
         } else if excluded {
             StoreDisposition::Denied(DenialReason::ExcludedRoot)
@@ -453,6 +484,8 @@ pub(crate) fn select_resolved(
             StoreDisposition::Denied(DenialReason::ExplicitLegacyLibrary)
         } else if !profile_allowed {
             StoreDisposition::Denied(DenialReason::ProfileNotAdmitted)
+        } else if browse {
+            StoreDisposition::Inactive(InactiveReason::ExplicitBrowse)
         } else if !workspace_matches {
             StoreDisposition::Inactive(InactiveReason::WorkspaceNotApplicable)
         } else if !roots_match {
@@ -462,7 +495,7 @@ pub(crate) fn select_resolved(
         };
         let is_active = disposition.is_active();
         let read = disposition.is_admitted() && store.permissions.read;
-        let write = disposition.is_admitted() && store.permissions.write;
+        let write = !browse && disposition.is_admitted() && store.permissions.write;
         let bg = is_active && config.background.enabled;
         let eligible = Eligibility {
             read,
@@ -500,7 +533,12 @@ pub(crate) fn select_resolved(
             });
         }
     }
-    let read_default = if config.read_default == "project-or-misc" {
+    let read_default = if browse {
+        stores
+            .iter()
+            .find(|s| s.name == config.read_default && s.eligible.read)
+            .map(|s| s.name.clone())
+    } else if config.read_default == "project-or-misc" {
         let kind = if project.configured {
             WorkspaceKind::Project
         } else {
@@ -547,6 +585,7 @@ pub(crate) fn select_resolved(
     let mut snapshot = SelectionSnapshot {
         schema: SELECTION_SCHEMA.into(),
         digest: String::new(),
+        purpose: context.purpose,
         request: None,
         sources: context.sources.clone(),
         discovery: None,

@@ -14,8 +14,8 @@ mod tests;
 use crate::{AnyErr, OperationBudget, native_profile};
 use mneme_config::{
     DiscoveryGraph, DiscoveryReceipt, DiscoveryReport, DiscoverySeed, PublishedCatalog,
-    SelectionSnapshot, WorkspaceDeclarations, finish_workspace, prepare_workspace,
-    read_discovery_receipt,
+    SelectionPurpose, SelectionSnapshot, WorkspaceDeclarations, finish_workspace,
+    prepare_workspace, read_discovery_receipt,
 };
 use mneme_mcp_client::{ConnectionOptions, RemoteClient};
 use serde::Serialize;
@@ -79,11 +79,55 @@ pub async fn resolve_workspace(
     options: ResolveOptions,
     budget: &OperationBudget,
 ) -> Result<Option<ResolutionOutcome>, AnyErr> {
+    resolve_workspace_for_purpose(
+        user_path,
+        cwd,
+        profile,
+        options,
+        budget,
+        SelectionPurpose::Workspace,
+    )
+    .await
+}
+
+/// Explicit observatory selection. Catalog acquisition is unchanged; only the
+/// resulting read-only owner inventory ignores workspace applicability.
+pub async fn resolve_workspace_for_browsing(
+    user_path: Option<&Path>,
+    cwd: &Path,
+    profile: Option<&str>,
+    options: ResolveOptions,
+    budget: &OperationBudget,
+) -> Result<Option<ResolutionOutcome>, AnyErr> {
+    resolve_workspace_for_purpose(
+        user_path,
+        cwd,
+        profile,
+        options,
+        budget,
+        SelectionPurpose::Browse,
+    )
+    .await
+}
+
+async fn resolve_workspace_for_purpose(
+    user_path: Option<&Path>,
+    cwd: &Path,
+    profile: Option<&str>,
+    options: ResolveOptions,
+    budget: &OperationBudget,
+    purpose: SelectionPurpose,
+) -> Result<Option<ResolutionOutcome>, AnyErr> {
     if options.offline && options.refresh {
         return Err("offline inspection and discovery refresh are mutually exclusive".into());
     }
     let Some(prepared) = prepare_workspace(user_path, cwd, profile)? else {
         return Ok(None);
+    };
+    let prepared = if purpose == SelectionPurpose::Browse {
+        prepared.for_browsing()
+    } else {
+        prepared
     };
     if !prepared.has_discovery() {
         let report = prepared.resolve_graph(&DiscoveryGraph::default())?.report;

@@ -25,7 +25,9 @@ if sys.version_info < (3, 11):
 
 from host_files import lock_file, unlock_file
 import launcher
+import hooks
 import project_setup
+import registry_runtime
 from service import load_config
 from store_registry import NativeSelection, native_bridge, native_select
 
@@ -190,6 +192,40 @@ class NativeProjectDiscoveryTests(unittest.TestCase):
         ready.assert_called_once()
         self.assertEqual(result["status"], "configured")
         return result
+
+    def test_session_rebind_uses_current_receipt_and_old_actor_cannot_roll_it_back(self):
+        """Real native receipt replacement, not a mocked policy-digest change."""
+        hook_path = self.base / "native-hooks.json"
+        hook_path.write_text(json.dumps({"schema": registry_runtime.NATIVE_SCHEMA,
+            "memory_config": str(self.memory), "native_cli": str(self.native),
+            "state_dir": str(self.base / "hook-state"), "reader_codex": sys.executable}))
+        event = {"hook_event_name": "SessionStart", "source": "resume",
+                 "cwd": str(self.root), "session_id": "receipt-recovery"}
+        old = hooks._config(hook_path, cwd=self.root)
+        registry_runtime.admit_session(old, event)
+        old_witness = old["frozen_selection"]["snapshot"]["discovery"]["binding"]
+        # Explicitly publish the already-default read policy: different receipt,
+        # unchanged effective owner access, like an unrelated catalog refresh.
+        stores = {"publisher": {"id": PUBLISHER_ID, "permissions": {"read": True}}}
+        self.publisher.document["stores"] = stores
+        self.publisher.document["catalog_sha256"] = hashlib.sha256(
+            json.dumps(stores, separators=(",", ":")).encode()).hexdigest()
+        fresh_snapshot = native_bridge(str(self.native), ["select", "--config", str(self.memory),
+            "--cwd", str(self.root), "--refresh"], timeout=5)
+        fresh_witness = fresh_snapshot["discovery"]["binding"]
+        self.assertEqual(old_witness["path"], fresh_witness["path"])
+        self.assertNotEqual(old_witness["sha256"], fresh_witness["sha256"])
+        fresh = hooks._config(hook_path, cwd=self.root)
+        self.assertEqual(registry_runtime.admit_session(fresh, event)["outcome"], "rebound")
+        path = hooks._state_path(fresh["state_dir"], event["session_id"])
+        current = path.read_bytes()
+        acquisitions = len(self.publisher.acquisitions)
+        with self.assertRaises(ValueError):
+            registry_runtime.admit_session(old, event)
+        self.assertEqual(path.read_bytes(), current)
+        self.assertEqual(len(self.publisher.acquisitions), acquisitions)
+        self.assertEqual(self.publisher.errors, [])
+        self.assertFalse((self.base / "unexpected-mcp-process").exists())
 
     def test_new_overlay_and_codex_boundary_acquire_fresh_then_replay_offline(self):
         initial_memory = self.memory.read_bytes()

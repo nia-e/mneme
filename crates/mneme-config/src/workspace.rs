@@ -4,8 +4,9 @@
 use crate::{
     ConfigDeclarations, ConfigSource, DiscoveryBinding, DiscoveryGraph, DiscoveryReceipt,
     DiscoveryResolution, DiscoverySeed, DiscoveryWitness, MAX_CONFIG_BYTES, PrivacyProfile, Result,
-    SelectionContext, SelectionSnapshot, WorkspaceKind, declarative_file, default_rule, error,
-    legacy_workspace, resolve_discovery, select, sha256, validate_path, validate_profile,
+    SelectionContext, SelectionPurpose, SelectionSnapshot, WorkspaceKind, declarative_file,
+    default_rule, error, legacy_workspace, resolve_discovery, select, sha256, validate_path,
+    validate_profile,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +24,8 @@ pub enum SelectionRequestMode {
 #[serde(deny_unknown_fields)]
 pub struct SelectionRequest {
     pub mode: SelectionRequestMode,
+    #[serde(default, skip_serializing_if = "SelectionPurpose::is_workspace")]
+    pub purpose: SelectionPurpose,
     pub user_path: Option<PathBuf>,
     pub cwd: PathBuf,
     pub requested_profile: Option<String>,
@@ -393,6 +396,7 @@ fn make_request(
     }
     Ok(SelectionRequest {
         mode,
+        purpose: SelectionPurpose::Workspace,
         user_path: user_path.map(absolute_request_path).transpose()?,
         cwd,
         requested_profile: profile.map(str::to_owned),
@@ -436,13 +440,14 @@ pub(crate) fn prepare_request(request: &SelectionRequest) -> Result<Option<Works
     if user_path.is_none() && !has_native_overlay(&origins)? {
         return Ok(None);
     }
-    let (local, context) = prepare_workspace_inner(
+    let (local, mut context) = prepare_workspace_inner(
         user_path,
         &request.cwd,
         request.requested_profile.as_deref(),
         origins,
         request.user_codex_dir.as_deref(),
     )?;
+    context.purpose = request.purpose;
     Ok(Some(WorkspaceDeclarations {
         local,
         context,
@@ -485,6 +490,13 @@ pub struct WorkspaceDeclarations {
     pub request: SelectionRequest,
 }
 impl WorkspaceDeclarations {
+    /// Reuse the same acquired metadata for an explicit read-only browser. The
+    /// purpose changes selection, never which catalog publishers are contacted.
+    pub fn for_browsing(mut self) -> Self {
+        self.request.purpose = SelectionPurpose::Browse;
+        self.context.purpose = SelectionPurpose::Browse;
+        self
+    }
     pub fn has_discovery(&self) -> bool {
         self.local.has_discovery()
     }
@@ -570,8 +582,12 @@ impl WorkspaceDeclarations {
         resolve_discovery(&self.local, graph)
     }
     pub fn boundary_sha256(&self) -> Result<String> {
+        // Catalog acquisition is independent of the eventual read purpose.
+        // Retain the established receipt key and exact legacy serialization.
+        let mut request = self.request.clone();
+        request.purpose = SelectionPurpose::Workspace;
         let bytes = serde_json::to_vec(&(
-            &self.request,
+            &request,
             &self.local,
             &self.context.cwd,
             &self.context.origins,
@@ -709,7 +725,11 @@ pub fn finish_workspace(
     prepared: WorkspaceDeclarations,
     receipt: Option<(&DiscoveryReceipt, DiscoveryBinding)>,
 ) -> Result<SelectionSnapshot> {
-    let (config, witness, project_roots) = if let Some((receipt, binding)) = receipt {
+    if prepared.context.purpose != prepared.request.purpose {
+        return Err(error("selection purpose differs from the frozen request"));
+    }
+    let browse = prepared.request.purpose == SelectionPurpose::Browse;
+    let (config, witness, project_roots, ordinary) = if let Some((receipt, binding)) = receipt {
         if !prepared.has_discovery() {
             return Err(error(
                 "discovery receipt supplied without a local discovery opt-in",
@@ -736,7 +756,19 @@ pub fn finish_workspace(
         if binding.load()? != *receipt {
             return Err(error("discovery receipt changed before selection; retry"));
         }
-        let resolved = prepared.resolve_graph(&receipt.graph)?;
+        let ordinary = prepared.resolve_graph(&receipt.graph)?;
+        let (resolved, ordinary) = if browse {
+            (
+                crate::discovery::resolve_discovery_for_purpose(
+                    &prepared.local,
+                    &receipt.graph,
+                    SelectionPurpose::Browse,
+                )?,
+                Some(ordinary),
+            )
+        } else {
+            (ordinary, None)
+        };
         (
             resolved.config,
             Some(DiscoveryWitness {
@@ -744,6 +776,7 @@ pub fn finish_workspace(
                 boundary_sha256,
             }),
             resolved.project_roots,
+            ordinary,
         )
     } else {
         if prepared.has_discovery() {
@@ -751,9 +784,58 @@ pub fn finish_workspace(
                 "discovery configuration requires native client acquisition or a pinned receipt",
             ));
         }
-        (prepared.local.materialize()?, None, Vec::new())
+        if browse {
+            let ordinary = prepared.resolve_graph(&DiscoveryGraph::default())?;
+            let resolved = crate::discovery::resolve_discovery_for_purpose(
+                &prepared.local,
+                &DiscoveryGraph::default(),
+                SelectionPurpose::Browse,
+            )?;
+            (
+                resolved.config,
+                None,
+                resolved.project_roots,
+                Some(ordinary),
+            )
+        } else {
+            (prepared.local.materialize()?, None, Vec::new(), None)
+        }
     };
-    let mut context = prepared.context;
+    let context = context_with_project_roots(prepared.context, project_roots)?;
+    // Applicability still provides a useful initial view, but never gates a
+    // deliberate browse. An unresolved/ambiguous automatic default is not an
+    // error for the observatory; its picker can choose another readable owner.
+    let preferred_default = ordinary.and_then(|ordinary| {
+        let mut ordinary_context = context.clone();
+        ordinary_context.purpose = SelectionPurpose::Workspace;
+        context_with_project_roots(ordinary_context, ordinary.project_roots)
+            .and_then(|context| crate::selection::select_resolved(&ordinary.config, &context))
+            .ok()
+            .and_then(|selection| selection.read_default)
+    });
+    let mut snapshot = if witness.is_some() || browse {
+        crate::selection::select_resolved(&config, &context)?
+    } else {
+        select(&config, &context)?
+    };
+    if let Some(preferred) = preferred_default.filter(|name| {
+        snapshot
+            .stores
+            .iter()
+            .any(|row| row.name == *name && row.eligible.read)
+    }) {
+        snapshot.read_default = Some(preferred);
+    }
+    snapshot.request = Some(prepared.request);
+    snapshot.discovery = witness;
+    snapshot.digest = snapshot.calculated_digest()?;
+    Ok(snapshot)
+}
+
+fn context_with_project_roots(
+    mut context: SelectionContext,
+    project_roots: Vec<PathBuf>,
+) -> Result<SelectionContext> {
     for root in project_roots {
         if crate::selection::path_match(&context.origins, std::slice::from_ref(&root))? {
             // An unresolved/conflicted project owner still proves configured
@@ -764,15 +846,7 @@ pub fn finish_workspace(
             }
         }
     }
-    let mut snapshot = if witness.is_some() {
-        crate::selection::select_resolved(&config, &context)?
-    } else {
-        select(&config, &context)?
-    };
-    snapshot.request = Some(prepared.request);
-    snapshot.discovery = witness;
-    snapshot.digest = snapshot.calculated_digest()?;
-    Ok(snapshot)
+    Ok(context)
 }
 
 fn infer_project_roots(config: &mut ConfigDeclarations, root: &Path) {

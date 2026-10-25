@@ -449,6 +449,50 @@ permissions = { read = false }
 }
 
 #[test]
+fn browse_admission_is_not_presented_as_automatic_activation_or_connectivity() {
+    let mut app = app();
+    let config = mneme_config::Config::parse(
+        r#"
+schema = "mneme.config.v1"
+[stores.example]
+id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+owner = { url = "http://127.0.0.1:1", db = "example" }
+active = { enabled = false, workspace = "project", roots = ["/another/device"] }
+"#,
+    )
+    .unwrap();
+    let mut context =
+        mneme_config::SelectionContext::new(std::env::temp_dir().canonicalize().unwrap());
+    context.purpose = mneme_config::SelectionPurpose::Browse;
+    app.config_selection = Some(Arc::new(mneme_config::select(&config, &context).unwrap()));
+    Arc::make_mut(app.config_report.as_mut().unwrap())
+        .stores
+        .values_mut()
+        .next()
+        .unwrap()
+        .blocked = true;
+
+    config_inspector::open(&mut app);
+    let overview = draw(&app, 120, 40);
+    assert!(overview.contains("explicit read-only browsing"));
+    assert!(overview.contains("automatic memory is unchanged"));
+    press(&mut app, KeyCode::Right);
+    let details = draw(&app, 120, 40);
+    for text in [
+        "Browse admission: admitted",
+        "Automatic activation: not evaluated for browsing",
+        "Browse operations: read=true (read-only)",
+        "Automatic policy resolution: blocked",
+        "Policy diagnostics are not an owner connectivity test.",
+        "[auto-blocked]",
+    ] {
+        assert!(details.contains(text), "missing {text}: {details}");
+    }
+    assert!(!details.contains("Activation: inactive"));
+    assert!(!details.contains("core=false"));
+}
+
+#[test]
 fn untrusted_report_text_never_reaches_terminal_as_control_sequences() {
     let mut report = demo_config_report();
     let store = report.stores.values_mut().next().unwrap();

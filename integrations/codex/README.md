@@ -792,10 +792,42 @@ existing runtime; retain old bundles until they drain.
 
 This deliberately trusts updated installed code. It does not bypass trust for
 other hooks or silently approve new native definitions. Adding an event or changing
-the recipe still needs review. Changing config paths, owner selections or paid-job
-inputs can still trip the existing lifecycle fences; stable native trust does not
-migrate those bindings or authorize clearing them. Windows and existing direct
-hooks retain their current route. `programs.mneme.enable` still installs no hooks.
+the recipe still needs review. Native v13 hooks now refresh a session's checked
+selection at the next foreground boundary after configuration/discovery changes,
+once its previous worker has finished. The workspace and hook-config pathname
+must remain the same. A busy worker causes a bounded defer-and-retry, not a kill
+or a second worker. Existing direct/legacy registry hooks retain their prior
+fresh-session requirement. `programs.mneme.enable` still installs no hooks.
+
+Selection refresh changes only the checkpoint binding. It does not clear old
+turns, reset accounting or unknown usage, or rewrite frozen recording jobs to a
+new destination. The reader's existing config-pin fence discards stale optional
+delivery state while retaining paid-call identities and usage; the recorder
+settles interrupted intents conservatively and defers obsolete jobs. Failed
+revalidation leaves the prior binding intact. A delayed old actor cannot restore
+an old discovery selection: native replay checks the current boundary-key receipt.
+
+#### Already-stranded pre-upgrade sessions
+
+Older session bindings lack a workspace witness. An unchanged exact binding gains
+that witness on its next hook event. If its selection had already changed before
+this update, recovery must not guess the old workspace: start a new session, or
+perform the following explicitly authorized operator repair.
+
+Independently verify the host session ID and cwd from the host's retained session
+metadata, and back up its checkpoint plus reader JSON/accounting SQLite and
+recording state before repair. Load the **installed** native config for that cwd
+with `hooks._config(Path(config_path), cwd=verified_cwd)`, then call
+`registry_runtime.recover_session(config, {"session_id": verified_session_id,
+"cwd": verified_cwd}, expected_state_sha256=checkpoint_sha256)` with the SHA-256
+of the exact retained checkpoint bytes. Use the installed matching helper bundle,
+not a mixture of versions. The helper takes the main session lock, reader state
+lock and nonblocking worker lease, checks any recorded worker identity, and
+revalidates native selection before changing only the workspace/binding fields.
+It refuses a changed checkpoint, known different workspace, active worker,
+changed hook pathname or malformed state. It does not run lifecycle events,
+start inference, change services, replay work or reset any allowance. Read back
+the binding and compare all retained history/accounting fields before resuming.
 
 The [native fixture](../../docs/evaluation/stable-hooks-20261020/REPORT.md) records
 the tested Codex version, same-thread dispatch, fresh-catalog trust and controls.

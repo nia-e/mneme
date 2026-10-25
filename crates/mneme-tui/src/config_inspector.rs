@@ -283,6 +283,17 @@ fn overview(app: &App) -> Vec<Line<'static>> {
         }
     }
     if let Some(selection) = &app.config_selection {
+        if selection.purpose == mneme_config::SelectionPurpose::Browse {
+            text(&mut lines, "Selection: explicit read-only browsing");
+            text(
+                &mut lines,
+                "Workspace applicability is ignored; automatic memory is unchanged.",
+            );
+            text(
+                &mut lines,
+                "Discovery diagnostics below describe automatic policy, not owner reachability.",
+            );
+        }
         text(&mut lines, format!("Profile: {}", selection.profile));
         text(
             &mut lines,
@@ -388,6 +399,10 @@ fn details(app: &App, id: &str, label: &str) -> Vec<Line<'static>> {
     {
         read_source(&mut lines, &source);
     }
+    let browsing = app
+        .config_selection
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.purpose == mneme_config::SelectionPurpose::Browse);
     let selection = app
         .config_selection
         .as_ref()
@@ -396,36 +411,63 @@ fn details(app: &App, id: &str, label: &str) -> Vec<Line<'static>> {
         text(
             &mut lines,
             format!(
-                "Admission: {}",
+                "{}: {}",
+                if browsing {
+                    "Browse admission"
+                } else {
+                    "Admission"
+                },
                 if row.admitted { "admitted" } else { "denied" }
             ),
         );
-        text(
-            &mut lines,
-            format!(
-                "Activation: {}",
-                if row.active { "active" } else { "inactive" }
-            ),
-        );
+        if browsing {
+            text(
+                &mut lines,
+                "Automatic activation: not evaluated for browsing",
+            );
+        } else {
+            text(
+                &mut lines,
+                format!(
+                    "Activation: {}",
+                    if row.active { "active" } else { "inactive" }
+                ),
+            );
+        }
         if let Some(reason) = &row.reason {
             text(&mut lines, format!("Selection reason: {reason}"));
         }
-        text(
-            &mut lines,
-            format!(
-                "Eligible operations: read={} write={} core={} context={} recall={} record={} maintenance={}",
-                row.eligible.read,
-                row.eligible.write,
-                row.eligible.core,
-                row.eligible.context,
-                row.eligible.recall,
-                row.eligible.record,
-                row.eligible.maintenance
-            ),
-        );
+        if browsing {
+            text(
+                &mut lines,
+                format!("Browse operations: read={} (read-only)", row.eligible.read),
+            );
+        } else {
+            text(
+                &mut lines,
+                format!(
+                    "Eligible operations: read={} write={} core={} context={} recall={} record={} maintenance={}",
+                    row.eligible.read,
+                    row.eligible.write,
+                    row.eligible.core,
+                    row.eligible.context,
+                    row.eligible.recall,
+                    row.eligible.record,
+                    row.eligible.maintenance
+                ),
+            );
+        }
     } else {
-        text(&mut lines, "Admission: not resolved");
-        text(&mut lines, "Activation: not resolved");
+        if browsing {
+            text(&mut lines, "Browse admission: not resolved");
+            text(
+                &mut lines,
+                "Automatic activation: not evaluated for browsing",
+            );
+        } else {
+            text(&mut lines, "Admission: not resolved");
+            text(&mut lines, "Activation: not resolved");
+        }
     }
     if let Some(report) = &app.config_report {
         let Some(store) = report.stores.get(id) else {
@@ -434,10 +476,21 @@ fn details(app: &App, id: &str, label: &str) -> Vec<Line<'static>> {
         text(
             &mut lines,
             format!(
-                "Resolution: {}",
+                "{}: {}",
+                if browsing {
+                    "Automatic policy resolution"
+                } else {
+                    "Resolution"
+                },
                 if store.blocked { "blocked" } else { "resolved" }
             ),
         );
+        if browsing && store.blocked {
+            text(
+                &mut lines,
+                "Policy diagnostics are not an owner connectivity test.",
+            );
+        }
         for conflict in report
             .conflicts
             .iter()
@@ -557,6 +610,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, screen: Rect, app: &App) {
         clean(rows[selected - 1].1)
     };
     let wide = inner.width >= 70;
+    let browsing = app
+        .config_selection
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.purpose == mneme_config::SelectionPurpose::Browse);
     let body = Rect::new(
         inner.x,
         inner.y,
@@ -583,7 +640,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, screen: Rect, app: &App) {
                 "{} {}{}",
                 if index == selected { "›" } else { " " },
                 label,
-                if blocked { " [blocked]" } else { "" }
+                if blocked && browsing {
+                    " [auto-blocked]"
+                } else if blocked {
+                    " [blocked]"
+                } else {
+                    ""
+                }
             );
             let rect = Rect::new(body.x, body.y + row as u16, width, 1);
             frame.render_widget(

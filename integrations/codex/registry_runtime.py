@@ -7,7 +7,11 @@ owner, opens a database or invents a primary store for unconfigured work. Existi
 ledgers are retained, never reset on upgrade.
 """
 from pathlib import Path
+from contextlib import contextmanager
 import hashlib
+import json
+import os
+import re
 
 from librarian_policy import resolve as resolve_budget
 from host_platform import validate_reader_codex, validate_command
@@ -150,18 +154,140 @@ def config_for_store(config, store):
     return result
 
 
-def admit_session(config, event):
-    """No old/new actor overlap or reset of paid accounting on config changes."""
+class SessionAdmissionError(ValueError):
+    """Fixed recovery diagnostics, never arbitrary native/provider exception text."""
+    MESSAGES = {
+        "busy": "Automatic memory is waiting for the previous memory worker to finish after a configuration change; it will retry at the next hook boundary.",
+        "workspace": "Automatic memory cannot reuse this session in a different workspace; start a new session there. Existing recording history is retained.",
+        "legacy_workspace": "Automatic memory needs a verified workspace binding for this older session. Start a new session, or use the documented same-session recovery; do not delete its ledgers.",
+        "changed": "Automatic memory configuration changed again during recovery; it will retry at the next hook boundary.",
+        "state": "Automatic memory could not validate retained session state. Inspect the state before retrying; do not delete ledgers or reset accounting.",
+        "adapter": "Automatic memory's hook configuration path changed; restore that path or start a new session. Existing recording history is retained.",
+        "legacy": "Automatic memory's legacy registry selection changed; quiesce its worker and start a new session. Existing recording history is retained.",
+    }
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(self.MESSAGES[reason])
+
+
+@contextmanager
+def _quiescent_reader(config, session_id):
+    """Close both worker-running and child-spawned-before-lease race windows.
+
+    Called under the main session lock. Spawn/PID publication holds the reader
+    state lock. A running worker owns its lease and then takes that state lock,
+    so taking the lease here MUST be nonblocking. No state or accounting changes.
+    """
+    import host_files
+    import reader_worker
+    from rollout_primitives import read_regular
+    path, lock = reader_worker._paths(config, session_id)
+    host_files.ensure_state_directory(path.parent)
+    try:
+        with os.fdopen(host_files.open_regular(lock, os.O_CREAT | os.O_RDWR), "rb+") as state_lock:
+            host_files.lock_file_bounded(state_lock, timeout=.5)
+            with os.fdopen(host_files.open_regular(path.with_suffix(".worker.lock"),
+                                                   os.O_CREAT | os.O_RDWR), "rb+") as lease:
+                host_files.lock_file(lease, blocking=False)
+                if os.path.lexists(path):
+                    raw = read_regular(path, reader_worker.MAX_STATE)
+                    if len(raw) > reader_worker.MAX_STATE:
+                        raise SessionAdmissionError("state")
+                    data = json.loads(raw)
+                    if not (reader_worker._valid(data, config) or reader_worker.valid_legacy_state(data, config)):
+                        raise SessionAdmissionError("state")
+                    pid, identity = data.get("worker_pid"), data.get("worker_identity")
+                    if ("worker_pid" not in data or pid is not None and (type(pid) is not int or pid <= 0)
+                            or identity is not None and not isinstance(identity, dict)
+                            or pid is None and identity is not None):
+                        raise SessionAdmissionError("state")
+                    if identity is not None and (
+                            set(identity) != {"platform", "pid", "created", "executable"}
+                            or identity.get("pid") != pid or identity.get("platform") not in ("posix", "windows")
+                            or not isinstance(identity.get("executable"), str) or not identity["executable"]
+                            or len(identity["executable"].encode()) > 32768
+                            or identity["platform"] == "posix" and (
+                                not isinstance(identity.get("created"), str) or len(identity["created"]) != 24)
+                            or identity["platform"] == "windows" and (
+                                type(identity.get("created")) is not int or identity["created"] < 0)):
+                        raise SessionAdmissionError("state")
+                    if pid is not None and reader_worker._alive(pid, identity):
+                        raise SessionAdmissionError("busy")
+                yield
+    except BlockingIOError as error:
+        raise SessionAdmissionError("busy") from error
+    except (OSError, ValueError, TypeError) as error:
+        if isinstance(error, SessionAdmissionError):
+            raise
+        raise SessionAdmissionError("state") from error
+
+
+def admit_session(config, event, *, background=False):
+    """Bind current native policy after old actors quiesce, retaining all history."""
+    return _admit_session(config, event, background=background)
+
+
+def recover_session(config, event, *, expected_state_sha256):
+    """Explicit operator recovery for an already-stranded pre-workspace binding.
+
+    The operator must independently verify the host session's cwd and supply the
+    exact retained checkpoint hash. This does not infer a workspace from config,
+    reset any ledger, run a hook lifecycle, or start a worker/provider request.
+    """
+    if (config.get("schema") != NATIVE_SCHEMA or not isinstance(expected_state_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_state_sha256) is None):
+        raise ValueError("native session recovery requires an exact checkpoint SHA-256")
+    return _admit_session(config, event, recovery_state_sha256=expected_state_sha256)
+
+
+def reader_session_current(config, session_id):
+    """Cheap native foreground fence; call while holding the reader state lock.
+
+    Lifecycle rebinding publishes under that same lock, so an old callback that
+    computed its config pin before rebinding cannot subsequently spawn or mutate
+    the reader. Never take the main lock here (the opposite lock order). Direct
+    standalone reader users without a lifecycle checkpoint keep their old API;
+    production hooks always create that checkpoint before reader admission.
+    """
+    if config.get("schema") != NATIVE_SCHEMA:
+        return True
+    from hooks import _state_path, _bounded_json, MAX_STATE, STATE_SCHEMA, HookError
+    path = _state_path(config["state_dir"], session_id)
+    if not os.path.lexists(path):
+        return True
+    try:
+        data = _bounded_json(path, MAX_STATE)
+        return (isinstance(data, dict) and data.get("schema") == STATE_SCHEMA
+                and data.get("registry_binding") == {
+                    "selection": config["frozen_selection"]["digest"],
+                    "hook_config": str(config["_config_path"])})
+    except (OSError, ValueError, TypeError, KeyError, HookError):
+        return False
+
+
+def _admit_session(config, event, *, background=False, recovery_state_sha256=None):
     from hooks import _with_state, HookError
+    from hooks import _valid_id, _state_path, _bounded_json, MAX_STATE
+    if (not isinstance(event, dict) or not _valid_id(event.get("session_id"))
+            or not isinstance(event.get("cwd"), str) or not Path(event["cwd"]).is_absolute()
+            or event.get("agent_id") or event.get("agent_type")):
+        raise SessionAdmissionError("state")
     selected = selection(config)
     current = Path(event["cwd"])
     if current != Path(selected.cwd):
-        # A new cwd may be a meaningful policy boundary. Reprepare the session
-        # rather than implicitly changing its frozen destination/paid work.
-        raise HookError("named-store session workspace changed; start a fresh session")
+        raise SessionAdmissionError("workspace")
     witness = {"selection": selected.digest, "hook_config": str(config["_config_path"])}
+    native = config.get("schema") == NATIVE_SCHEMA
     def bind(data, _now):
+        if recovery_state_sha256 is not None:
+            _, raw = _bounded_json(_state_path(config["state_dir"], event["session_id"]), MAX_STATE, with_raw=True)
+            if hashlib.sha256(raw).hexdigest() != recovery_state_sha256:
+                raise SessionAdmissionError("changed")
         previous = data.get("registry_binding")
+        workspace = data.get("registry_workspace")
+        if workspace is not None and workspace != str(current):
+            raise SessionAdmissionError("workspace")
         if previous is None:
             if data.get("turns") or data.get("context_epoch", 0):
                 raise HookError("registry upgrade requires quiesced workers and a fresh session; retain old ledgers")
@@ -170,13 +296,49 @@ def admit_session(config, event):
             if selection(config).digest != selected.digest:
                 raise HookError("named-store selection changed during admission")
             data["registry_binding"] = witness
+            if native:
+                data["registry_workspace"] = str(current)
             return None, True
         if previous != witness:
-            raise HookError("registry selection changed; quiesce worker and start a fresh session")
-        return None, False
+            if not native:
+                raise SessionAdmissionError("legacy")
+            if (not isinstance(previous, dict) or set(previous) != {"selection", "hook_config"}
+                    or not isinstance(previous["selection"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", previous["selection"]) is None):
+                raise SessionAdmissionError("state")
+            if previous["hook_config"] != witness["hook_config"]:
+                raise SessionAdmissionError("adapter")
+            if background:
+                raise SessionAdmissionError("changed")
+            if workspace is None and recovery_state_sha256 is None:
+                raise SessionAdmissionError("legacy_workspace")
+            with _quiescent_reader(config, event["session_id"]):
+                # Exact native replay reads the CURRENT boundary-key receipt,
+                # not a content-addressed archive. Refresh replaces that file;
+                # an older foreground/child cannot roll this binding backward.
+                try:
+                    if selection(config).digest != selected.digest:
+                        raise ValueError("selection changed")
+                except (OSError, ValueError, TypeError) as error:
+                    raise SessionAdmissionError("changed") from error
+                data["registry_binding"] = witness
+                data["registry_workspace"] = str(current)
+                # Publish while both reader locks are still held. _with_state
+                # must not publish later, after a waiting child acquires them.
+                from hooks import _atomic_write
+                _atomic_write(_state_path(config["state_dir"], event["session_id"]), data)
+                return {"outcome": "rebound", "previous_selection": previous["selection"],
+                        "selection": selected.digest, "workspace": str(current)}, False
+        if native and workspace is None:
+            # Matching old policy supplies a trustworthy workspace witness before
+            # future config drift; no worker or recording state needs alteration.
+            data["registry_workspace"] = str(current)
+            return {"outcome": "workspace_bound"}, True
+        return {"outcome": "unchanged"}, False
     # Foreground admission and its async wake arrive concurrently. Losing this
     # short lock must not silently discard either half of the lifecycle event.
-    _with_state(config["state_dir"], event["session_id"], bind, blocking=False, lock_timeout=.5)
+    return _with_state(config["state_dir"], event["session_id"], bind, blocking=False,
+                       lock_timeout=.5, prune_turns=False)
 
 
 NATIVE_SCHEMA = "mneme.codex-hooks.config.v13"

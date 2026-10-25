@@ -43,6 +43,7 @@ catalog = "{}"
         )
         .unwrap();
         let request = SelectionRequest {
+            purpose: Default::default(),
             mode: SelectionRequestMode::Explicit,
             user_path: Some(config.clone()),
             cwd: root.clone(),

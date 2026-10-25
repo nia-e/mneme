@@ -453,7 +453,7 @@ def _locked_state(state_dir: Path, session_id: str, *, blocking: bool = True, cr
 
 
 def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = True,
-                lock_timeout: float = 0):
+                lock_timeout: float = 0, prune_turns: bool = True):
     with _locked_state(state_dir, session_id, blocking=blocking, lock_timeout=lock_timeout) as path:
         if path.exists():
             data = _bounded_json(path, MAX_STATE)
@@ -478,12 +478,13 @@ def _with_state(state_dir: Path, session_id: str, mutate, *, blocking: bool = Tr
                 or len(set(attempts)) != len(attempts)):
             raise HookError("invalid contradiction notice metadata")
         now = time.time()
-        data["turns"] = {k: v for k, v in data["turns"].items()
-                         if _valid_id(k) and isinstance(v, dict) and isinstance(v.get("at"), (int, float))
-                         and 0 <= now - v["at"] <= TTL_SECONDS}
+        if prune_turns:
+            data["turns"] = {k: v for k, v in data["turns"].items()
+                             if _valid_id(k) and isinstance(v, dict) and isinstance(v.get("at"), (int, float))
+                             and 0 <= now - v["at"] <= TTL_SECONDS}
         result, changed = mutate(data, now)
         if changed:
-            if len(data["turns"]) > MAX_TURNS:
+            if prune_turns and len(data["turns"]) > MAX_TURNS:
                 oldest = sorted(data["turns"], key=lambda k: data["turns"][k]["at"])
                 for key in oldest[:len(data["turns"]) - MAX_TURNS]:
                     del data["turns"][key]
@@ -641,11 +642,15 @@ def _warning() -> dict[str, str]:
     return {"systemMessage": "Automatic memory temporarily disabled."}
 
 
-def _lifecycle_failure(event: dict[str, Any] | None, *, background: bool = False) -> dict[str, str]:
+def _lifecycle_failure(event: dict[str, Any] | None, *, background: bool = False,
+                       admission_error=None) -> dict[str, str]:
     # Report at session entry (including resume/compact), not every tool boundary.
     # A second notification ledger would depend on the state that just failed.
     if background or event is None or event.get("hook_event_name") != "SessionStart":
         return {}
+    from registry_runtime import SessionAdmissionError
+    if isinstance(admission_error, SessionAdmissionError):
+        return {"systemMessage": SessionAdmissionError.MESSAGES[admission_error.reason]}
     return _warning()
 
 
@@ -1625,9 +1630,9 @@ def _handle_event(event: Any, config: dict[str, Any], *, reader_background: bool
             return {}
         from registry_runtime import admit_session
         try:
-            admit_session(config, event)
-        except (ValueError, OSError, TypeError, HookError):
-            return _lifecycle_failure(event, background=reader_background)
+            admit_session(config, event, background=reader_background)
+        except (ValueError, OSError, TypeError, HookError) as error:
+            return _lifecycle_failure(event, background=reader_background, admission_error=error)
     if config.get("memory_scope") == "misc":
         if (not isinstance(event, dict) or _subagent(event)
                 or not _valid_id(event.get("session_id"))):

@@ -321,6 +321,10 @@ def _state(config: dict[str, Any], session_id: str, mutate, *, create: bool = Tr
         fd = host_files.open_regular(lock, os.O_RDWR | (os.O_CREAT if create else 0))
         with os.fdopen(fd, "rb+") as stream:
             host_files.lock_file_bounded(stream, timeout=lock_timeout)
+            if not allow_stale:
+                from registry_runtime import reader_session_current
+                if not reader_session_current(config, session_id):
+                    return False, None
             legacy_raw = None
             fresh = not os.path.lexists(path)
             if not fresh:

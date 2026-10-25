@@ -962,6 +962,14 @@ pub fn resolve_discovery(
     local: &ConfigDeclarations,
     graph: &DiscoveryGraph,
 ) -> Result<DiscoveryResolution> {
+    resolve_discovery_for_purpose(local, graph, crate::SelectionPurpose::Workspace)
+}
+
+pub(crate) fn resolve_discovery_for_purpose(
+    local: &ConfigDeclarations,
+    graph: &DiscoveryGraph,
+    purpose: crate::SelectionPurpose,
+) -> Result<DiscoveryResolution> {
     local.validate()?;
     graph.validate_for(local)?;
     let reachable = graph.reachable();
@@ -1087,6 +1095,9 @@ pub fn resolve_discovery(
             }
         }
         field_names.insert("owner".into());
+        // Workspace applicability cannot make an explicit browser lose a valid
+        // owner route. Keep identity, owner, permissions and privacy conflicts.
+        field_names.retain(|field| !purpose.ignores_applicability(field));
         let mut resolved = BTreeMap::new();
         for field in field_names {
             let (imported, shadowed) = contributors(graph, &declarations, &id, &field);
@@ -1177,6 +1188,9 @@ pub fn resolve_discovery(
             }
         }
         for scope in device_scopes {
+            if purpose.ignores_applicability(&format!("{scope}.device")) {
+                continue;
+            }
             let qualified = resolved.keys().any(|field| {
                 is_path_field(field)
                     && field

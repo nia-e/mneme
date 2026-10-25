@@ -28,6 +28,43 @@ permissions={{read={read},write={write}}}
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn explicit_browse_client_reads_disabled_owner_but_never_mutates_it() {
+    let server = fixture("operator", false, false);
+    let mut config = selection(&server.url, true, true).config;
+    config.stores.get_mut("alpha").unwrap().active.enabled = false;
+    let mut context = SelectionContext::new(std::env::current_dir().unwrap());
+    context.purpose = mneme_config::SelectionPurpose::Browse;
+    let snapshot = mneme_config::select(&config, &context).unwrap();
+    let client = ConfiguredClient::for_explicit(snapshot, "alpha").unwrap();
+    for (tool, args) in [
+        ("forget", json!({"id":NODE})),
+        ("decay", json!({})),
+        ("prune", json!({})),
+    ] {
+        let error = client.call("alpha", tool, args).await.unwrap_err();
+        assert!(
+            error.to_string().contains("permission denied"),
+            "{tool}: {error}"
+        );
+        assert_eq!(server.calls.load(Ordering::Relaxed), 0);
+    }
+    client
+        .call("alpha", "get", json!({"id":NODE}))
+        .await
+        .unwrap();
+    assert!(server.calls.load(Ordering::Relaxed) > 0);
+    let before = server.calls.load(Ordering::Relaxed);
+    assert!(
+        client
+            .call("alpha", "forget", json!({"id":NODE}))
+            .await
+            .is_err()
+    );
+    assert_eq!(server.calls.load(Ordering::Relaxed), before);
+    client.close().await;
+}
 struct Fixture {
     url: String,
     calls: Arc<AtomicUsize>,
@@ -1076,6 +1113,7 @@ catalog="{}"
         )
         .unwrap();
         let request = mneme_config::SelectionRequest {
+            purpose: Default::default(),
             mode: mneme_config::SelectionRequestMode::Explicit,
             user_path: Some(config),
             cwd: dir.clone(),

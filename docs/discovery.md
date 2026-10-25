@@ -214,6 +214,15 @@ qualified by device. Off-device omissions do not block a matching deeper
 contributor; unresolved required device scope still blocks activation. Ordinary
 local path overrides need no device qualifier.
 
+The TUI is an explicit, read-only browser: workspace activation and operation
+applicability do not hide a discovered owner. A project published with only NixOS
+roots can therefore be opened from the Mac when its shared owner route is usable.
+The Config inspector retains the automatic-policy diagnostics separately; a
+blocked device scope there is not evidence that the owner is unreachable.
+Browsing still requires read permission and respects profile/isolation and
+allowlist boundaries, owner identity checks and unresolved owner-route conflicts.
+It neither enables automatic memory nor changes the catalog acquisition rules.
+
 A remote route is a coherent bundle, not a bag of interchangeable fragments.
 Publish different complete routes for clients on different devices when necessary:
 
