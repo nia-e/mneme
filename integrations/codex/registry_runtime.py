@@ -157,13 +157,13 @@ def config_for_store(config, store):
 class SessionAdmissionError(ValueError):
     """Fixed recovery diagnostics, never arbitrary native/provider exception text."""
     MESSAGES = {
-        "busy": "Automatic memory is waiting for the previous memory worker to finish after a configuration change; it will retry at the next hook boundary.",
-        "workspace": "Automatic memory cannot reuse this session in a different workspace; start a new session there. Existing recording history is retained.",
-        "legacy_workspace": "Automatic memory needs a verified workspace binding for this older session. Start a new session, or use the documented same-session recovery; do not delete its ledgers.",
-        "changed": "Automatic memory configuration changed again during recovery; it will retry at the next hook boundary.",
-        "state": "Automatic memory could not validate retained session state. Inspect the state before retrying; do not delete ledgers or reset accounting.",
-        "adapter": "Automatic memory's hook configuration path changed; restore that path or start a new session. Existing recording history is retained.",
-        "legacy": "Automatic memory's legacy registry selection changed; quiesce its worker and start a new session. Existing recording history is retained.",
+        "busy": "Memory recovery is waiting for the previous memory worker. Retrying on the next memory event.",
+        "workspace": "This session belongs to a different workspace. Start a new session there; history is retained.",
+        "legacy_workspace": "This older session needs a verified workspace binding. Start a new session or use same-session recovery; keep its ledgers.",
+        "changed": "Memory configuration changed again during recovery. Retrying on the next memory event.",
+        "state": "Cannot validate retained session state. Inspect it before retrying; do not delete ledgers or reset accounting.",
+        "adapter": "The memory hook configuration moved. Restore its path or start a new session; history is retained.",
+        "legacy": "The legacy memory selection changed. Stop its worker, then start a new session; history is retained.",
     }
 
     def __init__(self, reason):

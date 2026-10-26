@@ -551,8 +551,9 @@ def start(config, timeout=10.0, *, lock_timeout=None):
                 raise RuntimeError("spawned service process identity unavailable; refusing to publish state")
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                if process.poll() is not None:
-                    raise RuntimeError("Mneme MCP exited during startup; inspect private log")
+                exit_status = process.poll()
+                if exit_status is not None:
+                    raise RuntimeError(f"mneme-mcp exited during startup (status {exit_status}). See {log_path}.")
                 catalog = _probe(config, timeout=0.5)
                 if catalog is not None:
                     if not _expected_catalog(config, catalog):
@@ -567,7 +568,7 @@ def start(config, timeout=10.0, *, lock_timeout=None):
                     atomic_write(_state_path(config), json.dumps(state, sort_keys=True).encode("utf-8"))
                     return {"state": "ready", "url": config.url, "pid": process.pid}
                 time.sleep(0.1)
-            raise RuntimeError("Mneme MCP startup timed out; inspect private log")
+            raise RuntimeError(f"mneme-mcp startup timed out. See {log_path}.")
         except Exception:
             _terminate_spawned(process)
             raise
@@ -712,15 +713,23 @@ def main(argv=None):
     parser.add_argument("--config", required=True, help="explicit private JSON service or connect-only config (status only)")
     parser.add_argument("action", choices=("start", "status", "stop", "restart", "print-launchd"))
     args = parser.parse_args(argv)
-    config = load_config(args.config)
-    if isinstance(config, (ConnectConfig, RemoteConfig)) and args.action != "status":
-        parser.error("connect-only config supports status, not %s; manage the host and tunnel on their owning machines" % args.action)
-    if args.action == "print-launchd":
-        sys.stdout.buffer.write(launchd_plist(config))
-        return
-    result = {"start": start, "status": status, "stop": stop, "restart": restart}[args.action](config)
+    try:
+        config = load_config(args.config)
+        if isinstance(config, (ConnectConfig, RemoteConfig)) and args.action != "status":
+            parser.error("connect-only config supports status, not %s; manage the host and tunnel on their owning machines" % args.action)
+        if args.action == "print-launchd":
+            sys.stdout.buffer.write(launchd_plist(config))
+            return 0
+        result = {"start": start, "status": status, "stop": stop, "restart": restart}[args.action](config)
+    except (OSError, ValueError, RuntimeError, McpError) as error:
+        message = " ".join(str(error).split())
+        if len(message) > 2048:
+            message = message[:2047] + "…"
+        print(f"error: {message}", file=sys.stderr)
+        return 1
     print(json.dumps(result, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -30,6 +30,25 @@
       packagesFor = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          # A dev shell's older libstdc++ can override even the complete ONNX
+          # RUNPATH before Rust starts. Keep that environment out of packaged
+          # Linux processes, without changing PATH or the caller's shell.
+          loaderEnvironment = if pkgs.stdenv.hostPlatform.isLinux then {
+            unset = [ "LD_LIBRARY_PATH" ];
+            inheritedByChildren = true;
+            nativeBinaryDirectory = "libexec/mneme";
+          } else null;
+          wrapNative = output: binaries: pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            mkdir -p "${output}/libexec/mneme"
+            ${pkgs.lib.concatMapStringsSep "\n" (name: ''
+              mv "${output}/bin/${name}" "${output}/libexec/mneme/${name}"
+              # Service process witnesses retain the selected entrypoint's argv0;
+              # Rust current_exe still identifies the actual installation source.
+              makeBinaryWrapper "${output}/libexec/mneme/${name}" "${output}/bin/${name}" \
+                --unset LD_LIBRARY_PATH --inherit-argv0
+            '') binaries}
+            (cd "${output}"; sha256sum ${pkgs.lib.concatMapStringsSep " " (name: "libexec/mneme/${name}") binaries} > share/mneme/native-binary-sha256.txt)
+          '';
           client = pkgs.rustPlatform.buildRustPackage {
             pname = "mneme-client";
             inherit version;
@@ -37,6 +56,7 @@
             cargoLock.lockFile = ./Cargo.lock;
             buildNoDefaultFeatures = true;
             cargoBuildFlags = [ "--package" "mnemed" "--package" "mneme-mcp" ];
+            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.makeBinaryWrapper ];
             # No Cozo/SQLite backend, ONNX runtime, model download, or HTTP
             # listener is included. Outbound HTTP and SSH remain available.
             checkPhase = ''
@@ -60,9 +80,11 @@
                 defaultFeatures = false;
                 features = [ ];
                 binaries = [ "mnemed" "mneme-mcp" ];
+                inherit loaderEnvironment;
               })} "$out/share/mneme/build-info.json"
             '';
             postFixup = ''
+              ${wrapNative "$out" [ "mnemed" "mneme-mcp" ]}
               (cd "$out"; sha256sum bin/mnemed bin/mneme-mcp > share/mneme/binary-sha256.txt)
             '';
             meta = {
@@ -99,7 +121,7 @@
               "mneme-mcp/cozo" "mneme-mcp/fastembed" "mneme-mcp/http"
             ];
             cargoBuildFlags = [ "--package" "mnemed" "--package" "mneme-mcp" ];
-            nativeBuildInputs = [ pkgs.pkg-config ];
+            nativeBuildInputs = [ pkgs.pkg-config pkgs.makeBinaryWrapper ];
             buildInputs = [ pkgs.openssl pkgs.sqlite replicaOrt ];
             ORT_LIB_LOCATION = "${pkgs.lib.getLib replicaOrt}";
             ORT_PREFER_DYNAMIC_LINK = "1";
@@ -126,6 +148,7 @@
                 defaultFeatures = false;
                 features = [ "cozo" "fastembed" "http" ];
                 binaries = [ "mneme-mcp" ];
+                inherit loaderEnvironment;
                 onnxRuntime = {
                   version = replicaOrt.version;
                   library = "${pkgs.lib.getLib replicaOrt}/lib/libonnxruntime.so";
@@ -144,9 +167,12 @@
                 defaultFeatures = false;
                 features = [ "cozo" "fastembed" ];
                 binaries = [ "mnemed" ];
+                inherit loaderEnvironment;
               })} "$testTools/share/mneme/build-info.json"
             '';
             postFixup = ''
+              ${wrapNative "$out" [ "mneme-mcp" ]}
+              ${wrapNative "$testTools" [ "mnemed" ]}
               (cd "$out"; sha256sum bin/mneme-mcp > share/mneme/binary-sha256.txt)
               (cd "$testTools"; sha256sum bin/mnemed > share/mneme/binary-sha256.txt)
             '';
@@ -196,6 +222,17 @@
             python3 ${./nix/replica-smoke.py} ${self.packages.${system}.replica} \
               --fixture-cli ${self.packages.${system}.replica.testTools}/bin/mnemed \
               --client-prefix ${self.packages.${system}.client}
+            touch "$out"
+          '';
+          loader-environment-smoke = pkgs.runCommand "mneme-loader-environment-smoke" {
+            nativeBuildInputs = [ pkgs.python3 pkgs.procps ];
+          } ''
+            python3 ${./nix/loader-env-smoke.py} \
+              --smoke-helper ${./nix/replica-smoke.py} \
+              --client ${self.packages.${system}.client} \
+              --replica ${self.packages.${system}.replica} \
+              --fixture-cli ${self.packages.${system}.replica.testTools}/bin/mnemed \
+              --foreign-library-dir ${pkgs.gcc15.cc.lib}/lib
             touch "$out"
           '';
         });

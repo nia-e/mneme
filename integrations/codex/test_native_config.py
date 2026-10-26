@@ -398,7 +398,7 @@ class NativeHookConfigTests(unittest.TestCase):
         logical = Path(self.value["memory_config"])
         logical.symlink_to(self.root / "absent.toml")
         with patch("store_registry.native_select", side_effect=ValueError("native configuration refused")) as select:
-            with self.assertRaisesRegex(hooks.HookError, "reprepare and use a fresh session"):
+            with self.assertRaisesRegex(hooks.HookError, "Run mnemed config inspect"):
                 self.load()
         select.assert_called_once()
         self.assertEqual(select.call_args.args[0], str(logical))
@@ -732,6 +732,7 @@ class NativeDiscoveryReplayTests(unittest.TestCase):
              patch("store_registry.time.monotonic", return_value=100), \
              patch("host_process.spawn", return_value=process) as spawn, \
              patch("host_process.BoundedPipe", return_value=pipe), \
+             patch("store_registry._NativeStderrCapture"), \
              patch("host_process.terminate_tree"):
             with registry.native_selection_budget(.5), registry.native_subprocess_group():
                 registry.native_bridge(self.binary, self.select_arguments(), timeout=15)
@@ -1040,6 +1041,7 @@ class NativeCallTests(unittest.TestCase):
         with patch("store_registry.resolve_command", return_value="/tmp/mnemed"), \
              patch("host_process.spawn", return_value=process), \
              patch("host_process.BoundedPipe", return_value=pipe), \
+             patch("store_registry._NativeStderrCapture"), \
              patch("host_process.terminate_tree"):
             response = registry.native_bridge("/tmp/mnemed", ["call"], limit=len(raw))
         self.assertIsInstance(response, dict)

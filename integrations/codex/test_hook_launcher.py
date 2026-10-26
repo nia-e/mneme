@@ -115,6 +115,49 @@ class HookLauncherTests(unittest.TestCase):
                 self.assertNotIn("private exception", output.getvalue())
                 self.assertEqual(errors.getvalue(), "")
 
+    def test_entrypoints_show_native_loader_cause_only_at_session_entry(self):
+        from store_registry import _native_command_failure
+        native = _native_command_failure(b'', 127, b'mnemed: GLIBCXX_3.4.36 not found\n')
+        error = hooks.HookError('wrapped native error')
+        error.__cause__ = native
+        for entrypoint, failed in ((hook_launcher, 'handle_event'), (hooks, '_config')):
+            for name, fields in (('SessionStart', {'source': 'resume'}), ('PostToolUse', {})):
+                for background in (False, True):
+                    output, errors = io.StringIO(), io.StringIO()
+                    raw = json.dumps({**self.event, 'hook_event_name': name, **fields}).encode()
+                    args = ['--config', str(self.path)] + (['--reader-background'] if background else [])
+                    with patch.object(entrypoint.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(raw))), \
+                         patch.object(entrypoint, failed, side_effect=error), \
+                         redirect_stdout(output), redirect_stderr(errors):
+                        self.assertEqual(entrypoint.main(args), 0)
+                    result = json.loads(output.getvalue())
+                    if name == 'SessionStart' and not background:
+                        self.assertIn('GLIBCXX_3.4.36 not found', result['systemMessage'])
+                        self.assertNotIn('See hook stderr', result['systemMessage'])
+                        self.assertIn('GLIBCXX_3.4.36 not found', errors.getvalue())
+                    else:
+                        self.assertEqual(result, {})
+                        self.assertEqual(errors.getvalue(), '')
+
+    def test_invalid_hook_config_reports_location_without_its_contents(self):
+        self.path.write_text('{\n"password": "private-config-secret",\ninvalid\n}')
+        with self.assertRaises(hooks.HookConfigError) as caught:
+            hooks._config(self.path)
+        warning = hooks._lifecycle_failure({'hook_event_name': 'SessionStart'}, admission_error=caught.exception)
+        self.assertIn('line 3, column 1', warning['systemMessage'])
+        self.assertIn(str(self.path), warning['systemMessage'])
+        self.assertNotIn('private-config-secret', warning['systemMessage'])
+
+    def test_structured_unknown_write_outcome_does_not_gain_retry_advice(self):
+        from store_registry import _native_command_failure
+        raw = json.dumps({'schema': 'mneme.config-call.v1', 'ok': False,
+                          'error': {'kind': 'transport', 'message': 'Write outcome unknown; request was not retried.'}}).encode()
+        error = _native_command_failure(raw, 1)
+        warning = hooks._lifecycle_failure({'hook_event_name': 'SessionStart'}, admission_error=error)
+        self.assertIn('Write outcome unknown; request was not retried.', warning['systemMessage'])
+        self.assertNotIn('and retry', warning['systemMessage'])
+        self.assertNotIn('Check the', warning['systemMessage'])
+
     def test_main_ignored_child_and_denied_wire_do_not_select_or_load_owner(self):
         for raw, reason in ((json.dumps({**self.event, "agent_id": "child", "tool_response": "x" * 70_000}).encode(), None),
                             (b"{invalid private payload", "invalid_json"),

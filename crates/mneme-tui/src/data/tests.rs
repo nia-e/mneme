@@ -12,6 +12,21 @@ const A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const B: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const C: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
 
+#[test]
+fn diagnostics_mark_truncation_within_the_utf8_byte_bound() {
+    assert_eq!(diagnostic_text("ordinary error"), "ordinary error");
+    assert_eq!(diagnostic_text(&"x".repeat(1024)), "x".repeat(1024));
+    for value in ["x".repeat(1025), "é🦋".repeat(300)] {
+        let error = diagnostic_text(&value);
+        assert!(error.len() <= 1024);
+        assert!(error.ends_with("… [truncated]"));
+        assert!(value.starts_with(error.trim_end_matches("… [truncated]")));
+    }
+    assert!(!diagnostic_text("failure\x1b[2J\x07").contains('\x1b'));
+    // Memory excerpts retain their existing contract, without diagnostic labels.
+    assert_eq!(text(&"x".repeat(1025), 1024), "x".repeat(1024));
+}
+
 fn catalog(id: &str) -> Value {
     json!([{"db":"project","db_id":id,"resolved_path":"/fixture.db","state":"open","in_flight":2,"backend_jobs":3}])
 }

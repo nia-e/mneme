@@ -44,7 +44,8 @@ pub(crate) struct InitArgs {
 }
 
 const SETUP_RESULT_BYTES: usize = 1024 * 1024;
-const SETUP_RECOVERY: &str = "Preserved data/configuration; resolve the reported problem, then rerun mnemed init. An installer pending.json is recovered on rerun; do not delete memory data.";
+const SETUP_RECOVERY: &str =
+    "Setup may be partial. Fix the error, then rerun mnemed init. Keep existing memory data.";
 
 /// The coordinator owns setup facts; native code owns subsequent registration.
 /// Preserve extension fields so adding registration does not erase helper receipts.
@@ -78,12 +79,15 @@ impl SetupResult {
 
     fn human(&self) -> String {
         if self.status != "configured" {
-            return format!(
-                "Project init incomplete at {}: {}\n{}\n",
-                self.stage,
+            let mut output = format!(
+                "Init incomplete: {}\n{}\n",
                 self.text("error"),
                 self.text("recovery")
             );
+            if !self.text("receipt").is_empty() {
+                output.push_str(&format!("Receipt: {}\n", self.text("receipt")));
+            }
+            return output;
         }
         let registration = self.extra.get("discovery_registration");
         let visible_registration = registration
@@ -106,7 +110,7 @@ impl SetupResult {
         );
         if self.text("integration") == "native" {
             output.push_str(&format!(
-                "Native owner {} ready; native policy unchanged ({publication}).\nNo project lifecycle hooks installed. Recording: {}.\nDevice actor presence/trust/execution not verified. Managed MCP startup is configured; a fresh Codex session is still required.\n",
+                "Owner {} ready; recording: {} (native policy unchanged).\nDiscovery: {publication}.\nStart a new Codex session. Device hook execution is unverified; no project hooks installed.\n",
                 self.text("db_id"), self.text("recording")
             ));
         } else {
@@ -119,12 +123,12 @@ impl SetupResult {
             let trust = &self.extra["hook_trust"];
             let trust_status = trust["status"].as_str().unwrap_or("");
             output.push_str(&format!(
-                "Owner {} ready; {local_registration} ({publication}).\nHippocampus: {}; recording: {}.\nHook trust: {trust_status} ({} trusted enabled hooks). Fresh-session execution is not verified.\n",
+                "Owner {} ready; {local_registration} ({publication}).\nRecall hook: {}; recording: {}.\nHooks: {trust_status} ({} trusted/enabled); execution unverified.\n",
                 self.text("db_id"), self.text("hippocampus"), self.text("recording"), trust["trusted"]
             ));
             if trust_status != "trusted" {
                 output.push_str(&format!(
-                    "Hook review remains manual ({}); use Codex /hooks. Project store/owner remain configured.\n",
+                    "Review hooks with Codex /hooks ({}).\n",
                     trust["reason"].as_str().unwrap_or("pending")
                 ));
             }
@@ -608,7 +612,7 @@ fn native_setup_source(
 pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
     if !cfg!(feature = "cozo") {
         return refuse(
-            "init requires a cozo-enabled mnemed and mneme-mcp; no project state changed",
+            "init needs cozo-enabled mnemed and mneme-mcp; install the full runtime. No project state changed",
             json,
         );
     }
@@ -618,7 +622,7 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
         .is_some_and(|selector| !selector.is_absolute() && selector != Path::new("python3"))
     {
         return refuse(
-            "init --python must be python3 or an absolute interpreter selector; relative paths and other bare names are not persisted; no project state changed",
+            "--python must be python3 or an absolute interpreter selector; no project state changed",
             json,
         );
     }
@@ -662,17 +666,29 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
     };
     let python = discover_python(args.python.as_deref()).await;
     let Some(python) = python else {
+        #[cfg(windows)]
+        let hint = "install Python 3.11+ or pass --python PATH to the interpreter, not a Windows Store alias";
+        #[cfg(not(windows))]
+        let hint = "install Python 3.11+ or pass --python /absolute/path";
+        let unavailable = match args.python.as_deref() {
+            Some(path) => format!("cannot use Python 3.11+ at {}", path.display()),
+            None => "Python 3.11+ not found on PATH".into(),
+        };
         return refuse(
-            "init needs Python 3.11+; install it explicitly or pass --python PATH to the actual interpreter (not a Windows Store alias); no project state changed",
+            &format!("{unavailable}; {hint}. No project state changed"),
             json,
         );
     };
     let bundle = match extract() {
         Ok(bundle) => bundle,
         Err(error) => {
+            #[cfg(windows)]
+            let hint = "set TEMP to a writable private directory on local NTFS";
+            #[cfg(not(windows))]
+            let hint = "set TMPDIR to a writable private directory";
             return refuse(
                 &format!(
-                    "init could not extract its private runtime bundle: {error}; use a writable private temporary directory (owned local NTFS on Windows), then retry; no project state changed"
+                    "cannot extract setup runtime: {error}; {hint}, then retry. No project state changed"
                 ),
                 json,
             );
@@ -718,9 +734,7 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
     }
     let captured = tokio::time::timeout(Duration::from_secs(180), capture_setup(&mut command))
         .await
-        .map_err(|_| -> AnyErr {
-            "project init timed out; retained state is recoverable with init again or the reported installer receipt; no cleanup of memory data attempted".into()
-        })
+        .map_err(|_| -> AnyErr { "project setup timed out".into() })
         .and_then(|result| result);
     let mut result = match captured {
         Ok((status, bytes)) => match parse_setup_result(&bytes) {
@@ -748,7 +762,7 @@ pub(crate) async fn run(args: &InitArgs, json: bool) -> Result<(), AnyErr> {
     }
     result.render(json)?;
     if result.status != "configured" {
-        return Err("project init incomplete; see setup result and recovery action above".into());
+        return Err(crate::cli_diagnostic::reported("project init incomplete"));
     }
     Ok(())
 }
@@ -760,6 +774,7 @@ pub(crate) fn refuse(message: &str, json: bool) -> Result<(), AnyErr> {
             "{}",
             serde_json::json!({"schema":"mneme.project-init.v1", "status":"incomplete", "stage":"preflight", "published":false, "error":message, "recovery":"Resolve the reported prerequisite/selector, then rerun mnemed init."})
         );
+        return Err(crate::cli_diagnostic::reported(message.to_owned()));
     }
     Err(message.to_owned().into())
 }
@@ -794,13 +809,16 @@ mod tests {
             assert!(human.starts_with("Project memory adopted: /project café\n"));
             assert!(human.contains("no publishing performed"));
             if native {
-                assert!(human.contains("Native owner"));
-                assert!(human.contains("No project lifecycle hooks installed."));
-                assert!(!human.contains("Hook review remains manual"));
+                assert!(human.contains("native policy unchanged"));
+                assert!(human.contains("no project hooks installed"));
+                assert!(human.contains("Start a new Codex session"));
+                assert!(!human.contains("Review hooks"));
             } else {
                 assert!(human.contains("locally registered"));
-                assert!(human.contains("Hook trust: pending (0 trusted enabled hooks)."));
-                assert!(human.contains("Hook review remains manual (manual)"));
+                assert!(
+                    human.contains("Hooks: pending (0 trusted/enabled); execution unverified.")
+                );
+                assert!(human.contains("Review hooks with Codex /hooks (manual)"));
             }
         }
     }
@@ -840,9 +858,7 @@ mod tests {
         assert_eq!(decoded.status, "incomplete");
         assert_eq!(
             decoded.human(),
-            format!(
-                "Project init incomplete at setup_result: malformed helper result\n{SETUP_RECOVERY}\n"
-            )
+            format!("Init incomplete: malformed helper result\n{SETUP_RECOVERY}\n")
         );
 
         let mut result =

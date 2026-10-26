@@ -263,7 +263,7 @@ fn source_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status = if app.demo {
         "DEMO"
     } else if app.error.is_some() {
-        "unavailable"
+        "read failed"
     } else {
         &source
     };
@@ -383,7 +383,7 @@ fn activity(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status = if app.demo {
         "demo · no telemetry".to_string()
     } else if app.error.is_some() {
-        "source unavailable".into()
+        "read failed".into()
     } else if let Some(activity) = &app.activity {
         if activity.feed {
             format!(
@@ -427,7 +427,7 @@ fn activity(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let event = app
             .error
             .as_ref()
-            .map(|e| (format!("! {}", single(e)), ROSE))
+            .map(|e| (format!("! C details · {}", single(e)), ROSE))
             .or_else(|| {
                 app.events
                     .front()
@@ -672,7 +672,22 @@ mod tests {
             }
             if state == LensState::Unavailable {
                 assert!(text.contains("Owner unavailable"));
+                assert!(text.contains("C details"));
+                assert!(text.contains("Search failed"));
             }
+        }
+    }
+
+    #[test]
+    fn long_search_failure_keeps_its_details_hint_on_narrow_terminals() {
+        let mut app = search_app();
+        let search = app.search.as_mut().unwrap();
+        search.state = LensState::Unavailable;
+        search.error = Some("long cause ".repeat(90));
+        for (width, height) in [(24, 9), (36, 16), (80, 24)] {
+            let text = plain_frame(width, height, &app);
+            assert!(text.contains("C details"), "{width}x{height}: {text}");
+            assert!(!text.contains("source unavailable"));
         }
     }
 
@@ -778,7 +793,7 @@ mod tests {
         let mut app = App::new(vec![], String::new(), false);
         for (busy, error, loaded, query, partial, expected) in [
             (true, false, false, "", false, "Reading this source"),
-            (false, true, false, "", false, "Map unavailable"),
+            (false, true, false, "", false, "Map read failed"),
             (false, false, false, "", false, "Map not loaded"),
             (false, false, true, "", false, "No memories in this field"),
             (false, false, true, "a cue", false, "No memories match"),
@@ -799,7 +814,8 @@ mod tests {
             // Even the minimum layout keeps the real source failure in its header.
             let text = plain_frame(24, 9, &app);
             if error {
-                assert!(text.contains("unavailable"));
+                assert!(text.contains("read failed"));
+                assert!(!text.contains("source unavailable"));
             }
         }
     }
@@ -1049,7 +1065,7 @@ mod tests {
 
         app.edge_lens.as_mut().unwrap().state = LensState::Unavailable;
         let text = plain_frame(76, 30, &app);
-        assert!(text.contains("Edges unavailable"));
+        assert!(text.contains("Edge read failed"));
         assert!(!text.contains("No edges returned"));
     }
 

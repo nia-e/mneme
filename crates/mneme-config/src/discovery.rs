@@ -223,17 +223,19 @@ impl OwnerDeclaration {
 }
 impl ConfigDeclarations {
     pub fn parse(text: &str) -> Result<Self> {
+        Self::parse_document(text, "Mneme")
+    }
+    fn parse_document(text: &str, document: &str) -> Result<Self> {
         if text.len() > MAX_CONFIG_BYTES {
             return Err(error("configuration exceeds 65536 bytes"));
         }
-        let declarations: Self = toml::from_str(text).map_err(|_| {
-            error("invalid Mneme TOML: check closed fields, types and duplicate keys")
-        })?;
+        let declarations: Self =
+            toml::from_str(text).map_err(|cause| crate::toml_error(text, cause, document))?;
         declarations.validate()?;
         Ok(declarations)
     }
     pub fn parse_overlay(text: &str) -> Result<Self> {
-        Self::parse(text)
+        Self::parse_document(text, "project")
     }
     pub fn validate(&self) -> Result<()> {
         if self.schema != CONFIG_SCHEMA {
@@ -634,9 +636,8 @@ impl PublishedCatalog {
             #[serde(default)]
             stores: BTreeMap<String, StoreDeclaration>,
         }
-        let document: Document = toml::from_str(text).map_err(|_| {
-            error("invalid discovery catalog TOML: check closed fields, types and duplicate keys")
-        })?;
+        let document: Document = toml::from_str(text)
+            .map_err(|cause| crate::toml_error(text, cause, "discovery catalog"))?;
         let catalog = Self {
             schema: document.schema,
             publisher_db_id: publisher_db_id.into(),

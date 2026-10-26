@@ -144,7 +144,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, area: Rect, app: &App) {
             if index == selected { "›" } else { " " },
             source.name,
             if source.route.is_none() {
-                " · unavailable"
+                " · not readable"
             } else {
                 ""
             }
@@ -244,7 +244,15 @@ mod tests {
             assert!(rendered.contains("Esc"));
         }
         key(&mut app, KeyCode::Down);
-        assert!(text(&app, 100, 24).contains("No configured owner route"));
+        let blocked = text(&app, 100, 24);
+        assert!(blocked.contains("No configured owner route"));
+        assert!(blocked.contains("not readable"));
+        assert!(!blocked.contains("unavailable"));
+        app.sources[1].unavailable_reason = Some("Read permission not granted".into());
+        let denied = text(&app, 100, 24);
+        assert!(denied.contains("Read permission not granted"));
+        assert!(denied.contains("not readable"));
+        assert!(!denied.contains("unavailable"));
         assert_eq!(key(&mut app, KeyCode::Enter), None);
         assert!(app.source_menu.is_some());
         assert_eq!(app.target, 0);

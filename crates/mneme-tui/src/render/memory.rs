@@ -319,7 +319,7 @@ fn edge_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
             if lens.state == LensState::Loading {
                 "Loading this memory's edges…"
             } else {
-                "Edges unavailable · e closes; reopen to retry"
+                "Edge read failed · C details · e closes; reopen to retry"
             },
             GOLD,
         )));

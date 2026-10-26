@@ -62,25 +62,30 @@ pub fn default_user_path() -> Result<PathBuf> {
     Ok(dir.join("mneme/memory.toml"))
 }
 fn load_source(path: &Path, role: &str) -> Result<(ConfigDeclarations, ConfigSource)> {
-    let source = declarative_file::read(path)?.ok_or_else(|| {
-        error("configuration file is missing; create memory.toml or choose --config")
-    })?;
-    let raw = source.bytes;
-    let text = std::str::from_utf8(&raw).map_err(|_| error("configuration must be UTF-8"))?;
-    let config = if role == "project" {
-        ConfigDeclarations::parse_overlay(text)?
-    } else {
-        ConfigDeclarations::parse(text)?
+    let load = || {
+        let source = declarative_file::read(path)?.ok_or_else(|| {
+            error("configuration file is missing; create memory.toml or choose --config")
+        })?;
+        let raw = source.bytes;
+        let text = std::str::from_utf8(&raw).map_err(|_| error("configuration must be UTF-8"))?;
+        let config = if role == "project" {
+            ConfigDeclarations::parse_overlay(text)?
+        } else {
+            ConfigDeclarations::parse(text)?
+        };
+        Ok((
+            config,
+            ConfigSource {
+                role: role.into(),
+                path: source.path,
+                sha256: sha256(&raw),
+                bytes: raw.len(),
+            },
+        ))
     };
-    Ok((
-        config,
-        ConfigSource {
-            role: role.into(),
-            path: source.path,
-            sha256: sha256(&raw),
-            bytes: raw.len(),
-        },
-    ))
+    load().map_err(|cause: crate::ConfigError| {
+        error(&format!("{role} config {}: {cause}", path.display()))
+    })
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -104,8 +104,8 @@ def main(argv=None):
         if args.reader_background:
             print(warning["systemMessage"], file=sys.stderr)
         result = {} if args.reader_background else warning
-    except (hooks.HookError, OSError, ValueError, TypeError, RecursionError):
-        result = hooks._lifecycle_failure(event, background=args.reader_background)
+    except (hooks.HookError, OSError, ValueError, TypeError, RecursionError) as exc:
+        result = hooks._lifecycle_failure(event, background=args.reader_background, admission_error=exc)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

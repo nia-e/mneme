@@ -305,6 +305,7 @@ fn every_owner_selector_is_refused_before_manifest_or_owner_access() {
             assert!(!output.status.success(), "{selector:?}");
             let error: Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(error["code"], "unsupported_selectors");
+            assert!(output.stderr.is_empty());
         }
     }
     for value in ["ambient.db", ""] {
@@ -323,9 +324,44 @@ fn every_owner_selector_is_refused_before_manifest_or_owner_access() {
         } else {
             let error: Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(error["code"], "unsupported_selectors");
-            assert!(String::from_utf8_lossy(&output.stderr).contains("MNEME_DB"));
+            assert!(error["error"].as_str().unwrap().contains("MNEME_DB"));
+            assert!(output.stderr.is_empty());
         }
     }
+}
+
+#[test]
+fn unreported_errors_use_display_once_and_leave_json_stdout_empty() {
+    let fixture = Fixture::new();
+    for json in [false, true] {
+        let mut command = fixture.command();
+        if json {
+            command.arg("--json");
+        }
+        // Rejected before owner configuration, on both output paths. The outer
+        // renderer must not invent a second JSON schema or Debug-format String.
+        command.args(["--db", "unused", "config", "inspect"]);
+        let output = fixture.run(&mut command);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "error: config commands use their own --config/--cwd selectors, not database or global owner selectors\n"
+        );
+    }
+}
+
+#[test]
+fn human_activity_failure_keeps_the_code_and_cause_once() {
+    let fixture = Fixture::new();
+    let output = fixture.run(fixture.command().args(["--db", "unused", "activity"]));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("error: unsupported_selectors: activity is local;"));
+    assert_eq!(stderr.lines().count(), 1);
+    assert_eq!(stderr.matches("MNEME_DB").count(), 1);
+    assert!(stderr.contains("--activity-config PATH"));
 }
 
 #[test]

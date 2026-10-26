@@ -58,6 +58,23 @@ shared generic only when actual consumers share its semantics: feedback's
 but deliberately cannot create a missing row. There is no general typestate or
 transaction framework around these operations.
 
+## Diagnostics
+
+Say what failed, then give the next useful action. Include the affected path or
+operation when it helps; omit implementation stages and repeated safety boilerplate
+from the headline. Report a failure once, not as both a complete receipt and a
+second generic error.
+
+Keep consequential distinctions: blocked is not unreachable, unavailable is not
+empty, and an unknown write outcome is not a failed write. Preserve partial setup
+and recovery information. Short summaries need accessible, bounded detail—not a
+discarded cause. Config diagnostics may identify a location without echoing values.
+
+Use existing typed reason codes for machine decisions. Add descriptive codes at
+their source when a consumer needs them; do not classify rendered prose or build a
+numeric catalogue for its own sake. Human wording can improve without changing
+the meaning of a code or an existing JSON receipt.
+
 ## Backends and stored generations
 
 Default native builds use the vendored **mnestic** fork of Cozo with SQLite/HNSW,

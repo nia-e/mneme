@@ -78,6 +78,7 @@ fn init_help_and_illegal_selectors_are_local_and_bounded() {
         assert_eq!(result["status"], "incomplete");
         assert_eq!(result["stage"], "preflight");
         assert_eq!(result["published"], false);
+        assert!(output.stderr.is_empty());
     }
     for selector in ["python3.14", "./python", "bin/python"] {
         let output = fixture.run(&["--json", "init", "--python", selector]);
@@ -124,6 +125,15 @@ fn explicitly_unusable_python_does_not_fall_through_or_create_state() {
     assert!(!output.status.success());
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(result["error"].as_str().unwrap().contains("Python 3.11+"));
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("/nonexistent/python")
+    );
+    assert!(output.stderr.is_empty());
+    #[cfg(not(windows))]
+    assert!(!result["error"].as_str().unwrap().contains("Windows"));
     fixture.unchanged();
 }
 
@@ -267,7 +277,7 @@ fn human_init_also_captures_json_then_renders_legacy_result_once() {
     );
     let human = String::from_utf8(output.stdout).unwrap();
     assert_eq!(human.matches("Project memory adopted:").count(), 1);
-    assert!(human.contains("Hook trust: pending (0 trusted enabled hooks)."));
+    assert!(human.contains("Hooks: pending (0 trusted/enabled); execution unverified."));
     assert!(!human.contains("mneme.project-init.v1"));
     let trace = std::fs::read_to_string(fixture.0.join("python-trace")).unwrap();
     assert_eq!(trace.lines().filter(|line| *line == "--json").count(), 1);
@@ -285,6 +295,7 @@ fn malformed_helper_result_is_incomplete_json_not_a_successful_init() {
     assert_eq!(result["status"], "incomplete");
     assert_eq!(result["stage"], "setup_result");
     assert_eq!(result["published"], false);
+    assert!(output.stderr.is_empty());
     assert!(result["error"].as_str().unwrap().contains("malformed JSON"));
     assert!(
         result["recovery"]
@@ -310,6 +321,14 @@ fn helper_error_json_is_preserved_once_with_its_recovery_receipt() {
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         expected
+    );
+    assert!(output.stderr.is_empty());
+    let human = fixture.run(&["init", "--python", python.to_str().unwrap()]);
+    assert_eq!(human.status.code(), Some(1));
+    assert!(human.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(human.stderr).unwrap(),
+        "Init incomplete: fixture conflict\nKeep and retry.\nReceipt: /fixture/pending.json\n"
     );
     assert!(!fixture.0.join(".codex").exists());
 }

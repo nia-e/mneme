@@ -46,19 +46,25 @@ fn results(frame: &mut Frame<'_>, area: Rect, search: &SearchResults) {
     if area.height < 2 {
         return;
     }
-    let coverage = match search.state {
-        LensState::Loading => "Searching… · map retained".to_owned(),
-        LensState::Unavailable => "Search unavailable · map retained".to_owned(),
-        LensState::Ready => format!(
-            "{} ranked hits · max {}{}",
-            search.page.nodes.len(),
-            crate::data::QUERY_NODES,
-            if search.page.partial {
-                " · partial"
-            } else {
-                ""
-            },
-        ),
+    let coverage = if area.height < 4 && search.error.is_some() {
+        // There is no separate error row at this height. Keep its route to the
+        // complete diagnostic visible instead of silently dropping the failure.
+        "Failed · C details".to_owned()
+    } else {
+        match search.state {
+            LensState::Loading => "Searching… · map retained".to_owned(),
+            LensState::Unavailable => "Search failed · map retained".to_owned(),
+            LensState::Ready => format!(
+                "{} ranked hits · max {}{}",
+                search.page.nodes.len(),
+                crate::data::QUERY_NODES,
+                if search.page.partial {
+                    " · partial"
+                } else {
+                    ""
+                },
+            ),
+        }
     };
     text_line(
         frame,
@@ -162,7 +168,10 @@ fn results(frame: &mut Frame<'_>, area: Rect, search: &SearchResults) {
             frame,
             Rect::new(inner.x, area.bottom() - 2, inner.width, 1),
             Line::from(s(
-                short(&format!("! {}", single(error)), usize::from(inner.width)),
+                short(
+                    &format!("! C details · {}", single(error)),
+                    usize::from(inner.width),
+                ),
                 ROSE,
             )),
         );

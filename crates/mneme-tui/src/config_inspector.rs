@@ -266,6 +266,23 @@ fn read_source(lines: &mut Vec<Line<'static>>, source: &crate::read_source::Read
 fn overview(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![];
     heading(&mut lines, "Configuration evidence");
+    let search_error = app
+        .search
+        .as_ref()
+        .filter(|_| app.search_visible())
+        .and_then(|search| search.error.as_deref());
+    if let Some(error) = search_error {
+        heading(&mut lines, "Search / detail failure");
+        text(&mut lines, error);
+    }
+    if let Some(error) = app
+        .error
+        .as_deref()
+        .filter(|error| Some(*error) != search_error)
+    {
+        heading(&mut lines, "Read failure");
+        text(&mut lines, error);
+    }
     read_source(&mut lines, &app.displayed_read_source());
     if app.demo {
         text(
@@ -273,11 +290,8 @@ fn overview(app: &App) -> Vec<Line<'static>> {
             "DEMO: synthetic configuration; no owner contact.",
         );
     }
-    if !app.config_diagnostics.is_empty() || app.error.is_some() {
-        heading(&mut lines, "Startup / source diagnostics");
-        if let Some(error) = &app.error {
-            text(&mut lines, error);
-        }
+    if !app.config_diagnostics.is_empty() {
+        heading(&mut lines, "Startup diagnostics");
         for event in &app.config_diagnostics {
             text(&mut lines, event);
         }
@@ -287,12 +301,9 @@ fn overview(app: &App) -> Vec<Line<'static>> {
             text(&mut lines, "Selection: explicit read-only browsing");
             text(
                 &mut lines,
-                "Workspace applicability is ignored; automatic memory is unchanged.",
+                "Applicability ignored; automatic memory unchanged.",
             );
-            text(
-                &mut lines,
-                "Discovery diagnostics below describe automatic policy, not owner reachability.",
-            );
+            text(&mut lines, "Policy status—not connectivity.");
         }
         text(&mut lines, format!("Profile: {}", selection.profile));
         text(
@@ -375,15 +386,12 @@ fn overview(app: &App) -> Vec<Line<'static>> {
             "No declarative report. Explicit remote/library/demo routes do not inspect ambient configuration.",
         );
     }
-    heading(&mut lines, "Metadata, not activation");
+    heading(&mut lines, "Inspection only");
     text(
         &mut lines,
-        "This inspector never opens a memory reader. Only Enter in the source picker opens an owner.",
+        "No new owner reads. Enter in the source picker opens a source.",
     );
-    text(
-        &mut lines,
-        "This view does not refresh catalogs; use config inspect --refresh for that.",
-    );
+    text(&mut lines, "Refresh: mnemed config inspect --refresh");
     lines
 }
 

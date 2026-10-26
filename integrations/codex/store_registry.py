@@ -612,9 +612,78 @@ class _NativeBridgeResponse(dict):
 class NativeCommandError(ValueError):
     """Current executable availability or protocol failure, not owner identity drift."""
 
+    def __init__(self, message, *, hint=None):
+        self.hint = hint
+        super().__init__(message)
 
-def _native_command_failure(output, status):
-    """Expose only the known bounded error envelope, never raw tool/body output."""
+
+class _NativeStderrCapture:
+    """Drain stderr without competing with the bounded native stdout protocol.
+
+    Retain only a small prefix. Short nonblocking reads let cleanup stop the
+    collector even when a descendant holds the pipe open. The borrowed stdin is
+    never written or closed by this read-only adapter.
+    """
+    LIMIT = 16 * 1024
+
+    def __init__(self, process, deadline):
+        import host_process
+        import threading
+        from types import SimpleNamespace
+        self.stream = process.stderr
+        self.pipe = host_process.BoundedPipe(
+            SimpleNamespace(stdin=process.stdin, stdout=self.stream, text_mode=False),
+            max_read_bytes=4096)
+        self.deadline = deadline
+        self.output = bytearray()
+        self.truncated = False
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._drain, name="mneme-native-stderr", daemon=True)
+        self.thread.start()
+
+    def _drain(self):
+        try:
+            while not self.stop.is_set() and time.monotonic() < self.deadline:
+                try:
+                    chunk = self.pipe.read(4096, min(self.deadline, time.monotonic() + .05))
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    break
+                available = self.LIMIT - len(self.output)
+                self.output.extend(chunk[:available])
+                self.truncated |= len(chunk) > available
+        except (OSError, ValueError):
+            pass  # Optional diagnostics must not change native operation results.
+        finally:
+            try:
+                self.stream.close()
+            except OSError:
+                pass
+
+    def finish(self):
+        # Let an exited child's remaining bytes reach EOF before requesting
+        # cancellation; merely observing its exit does not mean the pipe drained.
+        self.thread.join(timeout=.1)
+        self.stop.set()
+        self.thread.join(timeout=.2)
+        return bytes(self.output), self.truncated
+
+
+def _local_native_diagnostic(raw, truncated=False):
+    """Bound local stderr, remove control characters and common credential forms."""
+    text = raw[:2048].decode("utf-8", errors="replace")
+    text = "".join(c for c in text if c in "\n\t" or c.isprintable()).strip()
+    text = re.sub(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|token|password|secret)[\"']?\s*[:=]\s*[\"']?)[^\s,;\"']+",
+                  r"\1[redacted]", text)
+    if text and (truncated or len(raw) > 2048):
+        text += "\n[stderr truncated]"
+    return text
+
+
+def _native_command_failure(output, status, stderr=b"", stderr_truncated=False):
+    """Keep known stdout errors and bounded local stderr separate from tool bodies."""
     detail = None
     try:
         value = json.loads(output, object_pairs_hook=_unique)
@@ -624,7 +693,7 @@ def _native_command_failure(output, status):
                 and error.get("kind") in {"input", "protocol", "native", "tool", "transport"}
                 and isinstance(error.get("message"), str)):
             # The same structured diagnostics are already exposed by NativeClient.
-            # Do not retain result fields, arbitrary stderr or unknown envelopes.
+            # Do not retain result fields or unknown stdout envelopes.
             message = " ".join(error["message"].split())[:512]
             detail = {"kind": error["kind"], "message": message}
     except (ValueError, AttributeError, TypeError):
@@ -634,6 +703,7 @@ def _native_command_failure(output, status):
         message += f": {detail['kind']}: {detail['message']}"
     error = NativeCommandError(message)
     error.details = detail
+    error.diagnostic = _local_native_diagnostic(stderr, stderr_truncated)
     return error
 
 
@@ -645,7 +715,7 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
     try:
         binary = resolve_command(binary, default="mnemed")
     except ValueError as error:
-        raise NativeCommandError(str(error)) from error
+        raise NativeCommandError(str(error), hint="Check the configured executable and PATH.") from error
     if (type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 30):
         raise ValueError("invalid bounded native config request")
@@ -662,14 +732,25 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
     deadline = time.monotonic() + timeout
     try:
         process = host_process.spawn([str(binary), "--json", "config", *arguments], tree=not _native_inherited_process_group.get(),
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **options)
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
     except OSError as error:
-        raise NativeCommandError("native command could not be launched") from error
-    pipe = host_process.BoundedPipe(process, max_read_bytes=min(limit + 1, 16384))
+        raise NativeCommandError(f"cannot launch {binary}: {error.strerror or type(error).__name__}",
+                                 hint="Check the executable and its dependencies.") from error
+    pipe = stderr = None
+    output = bytearray()
     try:
+        try:
+            pipe = host_process.BoundedPipe(process, max_read_bytes=min(limit + 1, 16384))
+        except (OSError, ValueError, RuntimeError) as error:
+            raise NativeCommandError("cannot prepare native command pipes; request was not retried") from error
+        try:
+            stderr = _NativeStderrCapture(process, deadline)
+        except (OSError, ValueError, RuntimeError) as error:
+            # An already-started process still belongs to us if diagnostic
+            # preparation fails. No request input has been written; do not retry.
+            raise NativeCommandError("cannot capture native diagnostics; request was not retried") from error
         pipe.write(raw, deadline)
         process.stdin.close()
-        output = bytearray()
         while True:
             chunk = pipe.read(min(16384, limit + 1 - len(output)), deadline)
             if not chunk:
@@ -679,7 +760,8 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
                 raise NativeCommandError("native config response exceeds byte limit")
         process.wait(timeout=max(.001, deadline - time.monotonic()))
         if process.returncode:
-            raise _native_command_failure(output, process.returncode)
+            diagnostic, truncated = stderr.finish()
+            raise _native_command_failure(output, process.returncode, diagnostic, truncated)
         try:
             value = json.loads(output, object_pairs_hook=_unique)
         except ValueError as error:
@@ -690,10 +772,22 @@ def native_bridge(binary, arguments, payload=None, *, timeout=3, limit=MAX_NATIV
     except (TimeoutError, subprocess.TimeoutExpired) as error:
         raise NativeCommandError("native configuration request timed out") from error
     except OSError as error:
+        diagnostic, truncated = stderr.finish()
+        status = process.poll()
+        if status is not None and status != 0:
+            raise _native_command_failure(output, status, diagnostic, truncated) from error
         raise NativeCommandError("native configuration request interrupted") from error
     finally:
-        pipe.close()
-        host_process.terminate_tree(process, timeout=.2)
+        try:
+            host_process.terminate_tree(process, timeout=.2)
+        finally:
+            if stderr is not None:
+                stderr.finish()
+            for stream in (process.stdin, process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
 
 def native_binary_identity(binary):

@@ -42,6 +42,20 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 pub(crate) fn error(message: &str) -> ConfigError {
     ConfigError(message.into())
 }
+fn toml_error(text: &str, cause: toml::de::Error, document: &str) -> ConfigError {
+    // Parser messages and source excerpts can contain credentials or authored text.
+    // Retain only the byte span, translating it to one-based character coordinates.
+    let location = cause
+        .span()
+        .and_then(|span| text.get(..span.start))
+        .map(|before| {
+            let line = before.bytes().filter(|&byte| byte == b'\n').count() + 1;
+            let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+            format!(" at line {line}, column {column}")
+        })
+        .unwrap_or_default();
+    error(&format!("invalid {document} TOML{location}"))
+}
 pub fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -460,10 +474,8 @@ impl Config {
         if text.len() > MAX_CONFIG_BYTES {
             return Err(error("configuration exceeds 65536 bytes"));
         }
-        // Never return TOML diagnostics: they may echo credentials or authored text.
-        let config: Self = toml::from_str(text).map_err(|_| {
-            error("invalid Mneme TOML: check closed fields, types and duplicate keys")
-        })?;
+        let config: Self =
+            toml::from_str(text).map_err(|cause| toml_error(text, cause, "Mneme"))?;
         config.validate()?;
         Ok(config)
     }
@@ -471,18 +483,20 @@ impl Config {
         if text.len() > MAX_CONFIG_BYTES {
             return Err(error("configuration exceeds 65536 bytes"));
         }
-        let config: Self = toml::from_str(text).map_err(|_| {
-            error("invalid Mneme project TOML: check closed fields, types and duplicate keys")
-        })?;
+        let config: Self =
+            toml::from_str(text).map_err(|cause| toml_error(text, cause, "project"))?;
         config.validate_inner(false)?;
         Ok(config)
     }
     pub fn load(path: &Path) -> Result<Self> {
-        let source = declarative_file::read(path)?
-            .ok_or_else(|| error("configuration file does not exist"))?;
-        let text =
-            std::str::from_utf8(&source.bytes).map_err(|_| error("configuration must be UTF-8"))?;
-        Self::parse(text)
+        let load = || {
+            let source = declarative_file::read(path)?
+                .ok_or_else(|| error("configuration file does not exist"))?;
+            let text = std::str::from_utf8(&source.bytes)
+                .map_err(|_| error("configuration must be UTF-8"))?;
+            Self::parse(text)
+        };
+        load().map_err(|cause| error(&format!("{}: {cause}", path.display())))
     }
     /// Overlay addition is explicit: duplicate names/identities cannot replace a user owner.
     /// Model/process settings remain user-owned; background may only narrow; the same schema is used, not another policy language.

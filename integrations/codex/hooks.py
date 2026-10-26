@@ -98,6 +98,10 @@ class HookError(Exception):
     pass
 
 
+class HookConfigError(HookError):
+    """A local configuration diagnostic safe for the session-entry notification."""
+
+
 class ProjectFocusError(HookError):
     """Policy admission failed, with a fixed safe hook recovery diagnostic."""
 
@@ -216,7 +220,15 @@ def _valid_id(value: Any) -> bool:
 
 
 def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_digest=None) -> dict[str, Any]:
-    data, parsed_raw = _bounded_json(path, MAX_CONFIG, with_raw=True)
+    try:
+        data, parsed_raw = _bounded_json(path, MAX_CONFIG, with_raw=True)
+    except OSError as error:
+        raise HookConfigError(f"Cannot read memory hook config {path}: {error.strerror or type(error).__name__}.") from error
+    except HookError as error:
+        location = ""
+        if isinstance(error.__cause__, json.JSONDecodeError):
+            location = f" at line {error.__cause__.lineno}, column {error.__cause__.colno}"
+        raise HookConfigError(f"Invalid memory hook config{location}: {path}.") from error
     if not isinstance(data, dict):
         raise HookError("invalid hook config schema")
     if expected_selection_digest is not None and data.get("schema") != CONFIG_SCHEMA_V13:
@@ -230,9 +242,9 @@ def _config(path: Path, *, workspace_binding=None, cwd=None, expected_selection_
                       if expected_selection_digest is not None else {})
             return load(data, path, parsed_raw, workspace_binding=workspace_binding, cwd=cwd, **replay)
         except NativeCommandError as error:
-            raise HookError(f"native command unavailable or failed: {str(error)[:768]}; inspect the current executable and retry") from error
+            raise HookError(f"Memory command failed: {str(error)[:768]}") from error
         except (ValueError, OSError, TypeError, KeyError) as error:
-            raise HookError("invalid or changed named-store configuration; reprepare and use a fresh session") from error
+            raise HookConfigError("Memory configuration is invalid or changed. Run mnemed config inspect before retrying.") from error
     if data.get("schema") == CONFIG_SCHEMA_V11:
         from misc_config import validate_config
         from misc_binding import validate_binding
@@ -651,6 +663,28 @@ def _lifecycle_failure(event: dict[str, Any] | None, *, background: bool = False
     from registry_runtime import SessionAdmissionError
     if isinstance(admission_error, SessionAdmissionError):
         return {"systemMessage": SessionAdmissionError.MESSAGES[admission_error.reason]}
+    if isinstance(admission_error, HookConfigError):
+        return {"systemMessage": str(admission_error)[:640]}
+    from store_registry import NativeCommandError, _local_native_diagnostic
+    native = admission_error
+    if isinstance(native, HookError):
+        native = native.__cause__
+    if isinstance(native, NativeCommandError):
+        diagnostic = getattr(native, "diagnostic", "")
+        if diagnostic:
+            # Supplemental local output; the host may discard it, so the popup
+            # itself must carry the useful cause. Never claim a log was saved.
+            print(f"Mneme native command: {diagnostic}", file=sys.stderr)
+        message = _local_native_diagnostic(str(native).encode())
+        if diagnostic and not getattr(native, "details", None):
+            # Unknown structured stderr may contain more than a diagnostic.
+            # Plain native/loader text is useful; arbitrary JSON bodies are not.
+            if not diagnostic.lstrip().startswith(("{", "[")):
+                message = diagnostic
+        message = " ".join(message.split())[:640]
+        hint = getattr(native, "hint", None)
+        hint = f" {hint}" if hint else ""
+        return {"systemMessage": f"Automatic memory unavailable: {message.rstrip('.')}.{hint}"}
     return _warning()
 
 
@@ -1870,7 +1904,7 @@ def main(argv: list[str] | None = None) -> int:
         if (isinstance(exc, ProjectFocusError) and not args.reader_background
                 and event is not None and event.get("hook_event_name") == "SessionStart"):
             print("Memory policy invalid: check .mneme/hippocampus.md.", file=sys.stderr)
-        print(json.dumps(_lifecycle_failure(event, background=args.reader_background)))
+        print(json.dumps(_lifecycle_failure(event, background=args.reader_background, admission_error=exc)))
         return 0
 
 

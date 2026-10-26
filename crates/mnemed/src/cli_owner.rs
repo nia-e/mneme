@@ -91,8 +91,13 @@ fn parse(bytes: &[u8], path: &Path, origin: OwnerOrigin) -> Result<SelectedRemot
         return Err("CLI owner config exceeds 8192 bytes".into());
     }
     // Do not echo offending values: a mistaken URL/field may contain a secret.
-    let record: OwnerRecord = serde_json::from_slice(bytes).map_err(|_| {
-        format!("invalid CLI owner config {}; expected schema, url, database, db_id and optional ssh_mcp_port/token_env", path.display())
+    let record: OwnerRecord = serde_json::from_slice(bytes).map_err(|error| {
+        format!(
+            "invalid CLI owner config {} at line {}, column {}; check field names and types",
+            path.display(),
+            error.line(),
+            error.column()
+        )
     })?;
     if record.excluded_roots.is_some() && origin != OwnerOrigin::Misc {
         return Err("excluded_roots is supported only in shared misc.json, not project/global owner records".into());
@@ -221,7 +226,7 @@ pub(crate) fn discover_project(cwd: &Path) -> Result<Option<SelectedRemote>, Any
         // must not accidentally inherit its parent's owner. Foreign profile
         // schemas are never parsed or reinterpreted as CLI configuration.
         if directory_boundary {
-            return Err(format!("project Mneme configuration exists at {} without a CLI owner; configure .mneme/cli.json or explicitly select --remote URL / --db PATH; shared misc fallback is disabled", directory.display()).into());
+            return Err(format!("project configuration without a CLI owner: {}; configure cli.json or select --remote URL / --db PATH; shared misc fallback is disabled", directory.display()).into());
         }
         if entry_exists(&ancestor.join(".git"))? {
             return Ok(None);
@@ -251,7 +256,7 @@ pub(crate) fn resolve_store(
     if user {
         let path = user_config_path()?;
         return read_owner_record(&path, OwnerOrigin::User).map(Some).map_err(|error| {
-            format!("cannot select user CLI owner from {}: {error}; configure this owner record or select --remote URL / --db PATH explicitly (no local fallback)", path.display()).into()
+            format!("cannot select user owner from {}: {error}; fix this file or select --remote URL / --db PATH (no local fallback)", path.display()).into()
         });
     }
     let cwd = std::env::current_dir()?;
@@ -277,9 +282,11 @@ pub(crate) fn owner_config_path(origin: OwnerOrigin) -> Result<PathBuf, AnyErr> 
                 std::env::var_os("APPDATA")
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from)
-                    .or_else(|| std::env::var_os("USERPROFILE")
-                        .filter(|value| !value.is_empty())
-                        .map(|home| PathBuf::from(home).join("AppData").join("Roaming")))
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE")
+                            .filter(|value| !value.is_empty())
+                            .map(|home| PathBuf::from(home).join("AppData").join("Roaming"))
+                    })
             }
             #[cfg(not(windows))]
             {
@@ -288,7 +295,13 @@ pub(crate) fn owner_config_path(origin: OwnerOrigin) -> Result<PathBuf, AnyErr> 
                     .map(|home| PathBuf::from(home).join(".config"))
             }
         })
-        .ok_or("cannot locate CLI owner configuration; set XDG_CONFIG_HOME, APPDATA/USERPROFILE on Windows, or HOME on Unix, or select --remote URL explicitly")?;
+        .ok_or_else(|| {
+            #[cfg(windows)]
+            let hint = "set XDG_CONFIG_HOME, APPDATA or USERPROFILE";
+            #[cfg(not(windows))]
+            let hint = "set XDG_CONFIG_HOME or HOME";
+            format!("cannot locate CLI owner configuration; {hint}, or select --remote URL")
+        })?;
     Ok(root.join("mneme").join(filename))
 }
 
@@ -305,14 +318,14 @@ pub(crate) fn read_owner_record(
     }
     let selected = read_record(path, origin)?;
     if origin == OwnerOrigin::Misc && selected.remote.database != "project" {
-        return Err(format!("shared misc owner {} must select the ordinary 'project' registry database, not private user memory; repair misc.json or explicitly select --remote URL / --db PATH", path.display()).into());
+        return Err(format!("shared misc owner {} must select database 'project', not private user memory; fix misc.json or select --remote URL / --db PATH", path.display()).into());
     }
     Ok(selected)
 }
 
 fn read_misc_owner(path: &Path) -> Result<SelectedRemote, AnyErr> {
     let selected = read_owner_record(path, OwnerOrigin::Misc).map_err(|error| {
-        format!("no project CLI owner configured and cannot select shared misc owner from {}: {error}; configure this mneme.cli.owner.v1 record, enroll a project owner, or explicitly select --remote URL / --db PATH (no local fallback)", path.display())
+        format!("no project CLI owner configured; shared misc owner {}: {error}; configure this file or select --remote URL / --db PATH (no local fallback)", path.display())
     })?;
     Ok(selected)
 }
@@ -501,6 +514,23 @@ mod tests {
             Path::new("fixture/.mneme/cli.json"),
             OwnerOrigin::Project,
         )
+    }
+
+    #[test]
+    fn invalid_owner_json_reports_location_without_echoing_values_or_keys() {
+        for bytes in [
+            b"{\n  \"schema\": {\"private-key\": \"private-value\"}\n}".as_slice(),
+            b"{\n  \"private-key\": \"private-value\"\n}",
+        ] {
+            let error = match parse(bytes, Path::new("owner.json"), OwnerOrigin::Project) {
+                Ok(_) => panic!("invalid owner unexpectedly accepted"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("owner.json at line 2, column"), "{error}");
+            assert!(error.contains("check field names and types"));
+            assert!(!error.contains("private-key"));
+            assert!(!error.contains("private-value"));
+        }
     }
 
     #[test]

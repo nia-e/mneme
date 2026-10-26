@@ -34,7 +34,7 @@ fn require_local_scope(cli: &Cli) -> Result<(), &'static str> {
         || cli.connection.remote_token_env.is_some()
     {
         return Err(
-            "activity reports only the current workspace; remove --db/MNEME_DB, --user, --memory-config, --store, --profile and remote options; use --activity-config PATH for its local manifest",
+            "activity is local; remove database, owner and remote selectors (including MNEME_DB). Use --activity-config PATH for its manifest",
         );
     }
     Ok(())
@@ -50,6 +50,9 @@ fn refuse(code: &str, message: &str, json: bool) -> Result<(), AnyErr> {
                 "error": message,
             })
         );
+        return Err(crate::cli_diagnostic::reported(format!(
+            "{code}: {message}"
+        )));
     }
     Err(format!("{code}: {message}").into())
 }

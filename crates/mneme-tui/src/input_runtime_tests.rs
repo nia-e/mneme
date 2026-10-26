@@ -381,7 +381,7 @@ fn telemetry_poll_does_not_relabel_failed_or_empty_map_as_loading() {
     assert!(request(&mut app, &tx, Request::Poll));
     assert!(matches!(rx.try_recv(), Ok(Request::Poll)));
     let frame = render::preview(100, 30, &app).unwrap();
-    assert!(frame.contains("Map unavailable"));
+    assert!(frame.contains("Map read failed"));
     assert!(!frame.contains("Reading this source"));
     app.busy = false;
     app.error = None;

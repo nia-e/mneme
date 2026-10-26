@@ -899,11 +899,16 @@ database/body backups.
 
 ### Hook input omissions are not owner failures
 
-Configuration/session-ledger failures show “Automatic memory temporarily disabled.”
-at `SessionStart` (including resume/compaction), not after every prompt or tool call.
+Configuration/session-ledger failures are reported at `SessionStart` (including
+resume/compaction), not after every prompt or tool call. Known failures identify
+the configuration location, local command failure or recovery action. Unclassified
+failures still show “Automatic memory temporarily disabled.” Native command detail
+is bounded; config errors do not echo configuration contents.
+
 An incompatible or unreadable session ledger disables automatic memory. Preserve
-it and inspect the runtime/configuration and supported upgrade path above rather
-than deleting it or resetting its allowances.
+it and inspect the reported problem and supported upgrade path above; do not
+delete it or reset its allowances. Recovery waiting on a worker or a configuration
+change retries at the next memory event, not on a separate retry timer.
 This does not establish that the memory owner is offline or empty. Explicit
 checkpoint failures still return an error; input omissions retain their own
 diagnostic below.

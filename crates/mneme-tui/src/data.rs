@@ -253,7 +253,7 @@ pub async fn serve(target: Target, mut requests: Receiver<Request>, responses: S
             }
             Err(error) => {
                 discard_client(&mut client).await;
-                Response::Error(text(&error.to_string(), 1024))
+                Response::Error(diagnostic_text(&error.to_string()))
             }
         };
         if responses.send(response).await.is_err() {
@@ -683,6 +683,19 @@ fn text(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     clean(&value[..end])
+}
+
+/// Keep the diagnostic bound visible without changing memory-text excerpts.
+fn diagnostic_text(value: &str) -> String {
+    const LIMIT: usize = 1024;
+    const TRUNCATED: &str = "… [truncated]";
+    if value.len() <= LIMIT {
+        text(value, LIMIT)
+    } else {
+        let mut result = text(value, LIMIT - TRUNCATED.len());
+        result.push_str(TRUNCATED);
+        result
+    }
 }
 
 fn optional_text(value: &Value, key: &str, max_bytes: usize) -> String {

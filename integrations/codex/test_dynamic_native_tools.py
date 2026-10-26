@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -102,10 +104,86 @@ class DynamicNativeToolsTests(unittest.TestCase):
             "state_dir": str(self.root / "state"), "memory_config": self.config,
             "native_cli": "mnemed", "reader_codex": "codex"}))
         with patch("store_registry.native_select", side_effect=NativeCommandError("unavailable")):
-            with self.assertRaisesRegex(hooks.HookError, "current executable and retry") as caught:
+            with self.assertRaisesRegex(hooks.HookError, "Memory command failed: unavailable") as caught:
                 hooks._config(config, cwd=str(self.root))
         self.assertNotIn("fresh session", str(caught.exception))
         self.assertFalse((self.root / "state").exists())
+
+    def diagnostic_executable(self, body):
+        path = self.root / 'diagnostic-mnemed'
+        path.write_text('#!' + sys.executable + '\nimport os,sys,time\n' + body)
+        path.chmod(0o700)
+        return path
+
+    def test_native_loader_stderr_is_retained_without_tool_body_or_credentials(self):
+        path = self.diagnostic_executable(
+            'os.write(2, b"mnemed: libstdc++.so.6: GLIBCXX_3.4.36 not found\\nTOKEN=private-token\\n")\n'
+            'print(\'{"body":"private-tool-body"}\')\nsys.exit(127)\n')
+        with self.assertRaises(NativeCommandError) as caught:
+            native_bridge(str(path), ['select'])
+        self.assertIn('GLIBCXX_3.4.36 not found', caught.exception.diagnostic)
+        self.assertIn('[redacted]', caught.exception.diagnostic)
+        self.assertNotIn('private-token', caught.exception.diagnostic)
+        self.assertNotIn('private-tool-body', str(caught.exception) + caught.exception.diagnostic)
+        self.assertFalse(any(t.name == 'mneme-native-stderr' for t in threading.enumerate()))
+
+    def test_verbose_stderr_does_not_fail_or_block_successful_native_result(self):
+        path = self.diagnostic_executable(
+            'os.write(2, b"warning\\n" * 200000)\n' + f'print({json.dumps(self.snapshot)!r})\n')
+        self.assertEqual(native_bridge(str(path), ['select'], timeout=3), self.snapshot)
+        self.assertFalse(any(t.name == 'mneme-native-stderr' for t in threading.enumerate()))
+
+    def test_stderr_capture_stays_bounded_and_reports_truncation(self):
+        path = self.diagnostic_executable('os.write(2, b"failure " * 20000)\nsys.exit(1)\n')
+        with self.assertRaises(NativeCommandError) as caught:
+            native_bridge(str(path), ['select'])
+        self.assertLessEqual(len(caught.exception.diagnostic), 2070)
+        self.assertTrue(caught.exception.diagnostic.endswith('[stderr truncated]'))
+
+    def test_stderr_flood_timeout_cleans_reader_and_child(self):
+        path = self.diagnostic_executable('while True: os.write(2, b"warning " * 1024)\n')
+        started = time.monotonic()
+        with self.assertRaisesRegex(NativeCommandError, 'timed out'):
+            native_bridge(str(path), ['select'], timeout=.2)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertFalse(any(t.name == 'mneme-native-stderr' for t in threading.enumerate()))
+
+    def test_loader_failure_during_request_write_keeps_stderr_and_is_not_retried(self):
+        path = self.diagnostic_executable(
+            'os.close(0)\nos.write(2, b"mnemed: GLIBCXX_3.4.36 not found\\n")\nsys.exit(127)\n')
+        with self.assertRaises(NativeCommandError) as caught:
+            native_bridge(str(path), ['call'], payload={'request': 'x' * 100000})
+        self.assertIn('GLIBCXX_3.4.36 not found', caught.exception.diagnostic)
+
+    def test_stderr_collector_failure_cleans_child_and_every_pipe_before_input(self):
+        import host_process
+        path = self.diagnostic_executable('time.sleep(30)\n')
+        launched = []
+        spawn = host_process.spawn
+        def record_spawn(*args, **kwargs):
+            process = spawn(*args, **kwargs)
+            launched.append(process)
+            return process
+        with patch('host_process.spawn', side_effect=record_spawn), \
+             patch('threading.Thread.start', side_effect=RuntimeError('thread unavailable')), \
+             patch('host_process.BoundedPipe.write') as write:
+            with self.assertRaisesRegex(NativeCommandError, 'cannot capture native diagnostics; request was not retried'):
+                native_bridge(str(path), ['call'], payload={'request': 'test'})
+        write.assert_not_called()
+        self.assertEqual(len(launched), 1)
+        self.assertIsNotNone(launched[0].poll())
+        self.assertTrue(all(stream.closed for stream in (launched[0].stdin, launched[0].stdout, launched[0].stderr)))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX process group')
+    def test_descendant_held_stderr_does_not_hold_collector_open(self):
+        path = self.diagnostic_executable(
+            'import subprocess\nsubprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], '
+            'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)\n'
+            + f'print({json.dumps(self.snapshot)!r})\n')
+        started = time.monotonic()
+        self.assertEqual(native_bridge(str(path), ['select'], timeout=3), self.snapshot)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertFalse(any(t.name == 'mneme-native-stderr' for t in threading.enumerate()))
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX hook launch')
     def test_direct_default_python_skips_old_system_and_resolves_new_path_each_launch(self):

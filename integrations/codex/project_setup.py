@@ -28,6 +28,73 @@ SCHEMA = "mneme.project-init.v1"
 DB_ID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}\Z")
 
 
+class SetupError(ValueError):
+    """A bounded diagnostic, separate from the setup progress receipt."""
+
+    def __init__(self, message, *, code=None, kind=None, hint=None):
+        self.diagnostic = {"message": _diagnostic_text(message) or "Setup failed."}
+        for key, value in (("code", code), ("kind", kind)):
+            if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value):
+                self.diagnostic[key] = value
+        if isinstance(hint, str) and hint:
+            self.diagnostic["hint"] = _diagnostic_text(hint, 512)
+        super().__init__(self.diagnostic["message"])
+
+
+def _diagnostic_text(value, limit=2048):
+    printable = "".join(char for char in value if char.isprintable() or char.isspace())
+    text = " ".join(printable.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _native_failure(result):
+    """Decode supported error receipts; never echo arbitrary JSON result data."""
+    for raw in (result.stdout, result.stderr):
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        schema = value.get("schema")
+        if schema == "mneme.config-call.v1" and value.get("ok") is False:
+            error = value.get("error")
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                return SetupError(error["message"], code=error.get("code"),
+                                  kind=error.get("kind"), hint=error.get("hint"))
+        elif (schema == "mneme.session-activity.error.v1"
+              or schema == SCHEMA and value.get("status") == "incomplete"):
+            if isinstance(value.get("error"), str):
+                detail = value.get("diagnostic")
+                detail = detail if isinstance(detail, dict) else {}
+                return SetupError(value["error"], code=value.get("code", detail.get("code")),
+                                  kind=detail.get("kind"), hint=value.get("recovery"))
+    stderr = result.stderr.decode(errors="replace").strip()
+    # Unrecognized JSON can contain memory bodies or credentials, not diagnostics.
+    try:
+        json.loads(stderr)
+        structured_stderr = True
+    except ValueError:
+        structured_stderr = False
+    if stderr and not structured_stderr:
+        if stderr.startswith("error: "):
+            stderr = stderr[len("error: "):]
+        return SetupError(stderr)
+    return SetupError(f"Native setup command failed (status {result.returncode}).")
+
+
+def _recovery(stage):
+    if stage == "owner_start":
+        return "Fix the owner error, then rerun mnemed init; the existing store and setup are retained."
+    if stage == "local_registration":
+        return "Fix registration, then rerun mnemed init; the local store and owner remain configured."
+    if stage == "installer_recovery":
+        return "Fix the installer error, then rerun mnemed init to resume recovery. Keep pending.json and memory data."
+    if stage in ("store_admission", "native_overlay", "integration_install", "native_readback"):
+        return "Fix the reported issue, then rerun mnemed init. Keep existing memory data."
+    return "Fix the reported prerequisite, then rerun mnemed init."
+
+
 def read_json(path, limit=1024 * 1024):
     raw = install.read_optional(Path(path))
     if raw is None:
@@ -49,7 +116,11 @@ def executable(value, name, sibling=None):
     if source is None or str(source) == name:
         source = sibling if sibling and sibling.is_file() else shutil.which(executable_name(name))
     if source is None:
-        raise ValueError(f"{name} executable unavailable; install it explicitly or pass --{name if name != 'mneme-mcp' else 'mcp'}-binary PATH (no builds/downloads performed)")
+        option = {"mneme-mcp": "mcp", "codex": "codex"}.get(name)
+        hint = (f"Install it or pass --{option}-binary PATH, then rerun mnemed init."
+                if option else "Install it, then rerun mnemed init.")
+        raise SetupError(f"{name} not found on PATH.", code="executable_missing",
+                         hint=hint)
     source = Path(source).resolve(strict=True)
     if not is_executable(source):
         raise ValueError(f"{name} executable is not usable")
@@ -63,7 +134,7 @@ def native(mnemed, root, *args):
     if len(result.stdout) > 512 * 1024 or len(result.stderr) > 64 * 1024:
         raise ValueError("native setup response exceeds its bound")
     if result.returncode:
-        raise ValueError(result.stderr.decode(errors="replace")[:2048].strip() or "native setup refused")
+        raise _native_failure(result)
     return json.loads(result.stdout)
 
 
@@ -619,8 +690,11 @@ def main(argv=None):
     try:
         setup(args, result)
     except Exception as error:
-        result["error"] = str(error)[:2048]
-        result["recovery"] = "Preserved data/configuration; resolve the reported conflict, then rerun mnemed init. An installer pending.json is recovered on rerun; do not delete memory data."
+        result["error"] = _diagnostic_text(str(error))
+        result["recovery"] = _recovery(result["stage"])
+        if isinstance(error, SetupError):
+            result["diagnostic"] = error.diagnostic
+            result["recovery"] = error.diagnostic.get("hint", result["recovery"])
     if args.json:
         print(json.dumps(result, ensure_ascii=True))
     elif result["status"] == "configured" and result.get("integration") == "native":

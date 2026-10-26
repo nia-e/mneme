@@ -233,6 +233,84 @@ fn central_dispatch_does_not_send_any_owner_read_while_inspecting() {
 }
 
 #[test]
+fn active_search_and_detail_failure_causes_are_reachable_without_owner_reads() {
+    for detail in [false, true] {
+        for (width, height) in [(100, 30), (24, 9)] {
+            let mut app = app();
+            let map_ids: Vec<_> = app.graph.nodes.iter().map(|node| node.id.clone()).collect();
+            let mut search = SearchResults::new("a search".into());
+            search.saved_error = Some("HISTORICAL_ONLY".into());
+            search.opening = detail.then(|| "selected".into());
+            app.search = Some(search);
+            let mut pending = Some(if detail {
+                PendingRead::SearchDetail("selected".into())
+            } else {
+                PendingRead::Query("a search".into())
+            });
+            let cause = format!(
+                "CAUSE_START {} CAUSE_END",
+                (0..40)
+                    .map(|i| format!("cause segment{i:02} "))
+                    .collect::<String>()
+            );
+            apply_search_error(&mut app, &mut pending, &cause);
+            config_inspector::open(&mut app);
+            let (tx, mut rx) = mpsc::channel(2);
+            assert!(!request(&mut app, &tx, Request::Poll));
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
+            let mut seen = draw(&app, width, height);
+            let mut previous = seen.clone();
+            for _ in 0..300 {
+                press(&mut app, KeyCode::PageDown);
+                let current = draw(&app, width, height);
+                seen.push_str(&current);
+                if current == previous {
+                    break;
+                }
+                previous = current;
+            }
+            assert!(seen.contains("CAUSE_START"), "{width}x{height}: {seen}");
+            assert!(seen.contains("CAUSE_END"), "{width}x{height}: {seen}");
+            assert!(!seen.contains("HISTORICAL_ONLY"));
+            assert_eq!(
+                app.search.as_ref().unwrap().error.as_deref(),
+                Some(cause.as_str())
+            );
+            assert_eq!(
+                app.graph
+                    .nodes
+                    .iter()
+                    .map(|node| node.id.clone())
+                    .collect::<Vec<_>>(),
+                map_ids
+            );
+        }
+    }
+}
+
+#[test]
+fn inspector_hides_inactive_search_errors_and_deduplicates_active_causes() {
+    let mut app = app();
+    let mut search = SearchResults::new("a search".into());
+    search.error = Some("SHARED_CAUSE".into());
+    app.search = Some(search);
+    app.error = Some("SHARED_CAUSE".into());
+    config_inspector::open(&mut app);
+    assert_eq!(draw(&app, 100, 50).matches("SHARED_CAUSE").count(), 1);
+    for view in [View::Scenes, View::Touchstones] {
+        app.view = view;
+        app.error = Some("CURRENT_CAUSE".into());
+        let rendered = draw(&app, 100, 50);
+        assert!(!rendered.contains("SHARED_CAUSE"));
+        assert!(rendered.contains("CURRENT_CAUSE"));
+    }
+}
+
+#[test]
 fn keyboard_reaches_every_long_provenance_entry_at_normal_and_narrow_sizes() {
     let mut report = demo_config_report();
     let store = report.stores.values_mut().next().unwrap();
@@ -475,7 +553,7 @@ active = { enabled = false, workspace = "project", roots = ["/another/device"] }
     config_inspector::open(&mut app);
     let overview = draw(&app, 120, 40);
     assert!(overview.contains("explicit read-only browsing"));
-    assert!(overview.contains("automatic memory is unchanged"));
+    assert!(overview.contains("automatic memory unchanged"));
     press(&mut app, KeyCode::Right);
     let details = draw(&app, 120, 40);
     for text in [

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 /// The empty canvas and narrow inspector share the same read-state truth.
 pub(super) fn empty_message(app: &App) -> &'static str {
     if app.error.is_some() {
-        "Map unavailable · r retries"
+        "Map read failed · r retries · C details"
     } else if app.busy && app.last_refresh.is_none() {
         "Reading this source…"
     } else if app.hide_archived && !app.graph.nodes.is_empty() {

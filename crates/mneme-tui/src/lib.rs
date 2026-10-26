@@ -613,9 +613,9 @@ fn apply_response(app: &mut App, pending: &mut Option<PendingRead>, response: Re
                     return;
                 };
                 lens.state = LensState::Unavailable;
-                app.event("Edges unavailable · keeping the field");
+                app.event("Edge read failed · view retained");
             } else {
-                app.event("Source unavailable · keeping the last view");
+                app.event("Read failed · view retained");
             }
             app.error = Some(clean(&error));
             app.activity = None;

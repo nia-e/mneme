@@ -45,6 +45,22 @@ mnemed list --tag rust --limit 64
 Use `mnemed COMMAND --help` for arguments and limits. `--json` retains coverage
 and continuation metadata; `recall-context` always emits compact JSON.
 
+### Diagnosing a failure
+
+Keep the command, exit status and complete error when reporting a problem.
+For scripts, retain both stdout and stderr: commands with structured failure
+receipts keep them on stdout, but argument and other early failures may use stderr
+even with `--json`. Read a receipt's status and reason fields; don't parse its
+human message as a protocol.
+
+In the TUI, press **`C`** for configuration and read-error details. Policy blocks
+do not prove an owner is offline. An unavailable read does not mean an empty store.
+For automatic memory, `mnemed activity --session ID --details` shows recorded
+outcomes; a missing event does not establish that work succeeded or failed.
+
+After an uncertain write, check its receipt before retrying. After partial setup,
+follow the reported recovery action; deleting state is not a general repair.
+
 Semantic `query` and `recall-context` cards expose `created`: the node's original
 recording time in exact Unix epoch milliseconds. The additive `created_utc`
 companion and human output render dates as `2026-10-19T14:32:08Z`: UTC through

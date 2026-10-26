@@ -118,6 +118,38 @@ before claiming an offline semantic deployment.
 The replica output is declared only for `x86_64-linux`; AArch64 replica builds are
 not claimed by this package. Remote clients retain their existing platform matrix.
 
+### Linux development-shell loader isolation
+
+Linux `bin/` entrypoints clear **only `LD_LIBRARY_PATH`** before executing Mneme:
+both client commands, replica MCP and its `testTools` CLI. Otherwise a development
+shell's older `libstdc++.so.6` can override ONNX's packaged dependency and produce
+`GLIBCXX_* not found` before Rust starts. Installing another library is not needed.
+
+Python, SSH and other Mneme subprocesses inherit the cleared variable. The parent
+shell, `PATH`, `LD_PRELOAD` and other variables are unchanged; dynamic executable
+selection still works. Deliberate `LD_PRELOAD` overrides remain the caller's
+responsibility. Do not remove a loader path from the development shell itself.
+
+Native payloads live under `libexec/mneme/`, with separate hashes in
+`native-binary-sha256.txt`. Wrappers preserve `argv[0]` for managed-owner process
+witnesses. Init's `current_exe()` remains an installation source; current generated
+hook/service configurations retain their dynamic or explicit command selectors.
+Explicit raw paths, copied fallback binaries and historical installations are not
+retroactively isolated.
+
+For an older package, the command-scoped workaround is:
+
+```sh
+env -u LD_LIBRARY_PATH mnemed init
+```
+
+The installed check covers clean/older-GCC environments, both CLI/MCP profiles,
+and disposable native init, managed-owner identity and shutdown:
+
+```sh
+nix build --no-link .#checks.x86_64-linux.loader-environment-smoke
+```
+
 ### Private checkout boundary
 
 **Do not use `path:/path/to/a/live/mneme-checkout` as a flake input.** Nix can copy
@@ -287,6 +319,8 @@ Inspect the exact package rather than whichever binary happens to be on `PATH`:
 ```sh
 cat result/share/mneme/build-info.json
 (cd result && sha256sum -c share/mneme/binary-sha256.txt)
+# Linux packages also bind the native payload behind each launcher:
+(cd result && sha256sum -c share/mneme/native-binary-sha256.txt)
 ```
 
 The metadata binds the version, feature scope, Cargo lock hash, filtered source

@@ -62,6 +62,7 @@ mod cli_capture;
 mod cli_client;
 mod cli_concern;
 mod cli_config;
+mod cli_diagnostic;
 mod cli_edit_body;
 mod cli_edit_summary;
 mod cli_episode;
@@ -923,8 +924,12 @@ impl From<KindArg> for EdgeKind {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), AnyErr> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    cli_diagnostic::finish(run(cli).await)
+}
+
+async fn run(cli: Cli) -> Result<(), AnyErr> {
     let json = cli.json;
     // This diagnostic path must precede owner configuration and discovery. It
     // reads only the separately configured local activity manifest and records.

@@ -311,6 +311,48 @@ class ServiceTests(unittest.TestCase):
             terminate.assert_called_once_with(process)
         self.assertFalse(path.exists())
 
+    def test_startup_exit_reports_status_and_actual_log_path(self):
+        process = Mock(pid=123)
+        process.poll.return_value = 127
+        with patch("service._probe", return_value=None), \
+                patch("service.spawn", return_value=process), \
+                patch("service._terminate_spawned") as terminate:
+            with self.assertRaisesRegex(RuntimeError, "exited during startup \\(status 127\\)") as caught:
+                start(self.config)
+        self.assertIn(str(self.config.state_dir / "mneme-mcp.log"), str(caught.exception))
+        terminate.assert_called_once_with(process)
+        self.assertFalse((self.config.state_dir / "mneme-codex-service.json").exists())
+
+    def test_startup_timeout_reports_actual_log_path(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        with patch("service._probe", return_value=None), \
+                patch("service.spawn", return_value=process), \
+                patch("service._terminate_spawned") as terminate:
+            with self.assertRaisesRegex(RuntimeError, "startup timed out") as caught:
+                start(self.config, timeout=0)
+        self.assertIn(str(self.config.state_dir / "mneme-mcp.log"), str(caught.exception))
+        terminate.assert_called_once_with(process)
+
+    def test_cli_operational_failure_is_one_line_with_failure_status(self):
+        output, errors = io.StringIO(), io.StringIO()
+        with patch("service.load_config", side_effect=ValueError("invalid service config")), \
+                redirect_stdout(output), redirect_stderr(errors):
+            code = main(["--config", "/unused", "status"])
+        self.assertEqual(code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "error: invalid service config\n")
+
+    def test_cli_missing_config_exits_without_traceback(self):
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name("service.py")),
+                                 "--config", str(self.config.state_dir / "missing.json"), "status"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertTrue(result.stderr.startswith("error: "))
+        self.assertIn("missing.json", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_status_and_direct_start_require_exact_catalog_before_reuse(self):
         for config in (self.config, self._named_config()):
             path = self._record_state()

@@ -1,11 +1,12 @@
 """Disposable setup tests; never run inference, services or touch enrolled stores."""
 import argparse
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 import project_setup as setup
@@ -420,6 +421,108 @@ class ProjectSetupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "single-link"):
             self.run_setup()
         self.native.assert_not_called()
+
+class SetupDiagnosticTests(unittest.TestCase):
+    def failed_native(self, stdout=b"", stderr=b"", status=1):
+        result = subprocess.CompletedProcess([], status, stdout=stdout, stderr=stderr)
+        with patch.object(setup.subprocess, "run", return_value=result):
+            with self.assertRaises(setup.SetupError) as caught:
+                setup.native(Path("/unused/mnemed"), Path("/unused"), "capture", "inspect")
+        return caught.exception
+
+    def test_native_structured_error_is_decoded_once_with_uncertain_outcome(self):
+        message = "Write outcome is unknown; do not retry."
+        value = {"schema": "mneme.config-call.v1", "ok": False,
+                 "error": {"kind": "transport", "code": "write_uncertain", "message": message,
+                           "hint": "Inspect the receipt first."}, "result": {"body": "SECRET"}}
+        error = self.failed_native(json.dumps(value).encode(), b"error: duplicate failure")
+        self.assertEqual(str(error), message)
+        self.assertEqual(error.diagnostic, {"kind": "transport", "code": "write_uncertain",
+                                          "message": message, "hint": "Inspect the receipt first."})
+        self.assertNotIn("SECRET", str(error))
+
+    def test_known_string_error_receipts_preserve_code_or_recovery(self):
+        for value, expected in (
+            ({"schema": "mneme.session-activity.error.v1", "code": "unsupported_selectors",
+              "error": "Remove --db."}, {"code": "unsupported_selectors", "message": "Remove --db."}),
+            ({"schema": setup.SCHEMA, "status": "incomplete", "error": "Owner not ready.",
+              "recovery": "See the owner log.", "diagnostic": {"code": "owner_unavailable"}},
+             {"message": "Owner not ready.", "code": "owner_unavailable", "hint": "See the owner log."}),
+        ):
+            with self.subTest(schema=value["schema"]):
+                self.assertEqual(self.failed_native(json.dumps(value).encode()).diagnostic, expected)
+
+    def test_unrecognized_json_and_stdout_are_not_echoed(self):
+        for stdout, stderr in ((b'{"body":"SECRET"}', b''),
+                               (b'', b'{"credentials":"SECRET"}'),
+                               (b'SECRET memory content', b'')):
+            with self.subTest(stdout=stdout, stderr=stderr):
+                error = self.failed_native(stdout, stderr, status=7)
+                self.assertEqual(str(error), "Native setup command failed (status 7).")
+
+    def test_plain_stderr_remains_bounded_and_unwrapped(self):
+        error = self.failed_native(stderr=b"error: loader failed\nmissing symbol")
+        self.assertEqual(str(error), "loader failed missing symbol")
+        error = self.failed_native(stderr=b"[Errno 2] '/missing/executable'")
+        self.assertIn("/missing/executable", str(error))
+        error = self.failed_native(stderr=b"x" * 5000)
+        self.assertEqual(len(str(error)), 2048)
+        self.assertTrue(str(error).endswith("…"))
+
+    def test_native_response_bound_still_refuses_before_parsing(self):
+        for stdout, stderr in ((b"x" * (512 * 1024 + 1), b""), (b"", b"x" * (64 * 1024 + 1))):
+            with self.subTest(stdout=len(stdout), stderr=len(stderr)), \
+                    patch.object(setup.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 1, stdout=stdout, stderr=stderr)):
+                with self.assertRaisesRegex(ValueError, "response exceeds"):
+                    setup.native(Path("/unused/mnemed"), Path("/unused"), "capture", "inspect")
+
+    def test_missing_executable_has_a_specific_fix(self):
+        with patch.object(setup.shutil, "which", return_value=None):
+            with self.assertRaises(setup.SetupError) as caught:
+                setup.executable(None, "mneme-mcp")
+        self.assertEqual(str(caught.exception), "mneme-mcp not found on PATH.")
+        self.assertEqual(caught.exception.diagnostic["code"], "executable_missing")
+        self.assertIn("--mcp-binary PATH", caught.exception.diagnostic["hint"])
+
+    def test_main_keeps_receipt_and_adds_bounded_diagnostic(self):
+        output, errors = io.StringIO(), io.StringIO()
+        failure = setup.SetupError("mneme-mcp not found on PATH.", code="executable_missing",
+                                   hint="Install it, then rerun mnemed init.")
+        with patch.object(setup, "setup", side_effect=failure), \
+                redirect_stdout(output), redirect_stderr(errors):
+            code = setup.main(["--root", "/unused", "--mnemed", "/unused/mnemed",
+                               "--library-helper", "/unused/library.py", "--json"])
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(result["schema"], setup.SCHEMA)
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(result["error"], str(failure))
+        self.assertEqual(result["diagnostic"]["code"], "executable_missing")
+        self.assertEqual(result["recovery"], failure.diagnostic["hint"])
+        self.assertNotIn("pending.json", result["recovery"])
+
+    def test_main_human_error_matches_json_diagnostic_without_metadata_dump(self):
+        output, errors = io.StringIO(), io.StringIO()
+        failure = setup.SetupError("mneme-mcp not found on PATH.", code="executable_missing",
+                                   hint="Install it, then rerun mnemed init.")
+        with patch.object(setup, "setup", side_effect=failure), \
+                redirect_stdout(output), redirect_stderr(errors):
+            code = setup.main(["--root", "/unused", "--mnemed", "/unused/mnemed",
+                               "--library-helper", "/unused/library.py"])
+        self.assertEqual(code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "Project init incomplete at preflight: mneme-mcp not found on PATH.\n"
+                         "Install it, then rerun mnemed init.\n")
+
+    def test_recovery_is_stage_specific_without_blanket_preservation_claim(self):
+        self.assertNotIn("pending.json", setup._recovery("preflight"))
+        self.assertNotIn("Preserved", setup._recovery("native_readback"))
+        self.assertIn("pending.json", setup._recovery("installer_recovery"))
+        self.assertIn("store and setup are retained", setup._recovery("owner_start"))
+        self.assertIn("store and owner remain configured", setup._recovery("local_registration"))
+
 
 if __name__ == "__main__":
     unittest.main()
